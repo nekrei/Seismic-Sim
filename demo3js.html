@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Multi-Storied Building – Three.js</title>
+    <style>
+        /* ── Reset & fullscreen canvas ── */
+        * {
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            overflow: hidden;
+            background: #0b0b1a;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+
+        /* ── Info overlay ── */
+        #info {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 14px;
+            letter-spacing: 0.03em;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px 22px;
+            border-radius: 40px;
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            user-select: none;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        #info span {
+            color: rgba(255, 215, 100, 0.7);
+        }
+
+        @media (max-width: 600px) {
+            #info {
+                font-size: 11px;
+                padding: 7px 14px;
+                bottom: 16px;
+                white-space: normal;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="info">🏗️ <span>sway</span> · drag to orbit · scroll to zoom</div>
+
+    <!-- ─── Three.js import map ─── -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <!-- ─── Main application ─── -->
+    <script type="module">
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  IMPORTS
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  SCENE SETUP
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0b0b1a);
+        scene.fog = new THREE.Fog(0x0b0b1a, 25, 50);
+
+        const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(9, 7, 12);
+        camera.lookAt(0, 3.5, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.2;
+        document.body.prepend(renderer.domElement);
+
+        // ─── Controls ──────────────────────────────────────
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 3.5, 0);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.06;
+        controls.minDistance = 4;
+        controls.maxDistance = 30;
+        controls.maxPolarAngle = Math.PI / 2.1;
+        controls.update();
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  LIGHTING
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const ambientLight = new THREE.AmbientLight(0x40406b, 0.5);
+        scene.add(ambientLight);
+
+        const hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x3a1a3a, 0.8);
+        scene.add(hemiLight);
+
+        const sunLight = new THREE.DirectionalLight(0xffeedd, 2.8);
+        sunLight.position.set(10, 18, 8);
+        sunLight.castShadow = true;
+        sunLight.shadow.mapSize.width = 2048;
+        sunLight.shadow.mapSize.height = 2048;
+        sunLight.shadow.camera.near = 1;
+        sunLight.shadow.camera.far = 40;
+        sunLight.shadow.camera.left = -12;
+        sunLight.shadow.camera.right = 12;
+        sunLight.shadow.camera.top = 12;
+        sunLight.shadow.camera.bottom = -12;
+        sunLight.shadow.bias = -0.001;
+        scene.add(sunLight);
+
+        const fillLight = new THREE.DirectionalLight(0x8888ff, 0.5);
+        fillLight.position.set(-8, 6, -10);
+        scene.add(fillLight);
+
+        // optional subtle rim
+        const rimLight = new THREE.DirectionalLight(0xffaa66, 0.4);
+        rimLight.position.set(-5, 10, -8);
+        scene.add(rimLight);
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  GROUND
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const groundGeo = new THREE.PlaneGeometry(40, 40);
+        const groundMat = new THREE.MeshStandardMaterial({
+            color: 0x1a1a2e,
+            roughness: 0.8,
+            metalness: 0.1,
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = -0.01;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // subtle grid helper
+        const gridHelper = new THREE.GridHelper(30, 30, 0x444466, 0x333355);
+        gridHelper.position.y = 0;
+        scene.add(gridHelper);
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  BUILDING CONFIG
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const NUM_FLOORS = 14;
+        const FLOOR_HEIGHT = 0.55;
+        const FLOOR_GAP = 0.04;
+        const BUILDING_WIDTH = 2.8;
+        const BUILDING_DEPTH = 2.0;
+        const TOTAL_HEIGHT = NUM_FLOORS * (FLOOR_HEIGHT + FLOOR_GAP) - FLOOR_GAP;
+
+        // sway parameters
+        const MAX_SWAY_ANGLE = 0.042; // radians at roof (~2.4°)
+        const SWAY_SPEED = 0.55; // oscillation frequency
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  WINDOW TEXTURE (canvas-generated)
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        function createWindowTexture(seed = 42) {
+            const canvas = document.createElement('canvas');
+            const size = 512;
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+
+            // ── facade base ──
+            const grad = ctx.createLinearGradient(0, 0, 0, size);
+            grad.addColorStop(0, '#2c2c44');
+            grad.addColorStop(0.5, '#3a3a5a');
+            grad.addColorStop(1, '#2c2c44');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, size, size);
+
+            // ── window grid ──
+            const cols = 5;
+            const rows = 8;
+            const gap = 6;
+            const w = (size - (cols + 1) * gap) / cols;
+            const h = (size - (rows + 1) * gap) / rows;
+
+            // deterministic pseudo-random based on seed
+            let rng = seed;
+            const rand = () => {
+                rng = (rng * 9301 + 49297) % 233280;
+                return rng / 233280;
+            };
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const x = gap + c * (w + gap);
+                    const y = gap + r * (h + gap);
+
+                    // lit or unlit?
+                    const lit = rand() > 0.35;
+
+                    // window glass
+                    if (lit) {
+                        // warm lit
+                        const bright = 0.5 + rand() * 0.5;
+                        ctx.fillStyle = `rgb(${240 + 15 * rand()}, ${200 + 40 * rand()}, ${80 + 30 * rand()})`;
+                    } else {
+                        // dark / reflective
+                        const dark = 20 + rand() * 30;
+                        ctx.fillStyle = `rgb(${dark}, ${dark + 8}, ${dark + 20})`;
+                    }
+                    ctx.fillRect(x, y, w, h);
+
+                    // window frame (subtle border)
+                    ctx.strokeStyle = 'rgba(80,80,120,0.5)';
+                    ctx.lineWidth = 1.2;
+                    ctx.strokeRect(x, y, w, h);
+
+                    // inner highlight (glass reflection)
+                    if (lit) {
+                        ctx.fillStyle = 'rgba(255,255,230,0.08)';
+                        ctx.fillRect(x + 3, y + 2, w * 0.3, h * 0.15);
+                        ctx.fillStyle = 'rgba(255,255,255,0.04)';
+                        ctx.fillRect(x + 2, y + 2, w * 0.15, h * 0.4);
+                    } else {
+                        // faint reflection on dark windows
+                        ctx.fillStyle = 'rgba(100,100,160,0.04)';
+                        ctx.fillRect(x + 2, y + 2, w * 0.2, h * 0.2);
+                    }
+                }
+            }
+
+            // ── subtle horizontal floor lines ──
+            for (let r = 0; r <= rows; r++) {
+                const y = gap + r * (h + gap) - gap / 2;
+                ctx.fillStyle = 'rgba(60,60,90,0.15)';
+                ctx.fillRect(0, y, size, 1.5);
+            }
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(1, 1);
+            texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+            return texture;
+        }
+
+        const windowTexture = createWindowTexture(137);
+
+        // ─── face materials ───────────────────────────────
+        function makeFaceMaterial(texture, color = null, emissive = null) {
+            return new THREE.MeshStandardMaterial({
+                map: texture || undefined,
+                color: color || 0xffffff,
+                emissive: emissive || 0x000000,
+                emissiveIntensity: 0.0,
+                roughness: 0.65,
+                metalness: 0.2,
+                side: THREE.FrontSide,
+            });
+        }
+
+        // solid materials for sides (no window texture)
+        const sideMat = new THREE.MeshStandardMaterial({
+            color: 0x3a3a5a,
+            roughness: 0.7,
+            metalness: 0.15,
+        });
+
+        const topMat = new THREE.MeshStandardMaterial({
+            color: 0x4a4a6a,
+            roughness: 0.8,
+            metalness: 0.1,
+        });
+
+        const bottomMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2a42,
+            roughness: 0.9,
+            metalness: 0.05,
+        });
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  BUILD FLOORS
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const floorGroups = [];
+        const floorMeshes = [];
+
+        // color gradient: warm bottom → cool top
+        const colorBottom = new THREE.Color(0xc47a5a);
+        const colorTop = new THREE.Color(0x7ab8d4);
+
+        for (let i = 0; i < NUM_FLOORS; i++) {
+            const yPos = i * (FLOOR_HEIGHT + FLOOR_GAP);
+
+            // ── group at floor base ──
+            const group = new THREE.Group();
+            group.position.set(0, yPos, 0);
+            scene.add(group);
+            floorGroups.push(group);
+
+            // ── floor mesh ──
+            const geo = new THREE.BoxGeometry(BUILDING_WIDTH, FLOOR_HEIGHT, BUILDING_DEPTH);
+
+            // face order: +x, -x, +y, -y, +z, -z
+            const t = i / (NUM_FLOORS - 1);
+            const baseColor = colorBottom.clone().lerp(colorTop, t);
+            const emissiveColor = baseColor.clone().multiplyScalar(0.06);
+
+            // front & back: window texture
+            const frontMat = makeFaceMaterial(windowTexture, baseColor, emissiveColor);
+            const backMat = makeFaceMaterial(windowTexture, baseColor, emissiveColor);
+
+            // side: solid with slight color variation
+            const sideMatLocal = sideMat.clone();
+            sideMatLocal.color.copy(baseColor);
+            sideMatLocal.color.multiplyScalar(0.85);
+
+            const topMatLocal = topMat.clone();
+            topMatLocal.color.copy(baseColor);
+            topMatLocal.color.multiplyScalar(1.05);
+
+            const bottomMatLocal = bottomMat.clone();
+            bottomMatLocal.color.copy(baseColor);
+            bottomMatLocal.color.multiplyScalar(0.7);
+
+            const materials = [
+                sideMatLocal, // +x
+                sideMatLocal, // -x
+                topMatLocal, // +y
+                bottomMatLocal, // -y
+                frontMat, // +z
+                backMat, // -z
+            ];
+
+            const mesh = new THREE.Mesh(geo, materials);
+            mesh.position.y = FLOOR_HEIGHT / 2;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            group.add(mesh);
+            floorMeshes.push(mesh);
+
+            // ── subtle edge glow (thin line at floor seam) ──
+            if (i < NUM_FLOORS - 1) {
+                const edgeGeo = new THREE.BoxGeometry(
+                    BUILDING_WIDTH + 0.02,
+                    0.02,
+                    BUILDING_DEPTH + 0.02
+                );
+                const edgeMat = new THREE.MeshStandardMaterial({
+                    color: 0x6a6a9a,
+                    emissive: 0x222244,
+                    emissiveIntensity: 0.15,
+                    roughness: 0.4,
+                    metalness: 0.3,
+                    transparent: true,
+                    opacity: 0.25,
+                });
+                const edge = new THREE.Mesh(edgeGeo, edgeMat);
+                edge.position.y = FLOOR_HEIGHT;
+                group.add(edge);
+            }
+        }
+
+        // ─── ROOF (separate block on top) ──────────────────
+        const roofGroup = new THREE.Group();
+        roofGroup.position.set(0, NUM_FLOORS * (FLOOR_HEIGHT + FLOOR_GAP), 0);
+        scene.add(roofGroup);
+        floorGroups.push(roofGroup);
+
+        const roofGeo = new THREE.BoxGeometry(BUILDING_WIDTH + 0.3, 0.25, BUILDING_DEPTH + 0.3);
+        const roofMat = new THREE.MeshStandardMaterial({
+            color: 0x6a7a9a,
+            roughness: 0.3,
+            metalness: 0.5,
+            emissive: 0x223355,
+            emissiveIntensity: 0.1,
+        });
+        const roofMesh = new THREE.Mesh(roofGeo, roofMat);
+        roofMesh.position.y = 0.125;
+        roofMesh.castShadow = true;
+        roofMesh.receiveShadow = true;
+        roofGroup.add(roofMesh);
+
+        // small roof antenna / detail
+        const antGeo = new THREE.CylinderGeometry(0.03, 0.05, 0.4, 6);
+        const antMat = new THREE.MeshStandardMaterial({
+            color: 0x8899bb,
+            metalness: 0.7,
+            roughness: 0.3,
+        });
+        const ant = new THREE.Mesh(antGeo, antMat);
+        ant.position.set(0, 0.45, 0);
+        ant.castShadow = true;
+        roofGroup.add(ant);
+
+        // tiny light on antenna
+        const lightGeo = new THREE.SphereGeometry(0.05, 8, 8);
+        const lightMat = new THREE.MeshStandardMaterial({
+            color: 0xff4444,
+            emissive: 0xff2222,
+            emissiveIntensity: 0.8,
+        });
+        const lightSphere = new THREE.Mesh(lightGeo, lightMat);
+        lightSphere.position.set(0, 0.7, 0);
+        roofGroup.add(lightSphere);
+
+        // ─── store roof separately for sway reference ──────
+        const roofSwayGroup = roofGroup;
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  ENVIRONMENT / ATMOSPHERE
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // distant stars / city lights (small particles)
+        const starsGeo = new THREE.BufferGeometry();
+        const starCount = 800;
+        const starPos = new Float32Array(starCount * 3);
+        for (let i = 0; i < starCount * 3; i++) {
+            starPos[i] = (Math.random() - 0.5) * 120;
+            if (i % 3 === 1) starPos[i] = Math.abs(starPos[i]) * 0.3 + 2; // above ground
+        }
+        starsGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+        const starMat = new THREE.PointsMaterial({
+            color: 0x8888cc,
+            size: 0.08,
+            transparent: true,
+            opacity: 0.6,
+            blending: THREE.AdditiveBlending,
+        });
+        const stars = new THREE.Points(starsGeo, starMat);
+        scene.add(stars);
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  ANIMATION LOOP
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const clock = new THREE.Clock();
+
+        function animate() {
+            const elapsed = clock.getElapsedTime();
+            const time = elapsed * SWAY_SPEED;
+
+            // ── sway each floor ──
+            const totalGroups = floorGroups.length;
+            for (let i = 0; i < totalGroups; i++) {
+                const group = floorGroups[i];
+                // t: 0 at base → 1 at roof
+                const t = i / (totalGroups - 1);
+                // quadratic easing: roof moves much more than base
+                const swayFactor = t * t * 1.1;
+                // phase delay: wave travels upward
+                const phase = i * 0.12;
+                const angle = MAX_SWAY_ANGLE * swayFactor * Math.sin(time + phase);
+                group.rotation.x = angle;
+                // slight Z-axis sway for more organic motion
+                const angleZ = MAX_SWAY_ANGLE * 0.25 * swayFactor * Math.sin(time * 0.7 + phase * 0.6 + 1.2);
+                group.rotation.z = angleZ;
+            }
+
+            // ── roof light blink ──
+            const blink = Math.sin(elapsed * 2.3) * 0.5 + 0.5;
+            lightSphere.material.emissiveIntensity = 0.4 + blink * 0.8;
+
+            // ── update controls ──
+            controls.update();
+
+            // ── render ──
+            renderer.render(scene, camera);
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  RESIZE HANDLER
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        window.addEventListener('resize', () => {
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            camera.aspect = w / h;
+            camera.updateProjectionMatrix();
+            renderer.setSize(w, h);
+        });
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  KEYBOARD SHORTCUT: reset view
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'r' || e.key === 'R') {
+                camera.position.set(9, 7, 12);
+                controls.target.set(0, 3.5, 0);
+                controls.update();
+            }
+        });
+
+        // log
+        console.log('🏗️  Building with', NUM_FLOORS, 'floors · sway active');
+        console.log('🔄 Press "R" to reset camera view');
+    </script>
+</body>
+</html>

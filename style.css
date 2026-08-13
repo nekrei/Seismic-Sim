@@ -1,0 +1,9 @@
+#controls select option {
+    background: #1a1a2e;  /* dark background */
+    color: #fff;          /* white text */
+}
+
+#controls select {
+    background: rgba(11, 11, 26, 0.9); /* solid dark instead of transparent */
+    color: #fff;
+}

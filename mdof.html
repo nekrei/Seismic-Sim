@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Seismic Response – Three.js</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; background: #0b0b1a; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; }
+
+        #controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(11, 11, 26, 0.85);
+            backdrop-filter: blur(12px);
+            padding: 14px 18px;
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.08);
+            color: rgba(255,255,255,0.7);
+            font-size: 13px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-width: 200px;
+            max-width: 280px;
+            user-select: none;
+        }
+        #controls label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: rgba(255,255,255,0.4);
+        }
+        #controls select,
+        #controls input {
+            background: rgba(11, 11, 26, 0.9);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px;
+            color: #fff;
+            padding: 6px 8px;
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s;
+            width: 100%;
+        }
+        #controls select option {
+            background: #1a1a2e;
+            color: #fff;
+        }
+        #controls select:hover,
+        #controls select:focus {
+            border-color: rgba(255,215,100,0.4);
+        }
+        #controls .row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        #controls .row button {
+            background: rgba(255,215,100,0.15);
+            border: 1px solid rgba(255,215,100,0.2);
+            color: #ffd764;
+            padding: 4px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: background 0.2s;
+            flex: 1;
+        }
+        #controls .row button:hover {
+            background: rgba(255,215,100,0.25);
+        }
+        #controls .row .speed {
+            flex: 2;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        #controls .row .speed input[type="range"] {
+            flex: 1;
+            background: transparent;
+            accent-color: #ffd764;
+        }
+        #controls .row .speed span {
+            font-size: 12px;
+            min-width: 30px;
+            text-align: center;
+            color: rgba(255,255,255,0.6);
+        }
+        #controls .amplify-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #controls .amplify-row input[type="range"] {
+            flex: 1;
+            accent-color: #ffd764;
+        }
+        #controls .amplify-row span {
+            font-size: 12px;
+            min-width: 35px;
+            text-align: center;
+            color: rgba(255,255,255,0.6);
+        }
+        .seek-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+        }
+        .seek-row input[type="range"] {
+            flex: 1;
+            background: transparent;
+            accent-color: #ffd764;
+            height: 4px;
+            cursor: pointer;
+        }
+        .seek-row input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #ffd764;
+            cursor: pointer;
+            box-shadow: 0 0 8px rgba(255,215,100,0.3);
+        }
+        .seek-row input[type="range"]::-moz-range-thumb {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #ffd764;
+            cursor: pointer;
+            border: none;
+        }
+        .seek-row .time-label {
+            font-size: 11px;
+            min-width: 80px;
+            text-align: right;
+            color: rgba(255,255,255,0.5);
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        #info {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255,255,255,0.3);
+            font-size: 12px;
+            background: rgba(0,0,0,0.4);
+            padding: 6px 18px;
+            border-radius: 30px;
+            backdrop-filter: blur(4px);
+            border: 1px solid rgba(255,255,255,0.04);
+            user-select: none;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        #info span {
+            color: rgba(255,215,100,0.5);
+        }
+        #progress {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #fff;
+            font-size: 16px;
+            background: rgba(0,0,0,0.7);
+            padding: 12px 24px;
+            border-radius: 12px;
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255,255,255,0.06);
+            display: none;
+            z-index: 20;
+            text-align: center;
+            max-width: 80%;
+        }
+        @media (max-width:600px) {
+            #controls {
+                top: 12px;
+                left: 12px;
+                padding: 10px 14px;
+                min-width: 160px;
+                max-width: 220px;
+            }
+            #info {
+                font-size: 10px;
+                padding: 4px 12px;
+                bottom: 12px;
+                white-space: normal;
+            }
+            .seek-row .time-label {
+                min-width: 60px;
+                font-size: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <label>📍 Earthquake Record</label>
+        <select id="folderSelect">
+            <option value="">— loading… —</option>
+        </select>
+        <div class="row">
+            <button id="playBtn">⏸</button>
+            <div class="speed">
+                <input type="range" id="speedSlider" min="0.1" max="5" step="0.1" value="1" />
+                <span id="speedLabel">1×</span>
+            </div>
+        </div>
+        <div class="seek-row">
+            <input type="range" id="seekSlider" min="0" max="1" step="0.001" value="0" />
+            <span class="time-label" id="timeDisplay">0.0s / 0.0s</span>
+        </div>
+        <div class="amplify-row">
+            <label style="font-size:11px; color:rgba(255,255,255,0.4);">Amplify</label>
+            <input type="range" id="amplifySlider" min="1" max="50" step="0.5" value="1" />
+            <span id="amplifyLabel">1×</span>
+        </div>
+    </div>
+
+    <div id="info">🏗️ <span>seismic response</span> · drag to orbit · scroll to zoom</div>
+    <div id="progress">⏳ loading data…</div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // DOM
+        const folderSelect = document.getElementById('folderSelect');
+        const playBtn = document.getElementById('playBtn');
+        const speedSlider = document.getElementById('speedSlider');
+        const speedLabel = document.getElementById('speedLabel');
+        const amplifySlider = document.getElementById('amplifySlider');
+        const amplifyLabel = document.getElementById('amplifyLabel');
+        const seekSlider = document.getElementById('seekSlider');
+        const timeDisplay = document.getElementById('timeDisplay');
+        const progressEl = document.getElementById('progress');
+
+        // --- Scene setup ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0b0b1a);
+        scene.fog = new THREE.Fog(0x0b0b1a, 30, 60);
+
+        const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(10, 8, 14);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.2;
+        document.body.prepend(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 3, 0);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.06;
+        controls.minDistance = 3;
+        controls.maxDistance = 40;
+        controls.maxPolarAngle = Math.PI / 2.1;
+        controls.update();
+
+        // Lights
+        scene.add(new THREE.AmbientLight(0x40406b, 0.5));
+        scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a1a3a, 0.8));
+        const sunLight = new THREE.DirectionalLight(0xffeedd, 2.8);
+        sunLight.position.set(10, 18, 8);
+        sunLight.castShadow = true;
+        sunLight.shadow.mapSize.width = 2048;
+        sunLight.shadow.mapSize.height = 2048;
+        sunLight.shadow.camera.near = 1;
+        sunLight.shadow.camera.far = 40;
+        sunLight.shadow.camera.left = -15;
+        sunLight.shadow.camera.right = 15;
+        sunLight.shadow.camera.top = 15;
+        sunLight.shadow.camera.bottom = -15;
+        sunLight.shadow.bias = -0.001;
+        scene.add(sunLight);
+        scene.add(new THREE.DirectionalLight(0x8888ff, 0.5).position.set(-8, 6, -10));
+        scene.add(new THREE.DirectionalLight(0xffaa66, 0.4).position.set(-5, 10, -8));
+
+        // --- Static Ground (fixed reference) ---
+        const groundGeo = new THREE.PlaneGeometry(60, 60);
+        const groundMat = new THREE.MeshStandardMaterial({ color: 0x1a1a2e, roughness: 0.8, metalness: 0.1 });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = -0.01;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        const gridHelper = new THREE.GridHelper(50, 50, 0x444466, 0x333355);
+        gridHelper.position.y = 0;
+        scene.add(gridHelper);
+
+        // --- State ---
+        let buildingGroups = [];
+        let lightSphere = null;
+        let foundationSlab = null;
+        let timeData = [];
+        let groundXData = [],
+            groundYData = [];
+        let floorXData = [],
+            floorYData = [];
+        let currentIndex = 0;
+        let totalFrames = 0;
+        let totalDuration = 0;
+        let isPlaying = true;
+        let speed = 1.0;
+        let amplify = 1.0;
+        let animTime = 0;
+        let sceneObjects = [];
+        let isSeeking = false;
+
+        // --- Building creation ---
+        function createBuilding(numFloors, floorHeight) {
+            // Cleanup old building objects
+            for (const obj of sceneObjects) scene.remove(obj);
+            sceneObjects = [];
+            buildingGroups = [];
+
+            const groups = [];
+            const width = 2.8,
+                depth = 2.0,
+                gap = 0.04,
+                floorH = floorHeight;
+            const colorBottom = new THREE.Color(0xc47a5a);
+            const colorTop = new THREE.Color(0x7ab8d4);
+
+            function createWindowTexture() {
+                const canvas = document.createElement('canvas');
+                const size = 512;
+                canvas.width = size;
+                canvas.height = size;
+                const ctx = canvas.getContext('2d');
+                const grad = ctx.createLinearGradient(0, 0, 0, size);
+                grad.addColorStop(0, '#2c2c44');
+                grad.addColorStop(0.5, '#3a3a5a');
+                grad.addColorStop(1, '#2c2c44');
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, size, size);
+                const cols = 5,
+                    rows = 8,
+                    gapW = 6;
+                const w = (size - (cols + 1) * gapW) / cols;
+                const h = (size - (rows + 1) * gapW) / rows;
+                let rng = 42;
+                const rand = () => { rng = (rng * 9301 + 49297) % 233280; return rng / 233280; };
+                for (let r = 0; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) {
+                        const x = gapW + c * (w + gapW);
+                        const y = gapW + r * (h + gapW);
+                        const lit = rand() > 0.35;
+                        if (lit) {
+                            ctx.fillStyle = `rgb(${240 + 15 * rand()}, ${200 + 40 * rand()}, ${80 + 30 * rand()})`;
+                        } else {
+                            const dark = 20 + rand() * 30;
+                            ctx.fillStyle = `rgb(${dark}, ${dark + 8}, ${dark + 20})`;
+                        }
+                        ctx.fillRect(x, y, w, h);
+                        ctx.strokeStyle = 'rgba(80,80,120,0.5)';
+                        ctx.lineWidth = 1.2;
+                        ctx.strokeRect(x, y, w, h);
+                        if (lit) {
+                            ctx.fillStyle = 'rgba(255,255,230,0.08)';
+                            ctx.fillRect(x + 3, y + 2, w * 0.3, h * 0.15);
+                            ctx.fillStyle = 'rgba(255,255,255,0.04)';
+                            ctx.fillRect(x + 2, y + 2, w * 0.15, h * 0.4);
+                        } else {
+                            ctx.fillStyle = 'rgba(100,100,160,0.04)';
+                            ctx.fillRect(x + 2, y + 2, w * 0.2, h * 0.2);
+                        }
+                    }
+                }
+                for (let r = 0; r <= rows; r++) {
+                    const y = gapW + r * (h + gapW) - gapW / 2;
+                    ctx.fillStyle = 'rgba(60,60,90,0.15)';
+                    ctx.fillRect(0, y, size, 1.5);
+                }
+                const tex = new THREE.CanvasTexture(canvas);
+                tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+                tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+                return tex;
+            }
+            const windowTex = createWindowTexture();
+
+            for (let i = 0; i < numFloors; i++) {
+                const yPos = i * (floorH + gap);
+                const group = new THREE.Group();
+                group.position.set(0, yPos, 0);
+                scene.add(group);
+                sceneObjects.push(group);
+                groups.push(group);
+
+                const t = i / (numFloors - 1);
+                const baseColor = colorBottom.clone().lerp(colorTop, t);
+                const emissive = baseColor.clone().multiplyScalar(0.06);
+
+                const sideMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.85), roughness: 0.7, metalness: 0.15 });
+                const topMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(1.05), roughness: 0.8, metalness: 0.1 });
+                const bottomMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.7), roughness: 0.9, metalness: 0.05 });
+                const frontMat = new THREE.MeshStandardMaterial({ map: windowTex, color: baseColor, emissive: emissive, roughness: 0.65, metalness: 0.2 });
+                const backMat = frontMat.clone();
+
+                const geo = new THREE.BoxGeometry(width, floorH, depth);
+                const mats = [sideMat, sideMat, topMat, bottomMat, frontMat, backMat];
+                const mesh = new THREE.Mesh(geo, mats);
+                mesh.position.y = floorH / 2;
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                group.add(mesh);
+
+                if (i < numFloors - 1) {
+                    const edgeGeo = new THREE.BoxGeometry(width + 0.02, 0.02, depth + 0.02);
+                    const edgeMat = new THREE.MeshStandardMaterial({
+                        color: 0x6a6a9a,
+                        emissive: 0x222244,
+                        emissiveIntensity: 0.15,
+                        transparent: true,
+                        opacity: 0.25,
+                    });
+                    const edge = new THREE.Mesh(edgeGeo, edgeMat);
+                    edge.position.y = floorH;
+                    group.add(edge);
+                }
+            }
+
+            // Roof
+            const roofGroup = new THREE.Group();
+            roofGroup.position.set(0, numFloors * (floorH + gap), 0);
+            scene.add(roofGroup);
+            sceneObjects.push(roofGroup);
+            groups.push(roofGroup);
+
+            const roofGeo = new THREE.BoxGeometry(width + 0.3, 0.25, depth + 0.3);
+            const roofMat = new THREE.MeshStandardMaterial({ color: 0x6a7a9a, roughness: 0.3, metalness: 0.5, emissive: 0x223355, emissiveIntensity: 0.1 });
+            const roofMesh = new THREE.Mesh(roofGeo, roofMat);
+            roofMesh.position.y = 0.125;
+            roofMesh.castShadow = true;
+            roofMesh.receiveShadow = true;
+            roofGroup.add(roofMesh);
+
+            const antGeo = new THREE.CylinderGeometry(0.03, 0.05, 0.4, 6);
+            const antMat = new THREE.MeshStandardMaterial({ color: 0x8899bb, metalness: 0.7, roughness: 0.3 });
+            const ant = new THREE.Mesh(antGeo, antMat);
+            ant.position.set(0, 0.45, 0);
+            ant.castShadow = true;
+            roofGroup.add(ant);
+
+            const lightGeo = new THREE.SphereGeometry(0.05, 8, 8);
+            const lightMat = new THREE.MeshStandardMaterial({ color: 0xff4444, emissive: 0xff2222, emissiveIntensity: 0.8 });
+            const lightSphere = new THREE.Mesh(lightGeo, lightMat);
+            lightSphere.position.set(0, 0.7, 0);
+            roofGroup.add(lightSphere);
+
+            buildingGroups = groups;
+            return { groups, lightSphere, totalHeight: numFloors * (floorH + gap) };
+        }
+
+        // --- Create foundation slab (moves with ground) ---
+        function createFoundationSlab() {
+            if (foundationSlab) {
+                scene.remove(foundationSlab);
+                foundationSlab = null;
+            }
+            // Make it wider and thicker
+            const slabWidth = 6.0;   // was 4.0
+            const slabDepth = 5.0;   // was 3.0
+            const slabHeight = 0.4;  // was 0.2
+            const geo = new THREE.BoxGeometry(slabWidth, slabHeight, slabDepth);
+            const mat = new THREE.MeshStandardMaterial({
+                color: 0x4a4a6a, // slightly lighter to stand out
+                roughness: 0.9,
+                metalness: 0.1,
+            });
+            foundationSlab = new THREE.Mesh(geo, mat);
+            // Position it so its top is at y=0 (ground level)
+            foundationSlab.position.y = -slabHeight / 2;
+            foundationSlab.receiveShadow = true;
+            foundationSlab.castShadow = true;
+            scene.add(foundationSlab);
+            // Add to sceneObjects so it gets cleaned up when switching earthquake
+            sceneObjects.push(foundationSlab);
+            return foundationSlab;
+        }
+
+        // --- Load data for a folder ---
+        async function loadFolderData(folder) {
+            if (!folder) return;
+            progressEl.style.display = 'block';
+            progressEl.textContent = `⏳ loading ${folder}…`;
+
+            try {
+                const metaUrl = `out/${folder}/building_data.json`;
+                const metaRes = await fetch(metaUrl);
+                if (!metaRes.ok) throw new Error(`Cannot load ${metaUrl} (${metaRes.status})`);
+                const meta = await metaRes.json();
+                const numStories = meta.num_stories;
+                const storyHeight = meta.story_height;
+
+                const [xRes, yRes] = await Promise.all([
+                    fetch(`out/${folder}/response_X.csv`),
+                    fetch(`out/${folder}/response_Y.csv`)
+                ]);
+                if (!xRes.ok || !yRes.ok) throw new Error(`CSV files not found (X:${xRes.status}, Y:${yRes.status})`);
+
+                const xText = await xRes.text();
+                const yText = await yRes.text();
+
+                function parseCSV(text) {
+                    const lines = text.trim().split('\n');
+                    const header = lines[0].split(',').map(s => s.trim());
+                    const data = [];
+                    for (let i = 1; i < lines.length; i++) {
+                        const vals = lines[i].split(',').map(s => parseFloat(s.trim()));
+                        if (vals.some(isNaN)) continue;
+                        data.push(vals);
+                    }
+                    return { header, data };
+                }
+
+                const xParsed = parseCSV(xText);
+                const yParsed = parseCSV(yText);
+
+                const minLen = Math.min(xParsed.data.length, yParsed.data.length);
+                xParsed.data = xParsed.data.slice(0, minLen);
+                yParsed.data = yParsed.data.slice(0, minLen);
+
+                const time = xParsed.data.map(row => row[0]);
+                const groundX = xParsed.data.map(row => row[1]);
+                const groundY = yParsed.data.map(row => row[1]);
+
+                const floorX = [],
+                    floorY = [];
+                for (let f = 0; f < numStories; f++) {
+                    const colX = 2 + f,
+                        colY = 2 + f;
+                    if (colX < xParsed.data[0].length && colY < yParsed.data[0].length) {
+                        floorX.push(xParsed.data.map(row => row[colX]));
+                        floorY.push(yParsed.data.map(row => row[colY]));
+                    } else {
+                        floorX.push(new Array(time.length).fill(0));
+                        floorY.push(new Array(time.length).fill(0));
+                    }
+                }
+
+                console.log(`📊 Ground X range: ${Math.min(...groundX).toFixed(4)} to ${Math.max(...groundX).toFixed(4)} m`);
+                console.log(`📊 Ground Y range: ${Math.min(...groundY).toFixed(4)} to ${Math.max(...groundY).toFixed(4)} m`);
+
+                // Build building
+                const { groups, lightSphere: light, totalHeight } = createBuilding(numStories, storyHeight);
+                lightSphere = light;
+
+                // Create foundation slab (moves with ground)
+                createFoundationSlab();
+
+                // Store data
+                timeData = time;
+                groundXData = groundX;
+                groundYData = groundY;
+                floorXData = floorX;
+                floorYData = floorY;
+                totalFrames = time.length;
+                totalDuration = timeData[timeData.length - 1] - timeData[0];
+                animTime = 0;
+                currentIndex = 0;
+
+                // Update seek bar
+                seekSlider.min = 0;
+                seekSlider.max = totalDuration;
+                seekSlider.value = 0;
+                timeDisplay.textContent = `0.0s / ${totalDuration.toFixed(1)}s`;
+
+                const maxDim = Math.max(totalHeight, 6);
+                camera.position.set(maxDim * 1.2, maxDim * 0.7, maxDim * 1.5);
+                controls.target.set(0, totalHeight / 2, 0);
+                controls.update();
+
+                progressEl.style.display = 'none';
+                console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
+            } catch (err) {
+                console.error('❌ Error loading folder:', err);
+                progressEl.textContent = `❌ ${err.message}`;
+                progressEl.style.color = '#ff6b6b';
+                setTimeout(() => { progressEl.style.display = 'none'; }, 5000);
+            }
+        }
+
+        // --- Populate dropdown ---
+        async function populateFolders() {
+            try {
+                const res = await fetch('out/folders.json');
+                if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+                const data = await res.json();
+                const folders = data.folders || [];
+                if (folders.length === 0) {
+                    folderSelect.innerHTML = '<option value="">— no data —</option>';
+                    return;
+                }
+                folderSelect.innerHTML = '';
+                for (const f of folders) {
+                    const opt = document.createElement('option');
+                    opt.value = f;
+                    opt.textContent = f;
+                    folderSelect.appendChild(opt);
+                }
+                folderSelect.value = folders[0];
+                await loadFolderData(folders[0]);
+            } catch (err) {
+                console.error('❌ Failed to load manifest:', err);
+                progressEl.textContent = `⚠️ Could not load folder list: ${err.message}`;
+                progressEl.style.display = 'block';
+                const params = new URLSearchParams(window.location.search);
+                const folderParam = params.get('folder');
+                if (folderParam) {
+                    folderSelect.innerHTML = `<option value="${folderParam}">${folderParam}</option>`;
+                    await loadFolderData(folderParam);
+                }
+            }
+        }
+
+        // --- Animation loop ---
+        let lastTime = 0;
+
+        function animate(now) {
+            requestAnimationFrame(animate);
+
+            if (!timeData.length || !buildingGroups.length) {
+                renderer.render(scene, camera);
+                return;
+            }
+
+            const delta = lastTime ? Math.min((now - lastTime) / 1000, 0.05) : 0.016;
+            lastTime = now;
+
+            if (isPlaying && !isSeeking) {
+                animTime += delta * speed;
+                if (totalDuration > 0) {
+                    if (animTime > totalDuration) animTime = animTime % totalDuration;
+                    const dt = (timeData[1] - timeData[0]) || 0.01;
+                    const idx = Math.floor(animTime / dt);
+                    currentIndex = Math.min(idx, totalFrames - 1);
+                }
+                seekSlider.value = animTime;
+                timeDisplay.textContent = `${animTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`;
+            }
+
+            const idx = currentIndex;
+            const scale = amplify;
+
+            // Ground displacement (for the slab)
+            const gx = (groundXData[idx] || 0) * scale;
+            const gy = (groundYData[idx] || 0) * scale;
+
+            // Move the foundation slab with the ground
+            if (foundationSlab) {
+                foundationSlab.position.x = gx;
+                foundationSlab.position.z = gy;
+            }
+
+            // Update floors (their absolute positions already include ground displacement)
+            for (let f = 0; f < buildingGroups.length; f++) {
+                const group = buildingGroups[f];
+                const isRoof = (f === buildingGroups.length - 1);
+                let fx = 0,
+                    fy = 0;
+                if (!isRoof) {
+                    fx = (floorXData[f]?.[idx] || 0) * scale;
+                    fy = (floorYData[f]?.[idx] || 0) * scale;
+                } else {
+                    const lastFloor = floorXData.length - 1;
+                    fx = (floorXData[lastFloor]?.[idx] || 0) * scale;
+                    fy = (floorYData[lastFloor]?.[idx] || 0) * scale;
+                }
+                group.position.x = fx;
+                group.position.z = fy;
+            }
+
+            // Blink roof light
+            if (lightSphere) {
+                const blink = Math.sin(animTime * 2.3) * 0.5 + 0.5;
+                lightSphere.material.emissiveIntensity = 0.4 + blink * 0.8;
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        // --- Event bindings ---
+        folderSelect.addEventListener('change', async (e) => {
+            const folder = e.target.value;
+            if (folder) await loadFolderData(folder);
+        });
+
+        playBtn.addEventListener('click', () => {
+            isPlaying = !isPlaying;
+            playBtn.textContent = isPlaying ? '⏸' : '▶️';
+        });
+
+        speedSlider.addEventListener('input', (e) => {
+            speed = parseFloat(e.target.value);
+            speedLabel.textContent = speed.toFixed(1) + '×';
+        });
+
+        amplifySlider.addEventListener('input', (e) => {
+            amplify = parseFloat(e.target.value);
+            amplifyLabel.textContent = amplify.toFixed(1) + '×';
+        });
+
+        seekSlider.addEventListener('input', (e) => {
+            isSeeking = true;
+            const val = parseFloat(seekSlider.value);
+            animTime = Math.min(val, totalDuration);
+            if (totalDuration > 0) {
+                const dt = (timeData[1] - timeData[0]) || 0.01;
+                const idx = Math.floor(animTime / dt);
+                currentIndex = Math.min(idx, totalFrames - 1);
+            }
+            timeDisplay.textContent = `${animTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`;
+        });
+        seekSlider.addEventListener('change', () => {
+            isSeeking = false;
+        });
+
+        window.addEventListener('resize', () => {
+            const w = window.innerWidth,
+                h = window.innerHeight;
+            camera.aspect = w / h;
+            camera.updateProjectionMatrix();
+            renderer.setSize(w, h);
+        });
+
+        // --- Start ---
+        populateFolders().catch(err => {
+            console.error(err);
+            progressEl.textContent = '❌ Failed to initialize.';
+            progressEl.style.display = 'block';
+        });
+
+        animate(0);
+    </script>
+</body>
+</html>
