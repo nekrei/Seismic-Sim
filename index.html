@@ -9,6 +9,10 @@
         body { overflow: hidden; background: #0b0b1a; font-family: 'Segoe UI', system-ui, sans-serif; }
         canvas { display: block; }
 
+        @keyframes panelSlideIn {
+            from { opacity: 0; transform: translate(-14px, -8px); }
+            to { opacity: 1; transform: translate(0, 0); }
+        }
         #controls {
             position: fixed;
             top: 20px;
@@ -27,6 +31,12 @@
             min-width: 200px;
             max-width: 280px;
             user-select: none;
+            animation: panelSlideIn 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+        #controls:hover {
+            border-color: rgba(255,215,100,0.18);
+            box-shadow: 0 0 24px rgba(255,215,100,0.06);
         }
         #controls label {
             font-size: 11px;
@@ -53,6 +63,45 @@
         #controls select:hover,
         #controls select:focus {
             border-color: rgba(255,215,100,0.4);
+        }
+        #controls input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            height: 4px;
+            background: rgba(255,255,255,0.12);
+            border: none;
+            border-radius: 4px;
+            padding: 0;
+            cursor: pointer;
+        }
+        #controls input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #ffd764;
+            cursor: pointer;
+            box-shadow: 0 0 8px rgba(255,215,100,0.35);
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        #controls input[type="range"]::-moz-range-thumb {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #ffd764;
+            cursor: pointer;
+            border: none;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        #controls input[type="range"]::-webkit-slider-thumb:hover,
+        #controls input[type="range"]:active::-webkit-slider-thumb {
+            transform: scale(1.15);
+            box-shadow: 0 0 14px rgba(255,215,100,0.65);
+        }
+        #controls input[type="range"]::-moz-range-thumb:hover,
+        #controls input[type="range"]:active::-moz-range-thumb {
+            transform: scale(1.15);
+            box-shadow: 0 0 14px rgba(255,215,100,0.65);
         }
         #controls .row {
             display: flex;
@@ -104,6 +153,30 @@
             min-width: 35px;
             text-align: center;
             color: rgba(255,255,255,0.6);
+        }
+        #controls .intensity-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 2px;
+        }
+        #controls .intensity-row label {
+            min-width: 52px;
+        }
+        .intensity-track {
+            flex: 1;
+            height: 6px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.08);
+            overflow: hidden;
+        }
+        .intensity-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: 4px;
+            background: linear-gradient(90deg, #4ade80, #ffd764 55%, #ff5c5c);
+            transition: width 0.08s linear;
+            box-shadow: 0 0 6px currentColor;
         }
         .seek-row {
             display: flex;
@@ -219,9 +292,36 @@
         </div>
         <div class="amplify-row">
             <label style="font-size:11px; color:rgba(255,255,255,0.4);">Amplify</label>
-            <input type="range" id="amplifySlider" min="1" max="50" step="0.5" value="1" />
+            <input type="range" id="amplifySlider" min="0" max="1000" step="1" value="0" />
             <span id="amplifyLabel">1×</span>
         </div>
+        <div class="intensity-row">
+            <label style="font-size:11px; color:rgba(255,255,255,0.4);">Shaking</label>
+            <div class="intensity-track"><div class="intensity-fill" id="intensityFill"></div></div>
+        </div>
+
+        <label style="margin-top:4px;">🏗️ Building Parameters</label>
+        <div class="amplify-row">
+            <label style="font-size:11px; color:rgba(255,255,255,0.4); min-width:52px;">Stories</label>
+            <input type="range" id="storiesSlider" min="1" max="20" step="1" value="7" />
+            <span id="storiesLabel">7</span>
+        </div>
+        <div class="amplify-row">
+            <label style="font-size:11px; color:rgba(255,255,255,0.4); min-width:52px;">Mass/floor</label>
+            <input type="range" id="massSlider" min="100000" max="5000000" step="50000" value="1000000" />
+            <span id="massLabel">1000t</span>
+        </div>
+        <div class="amplify-row">
+            <label style="font-size:11px; color:rgba(255,255,255,0.4); min-width:52px;">Damping</label>
+            <input type="range" id="zetaSlider" min="0.01" max="0.2" step="0.005" value="0.05" />
+            <span id="zetaLabel">5%</span>
+        </div>
+        <div class="amplify-row">
+            <label style="font-size:11px; color:rgba(255,255,255,0.4); min-width:52px;">Period</label>
+            <input type="range" id="t1Slider" min="0.02" max="0.3" step="0.01" value="0.1" />
+            <span id="t1Label">0.1s/story</span>
+        </div>
+        <div id="liveStatus" style="font-size:10px; color:rgba(255,215,100,0.6); min-height:12px;"></div>
     </div>
 
     <div id="info">🏗️ <span>seismic response</span> · drag to orbit · scroll to zoom</div>
@@ -239,6 +339,10 @@
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
         // DOM
         const folderSelect = document.getElementById('folderSelect');
@@ -250,6 +354,16 @@
         const seekSlider = document.getElementById('seekSlider');
         const timeDisplay = document.getElementById('timeDisplay');
         const progressEl = document.getElementById('progress');
+        const intensityFill = document.getElementById('intensityFill');
+        const storiesSlider = document.getElementById('storiesSlider');
+        const storiesLabel = document.getElementById('storiesLabel');
+        const massSlider = document.getElementById('massSlider');
+        const massLabel = document.getElementById('massLabel');
+        const zetaSlider = document.getElementById('zetaSlider');
+        const zetaLabel = document.getElementById('zetaLabel');
+        const t1Slider = document.getElementById('t1Slider');
+        const t1Label = document.getElementById('t1Label');
+        const liveStatusEl = document.getElementById('liveStatus');
 
         // --- Scene setup ---
         const scene = new THREE.Scene();
@@ -268,12 +382,28 @@
         renderer.toneMappingExposure = 1.2;
         document.body.prepend(renderer.domElement);
 
+        // Bloom pass makes the emissive elements (lit windows, roof beacon,
+        // sun glints) glow instead of just being flat-bright pixels -- a
+        // cheap but high-impact way to make the render feel more alive.
+        // Threshold is tuned high so only genuinely bright/emissive
+        // surfaces bloom, not the whole dim scene.
+        const composer = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+        const bloomPass = new UnrealBloomPass(
+            new THREE.Vector2(window.innerWidth, window.innerHeight),
+            0.55,  // strength
+            0.4,   // radius
+            0.82,  // threshold
+        );
+        composer.addPass(bloomPass);
+        composer.addPass(new OutputPass());
+
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.target.set(0, 3, 0);
         controls.enableDamping = true;
         controls.dampingFactor = 0.06;
         controls.minDistance = 3;
-        controls.maxDistance = 40;
+        controls.maxDistance = 40; // refit dynamically per building height, see frameCameraToBuilding()
         controls.maxPolarAngle = Math.PI / 2.1;
         controls.update();
 
@@ -293,8 +423,12 @@
         sunLight.shadow.camera.bottom = -15;
         sunLight.shadow.bias = -0.001;
         scene.add(sunLight);
-        scene.add(new THREE.DirectionalLight(0x8888ff, 0.5).position.set(-8, 6, -10));
-        scene.add(new THREE.DirectionalLight(0xffaa66, 0.4).position.set(-5, 10, -8));
+        const fillLight = new THREE.DirectionalLight(0x8888ff, 0.5);
+        fillLight.position.set(-8, 6, -10);
+        scene.add(fillLight);
+        const rimLight = new THREE.DirectionalLight(0xffaa66, 0.4);
+        rimLight.position.set(-5, 10, -8);
+        scene.add(rimLight);
 
         // --- Static Ground (fixed reference) ---
         const groundGeo = new THREE.PlaneGeometry(60, 60);
@@ -327,6 +461,39 @@
         let animTime = 0;
         let sceneObjects = [];
         let isSeeking = false;
+        let peakGroundDisp = 1e-9; // for the shake-intensity meter + camera shake, independent of amplify
+
+        // --- Amplify: logarithmic slider mapping ---
+        // Real sway magnitude varies ~500x across real earthquake records
+        // (sub-mm for a small quake to hundreds of mm for a near-fault
+        // record) -- a single fixed linear range can't serve both ends, so
+        // the slider's raw position (0-1000) maps logarithmically onto the
+        // actual amplify value (AMPLIFY_MIN..AMPLIFY_MAX), and the default
+        // is auto-computed per record (see loadFolderData) instead of
+        // always starting at 1x.
+        const AMPLIFY_MIN = 1;
+        const AMPLIFY_MAX = 3000;
+        const AMPLIFY_SLIDER_MAX = 1000;
+        // Target: at the auto-computed default, the tallest sway on screen
+        // should be about this fraction of one story's height.
+        const TARGET_SWAY_FRACTION = 0.175;
+
+        function sliderPosToAmplify(pos) {
+            const t = Math.max(0, Math.min(1, pos / AMPLIFY_SLIDER_MAX));
+            return AMPLIFY_MIN * Math.pow(AMPLIFY_MAX / AMPLIFY_MIN, t);
+        }
+
+        function amplifyToSliderPos(amp) {
+            const clamped = Math.max(AMPLIFY_MIN, Math.min(AMPLIFY_MAX, amp));
+            const t = Math.log(clamped / AMPLIFY_MIN) / Math.log(AMPLIFY_MAX / AMPLIFY_MIN);
+            return Math.round(t * AMPLIFY_SLIDER_MAX);
+        }
+
+        function setAmplify(amp) {
+            amplify = Math.max(AMPLIFY_MIN, Math.min(AMPLIFY_MAX, amp));
+            amplifySlider.value = amplifyToSliderPos(amplify);
+            amplifyLabel.textContent = amplify < 10 ? amplify.toFixed(1) + '×' : Math.round(amplify) + '×';
+        }
 
         // --- Building creation ---
         function createBuilding(numFloors, floorHeight) {
@@ -408,7 +575,13 @@
                 sceneObjects.push(group);
                 groups.push(group);
 
-                const t = i / (numFloors - 1);
+                // numFloors===1 (min Stories slider value) makes this a
+                // divide-by-zero (0/0 = NaN), which poisons every material
+                // color derived from baseColor below -- NaN components
+                // render as solid black in WebGL, so a 1-story building
+                // came out as a plain black box instead of tinted like
+                // every other floor count.
+                const t = numFloors > 1 ? i / (numFloors - 1) : 0.5;
                 const baseColor = colorBottom.clone().lerp(colorTop, t);
                 const emissive = baseColor.clone().multiplyScalar(0.06);
 
@@ -563,35 +736,7 @@
                 console.log(`📊 Ground X range: ${Math.min(...groundX).toFixed(4)} to ${Math.max(...groundX).toFixed(4)} m`);
                 console.log(`📊 Ground Y range: ${Math.min(...groundY).toFixed(4)} to ${Math.max(...groundY).toFixed(4)} m`);
 
-                // Build building
-                const { groups, lightSphere: light, totalHeight } = createBuilding(numStories, storyHeight);
-                lightSphere = light;
-
-                // Create foundation slab (moves with ground)
-                createFoundationSlab();
-
-                // Store data
-                timeData = time;
-                groundXData = groundX;
-                groundYData = groundY;
-                floorXData = floorX;
-                floorYData = floorY;
-                totalFrames = time.length;
-                totalDuration = timeData[timeData.length - 1] - timeData[0];
-                animTime = 0;
-                currentIndex = 0;
-
-                // Update seek bar
-                seekSlider.min = 0;
-                seekSlider.max = totalDuration;
-                seekSlider.value = 0;
-                timeDisplay.textContent = `0.0s / ${totalDuration.toFixed(1)}s`;
-
-                const maxDim = Math.max(totalHeight, 6);
-                camera.position.set(maxDim * 1.2, maxDim * 0.7, maxDim * 1.5);
-                controls.target.set(0, totalHeight / 2, 0);
-                controls.update();
-
+                applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY);
                 progressEl.style.display = 'none';
                 console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
             } catch (err) {
@@ -600,6 +745,231 @@
                 progressEl.style.color = '#ff6b6b';
                 setTimeout(() => { progressEl.style.display = 'none'; }, 5000);
             }
+        }
+
+        // --- Frame the camera so the full building height fits on screen
+        // from any orbit angle (including a pure side view), regardless of
+        // how many stories it has. Distance is derived from the camera's
+        // own vertical FOV instead of a fixed ratio, and controls.maxDistance
+        // /camera.far are widened to match -- otherwise OrbitControls silently
+        // clamps a tall building's required distance back down to the old
+        // fixed 40-unit cap, cutting it off. Runs on every applyLoadedData
+        // call (record switch AND live parameter recompute) since story
+        // count changes the required distance too. ---
+        function frameCameraToBuilding(totalHeight) {
+            const vFov = camera.fov * Math.PI / 180;
+            const margin = 1.35; // headroom so the roof/antenna isn't grazing the frame edge
+            const footprint = 3.5; // half-diagonal of the building's plan (width/depth from createBuilding)
+
+            const distForHeight = (totalHeight / 2 + 1) / Math.tan(vFov / 2) * margin;
+            const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+            const distForWidth = footprint / Math.tan(hFov / 2) * margin;
+            const dist = Math.max(distForHeight, distForWidth, 8);
+
+            controls.maxDistance = Math.max(40, dist * 2.5);
+            camera.far = Math.max(100, dist * 3);
+            camera.updateProjectionMatrix();
+
+            // scene.fog's fixed (30, 60) range was tuned for the ~50-unit
+            // distance a 7-story default building needs -- at 20 stories
+            // dist grows past 130, which the old fixed far-plane fully
+            // fogs out to the background color before it ever reaches the
+            // camera, making the whole building invisible even though it's
+            // correctly inside the view frustum. Scale fog range with dist
+            // (same 0.5 near/far ratio the original constants used) so the
+            // haze look is preserved at every building size instead of
+            // swallowing tall buildings whole.
+            scene.fog.far = dist * 1.2;
+            scene.fog.near = scene.fog.far * 0.5;
+
+            const dir = new THREE.Vector3(1.2, 0.7, 1.5).normalize().multiplyScalar(dist);
+            const toPos = dir.clone();
+            toPos.y += totalHeight / 2;
+            const toTarget = new THREE.Vector3(0, totalHeight / 2, 0);
+
+            // maxDistance/far/fog above are already sized for the new
+            // building, so it's safe to ease the camera there over time
+            // instead of snapping -- a parameter tweak reframing the shot
+            // reads as a deliberate camera move instead of a jump cut.
+            tweenCameraTo(toPos, toTarget);
+        }
+
+        // --- Camera tween: eases position/target from wherever the camera
+        // currently is to a new framing over `duration` ms, instead of
+        // snapping. Interrupted (not fought) by a manual drag -- see the
+        // controls 'start' listener below. ---
+        let cameraTween = null;
+
+        function easeInOutCubic(t) {
+            return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        }
+
+        function tweenCameraTo(toPos, toTarget, duration = 550) {
+            cameraTween = {
+                fromPos: camera.position.clone(),
+                toPos: toPos.clone(),
+                fromTarget: controls.target.clone(),
+                toTarget: toTarget.clone(),
+                start: performance.now(),
+                duration,
+            };
+        }
+
+        controls.addEventListener('start', () => { cameraTween = null; });
+
+        // --- Shared by both the static out/ path (loadFolderData) and the
+        // live /compute path (liveRecompute) -- builds the 3D building,
+        // stores the animation data, and resets the seek bar + camera.
+        // Neither data source should duplicate this. `autoScaleAmplify` is
+        // true only for an actual record switch: real sway magnitude varies
+        // ~500x across different earthquake records, so the zoom needs a
+        // fresh default there. Building-parameter tweaks (stories/mass/
+        // damping/period) must NOT touch amplify -- that's a separate, purely
+        // visual "zoom" the user controls, and re-deriving it on every slider
+        // drag made the sway appear to change for reasons unrelated to what
+        // the user just changed. ---
+        function applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY, autoScaleAmplify = true) {
+            const { groups, lightSphere: light, totalHeight } = createBuilding(numStories, storyHeight);
+            lightSphere = light;
+            createFoundationSlab();
+
+            timeData = time;
+            groundXData = groundX;
+            groundYData = groundY;
+            floorXData = floorX;
+            floorYData = floorY;
+            totalFrames = time.length;
+            totalDuration = timeData[timeData.length - 1] - timeData[0];
+            animTime = 0;
+            currentIndex = 0;
+
+            // Peak ground displacement (not floor -- this is about the raw
+            // input shaking, not the building's response) drives the
+            // shake-intensity meter and camera shake. Computed unconditionally
+            // (unlike the amplify auto-scale below) since it's cheap -- O(npts)
+            // over the ground arrays only, not every floor -- and is a purely
+            // cosmetic readout, not something a parameter tweak should be
+            // allowed to silently skip updating.
+            peakGroundDisp = 1e-9;
+            for (let i = 0; i < groundXData.length; i++) {
+                const mag = Math.hypot(groundXData[i], groundYData[i] || 0);
+                if (mag > peakGroundDisp) peakGroundDisp = mag;
+            }
+
+            if (autoScaleAmplify) {
+                // Peak real displacement across every floor/direction, used to
+                // auto-scale the default amplify -- real sway varies ~500x
+                // across different real earthquake records, so a fixed
+                // default would either be invisible (small quake / stiff
+                // building) or send the building flying off screen (large
+                // near-fault quake / soft building) depending on what's
+                // selected.
+                let peakAbsDisp = 0;
+                for (const series of [...floorX, ...floorY]) {
+                    for (const v of series) {
+                        const av = Math.abs(v);
+                        if (av > peakAbsDisp) peakAbsDisp = av;
+                    }
+                }
+                console.log(`📊 Peak floor displacement: ${(peakAbsDisp * 1000).toFixed(3)} mm`);
+
+                if (peakAbsDisp > 1e-9) {
+                    setAmplify((TARGET_SWAY_FRACTION * storyHeight) / peakAbsDisp);
+                } else {
+                    setAmplify(AMPLIFY_MIN);
+                }
+            }
+
+            seekSlider.min = 0;
+            seekSlider.max = totalDuration;
+            seekSlider.value = 0;
+            timeDisplay.textContent = `0.0s / ${totalDuration.toFixed(1)}s`;
+
+            frameCameraToBuilding(totalHeight);
+        }
+
+        // --- Live recompute: POST current building-parameter sliders to
+        // the Flask backend (specs/03-live-archetypes.md) and re-render
+        // with the result, instead of the static out/ files. Binary
+        // response format: [4-byte LE header length][JSON header][float32
+        // arrays: time, X ground_disp, X floors_abs (floor-major), then
+        // the same for Y if present] -- see server.py's /compute. ---
+        let liveAbortController = null;
+
+        async function liveRecompute(folder, autoScaleAmplify = false) {
+            if (!folder) return;
+            if (liveAbortController) liveAbortController.abort();
+            liveAbortController = new AbortController();
+            const { signal } = liveAbortController;
+
+            const params = {
+                record: folder,
+                num_stories: parseInt(storiesSlider.value, 10),
+                mass_per_floor: parseFloat(massSlider.value),
+                zeta: parseFloat(zetaSlider.value),
+                T1_factor: parseFloat(t1Slider.value),
+            };
+
+            liveStatusEl.textContent = '⏳ recomputing…';
+            try {
+                const res = await fetch('/compute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(params),
+                    signal,
+                });
+                if (!res.ok) throw new Error(`/compute failed (${res.status})`);
+                const buf = await res.arrayBuffer();
+
+                const view = new DataView(buf);
+                const headerLen = view.getUint32(0, true);
+                const headerJson = new TextDecoder().decode(new Uint8Array(buf, 4, headerLen));
+                const header = JSON.parse(headerJson);
+
+                // Matches the padding server.py adds so Float32Array's
+                // offset (which must be a multiple of 4) always lands
+                // aligned regardless of the JSON header's byte length.
+                let offset = 4 + headerLen;
+                offset += (4 - (offset % 4)) % 4;
+                const npts = header.npts;
+                const N = header.num_stories;
+                function takeFloats(n) {
+                    const arr = new Float32Array(buf, offset, n);
+                    offset += n * 4;
+                    return arr;
+                }
+                const time = Array.from(takeFloats(npts));
+                const groundX = Array.from(takeFloats(npts));
+                const floorX = [];
+                for (let f = 0; f < N; f++) floorX.push(Array.from(takeFloats(npts)));
+
+                let groundY = new Array(npts).fill(0);
+                let floorY = floorX.map(() => new Array(npts).fill(0));
+                if (header.has_y) {
+                    groundY = Array.from(takeFloats(npts));
+                    floorY = [];
+                    for (let f = 0; f < N; f++) floorY.push(Array.from(takeFloats(npts)));
+                }
+
+                applyLoadedData(header.num_stories, header.story_height, time, groundX, groundY, floorX, floorY, autoScaleAmplify);
+                liveStatusEl.textContent = '';
+                console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
+            } catch (err) {
+                if (err.name === 'AbortError') return; // superseded by a newer request
+                console.error('❌ Live recompute failed:', err);
+                liveStatusEl.textContent = `❌ ${err.message}`;
+            }
+        }
+
+        // Debounce building-parameter changes so a live request only fires
+        // ~200ms after the user stops moving a slider, not on every
+        // intermediate value -- see specs/03-live-archetypes.md.
+        let liveDebounceTimer = null;
+        function scheduleLiveRecompute() {
+            if (liveDebounceTimer) clearTimeout(liveDebounceTimer);
+            liveDebounceTimer = setTimeout(() => {
+                liveRecompute(folderSelect.value);
+            }, 200);
         }
 
         // --- Populate dropdown ---
@@ -641,8 +1011,17 @@
         function animate(now) {
             requestAnimationFrame(animate);
 
+            if (cameraTween) {
+                const t = Math.min(1, (now - cameraTween.start) / cameraTween.duration);
+                const e = easeInOutCubic(t);
+                camera.position.lerpVectors(cameraTween.fromPos, cameraTween.toPos, e);
+                controls.target.lerpVectors(cameraTween.fromTarget, cameraTween.toTarget, e);
+                if (t >= 1) cameraTween = null;
+            }
+
             if (!timeData.length || !buildingGroups.length) {
-                renderer.render(scene, camera);
+                controls.update();
+                composer.render();
                 return;
             }
 
@@ -698,14 +1077,72 @@
                 lightSphere.material.emissiveIntensity = 0.4 + blink * 0.8;
             }
 
+            // Shake-intensity meter: raw (unamplified) ground displacement
+            // relative to this record's own peak, so "full bar" always means
+            // "this record's strongest moment" regardless of which record or
+            // Amplify setting is active.
+            const rawGroundMag = Math.hypot(groundXData[idx] || 0, groundYData[idx] || 0);
+            const intensity = Math.max(0, Math.min(1, rawGroundMag / peakGroundDisp));
+            intensityFill.style.width = (intensity * 100).toFixed(1) + '%';
+
             controls.update();
-            renderer.render(scene, camera);
+
+            // Subtle camera shake driven by the same intensity, for a bit of
+            // visceral "you are here" feedback during the strongest moments.
+            // Quadratic ramp keeps it near-invisible except at genuinely high
+            // intensity. Applied only to the rendered frame and reverted
+            // immediately after -- OrbitControls treats camera.position as
+            // ground truth on the next update(), so leaving the offset in
+            // place would get baked in and drift the "official" orbit
+            // position/distance frame over frame (same class of bug as the
+            // damping-drift issue frameCameraToBuilding had to guard against).
+            const shakeAmt = 0.06 * intensity * intensity;
+            let shakeX = 0, shakeY = 0, shakeZ = 0;
+            if (shakeAmt > 0.0001) {
+                shakeX = Math.sin(now * 0.013) * shakeAmt;
+                shakeY = Math.sin(now * 0.017 + 1.3) * shakeAmt * 0.6;
+                shakeZ = Math.cos(now * 0.011 + 0.7) * shakeAmt;
+                camera.position.x += shakeX;
+                camera.position.y += shakeY;
+                camera.position.z += shakeZ;
+            }
+
+            composer.render();
+
+            if (shakeAmt > 0.0001) {
+                camera.position.x -= shakeX;
+                camera.position.y -= shakeY;
+                camera.position.z -= shakeZ;
+            }
         }
 
         // --- Event bindings ---
+        // Building Parameters' own defaults -- matches out/'s precomputed
+        // static files exactly (mdof_response.py's NUM_STORIES=7 and
+        // MDOF_ShearBuilding's own defaults).
+        function buildingParamsAtDefault() {
+            return storiesSlider.value === '7'
+                && massSlider.value === '1000000'
+                && zetaSlider.value === '0.05'
+                && t1Slider.value === '0.1';
+        }
+
         folderSelect.addEventListener('change', async (e) => {
             const folder = e.target.value;
-            if (folder) await loadFolderData(folder);
+            if (!folder) return;
+            if (buildingParamsAtDefault()) {
+                // Fast path: out/'s precomputed static files already match
+                // the current (default) Building Parameters exactly.
+                await loadFolderData(folder);
+            } else {
+                // A Building Parameter has been moved away from its
+                // default -- loadFolderData would silently swap in the
+                // static 7-story data while the sliders kept showing the
+                // user's actual values, desyncing the displayed building
+                // from what the panel claims it is. Recompute for the new
+                // record with the sliders' current values instead.
+                await liveRecompute(folder, true);
+            }
         });
 
         playBtn.addEventListener('click', () => {
@@ -719,8 +1156,24 @@
         });
 
         amplifySlider.addEventListener('input', (e) => {
-            amplify = parseFloat(e.target.value);
-            amplifyLabel.textContent = amplify.toFixed(1) + '×';
+            setAmplify(sliderPosToAmplify(parseFloat(e.target.value)));
+        });
+
+        storiesSlider.addEventListener('input', (e) => {
+            storiesLabel.textContent = e.target.value;
+            scheduleLiveRecompute();
+        });
+        massSlider.addEventListener('input', (e) => {
+            massLabel.textContent = (parseFloat(e.target.value) / 1000).toFixed(0) + 't';
+            scheduleLiveRecompute();
+        });
+        zetaSlider.addEventListener('input', (e) => {
+            zetaLabel.textContent = (parseFloat(e.target.value) * 100).toFixed(1) + '%';
+            scheduleLiveRecompute();
+        });
+        t1Slider.addEventListener('input', (e) => {
+            t1Label.textContent = parseFloat(e.target.value).toFixed(2) + 's/story';
+            scheduleLiveRecompute();
         });
 
         seekSlider.addEventListener('input', (e) => {
@@ -744,6 +1197,7 @@
             camera.aspect = w / h;
             camera.updateProjectionMatrix();
             renderer.setSize(w, h);
+            composer.setSize(w, h);
         });
 
         // --- Start ---

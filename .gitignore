@@ -1,1 +1,16 @@
 data/
+.vscode/
+.conda/
+
+CLAUDE.md
+AGENTS.md
+.claude/
+specs/
+verification/
+graphify-out/
+# Python
+__pycache__/
+*.pyc
+
+
+
