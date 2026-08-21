@@ -1,1 +1,13 @@
 data/
+.vscode/
+.conda/
+
+specs/
+verification/
+graphify-out/
+# Python
+__pycache__/
+*.pyc
+
+
+

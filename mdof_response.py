@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.fft import fft, ifft, fftfreq
 from scipy.linalg import eigh as scipy_eigh
+from scipy.signal import butter, filtfilt
 import csv
 import json
 import re
@@ -179,7 +180,13 @@ class MDOF_ShearBuilding:
         self.M = np.eye(self.N) * self.m
         T1 = self.T1_factor * self.N
         omega1 = 2 * np.pi / T1
-        sin_term = np.sin(np.pi / (2 * (self.N + 1)))
+        # Free-top cantilever chain (fixed at the base only, free at the
+        # roof) -- the closed-form fundamental frequency for this topology
+        # uses (2j-1)pi/(2(2N+1)) for mode j=1..N (derived from the free-top
+        # boundary condition; reduces to the textbook SDOF omega=sqrt(k/m)
+        # for N=1). This replaced a "fixed at both ends" formula that didn't
+        # match how a real building is supported. See specs/01-physics-model.md.
+        sin_term = np.sin(np.pi / (2 * (2 * self.N + 1)))
         self.k = self.m * (omega1 / (2 * sin_term))**2
 
         self.K = np.zeros((self.N, self.N))
@@ -188,7 +195,11 @@ class MDOF_ShearBuilding:
                 self.K[i, i-1] = -self.k
             if i < self.N - 1:
                 self.K[i, i+1] = -self.k
-            self.K[i, i] = 2 * self.k
+            # Every floor pulls back against -k from each neighbor it has.
+            # The roof (i == N-1) only has a floor below it -- nothing above,
+            # since a real building isn't fixed at the top -- so its
+            # diagonal is k, not 2k.
+            self.K[i, i] = 2 * self.k if i < self.N - 1 else self.k
 
     def _modal_analysis(self):
         """Solve generalized eigenvalue problem: K φ = ω² M φ using scipy.linalg.eigh."""
@@ -221,11 +232,25 @@ class MDOF_ShearBuilding:
         self.npts = len(acceleration)
         self.time = np.arange(self.npts) * dt
 
-        A_fft = fft(acceleration)
-        freqs = fftfreq(self.npts, dt)
+        # Zero-pad before the FFT to avoid circular-convolution wraparound:
+        # fft/ifft on the raw record computes a *circular* convolution, and
+        # a lightly-damped mode's impulse response can easily outlast the
+        # record, so its decaying tail wraps around and contaminates the
+        # start of the response. Pad to cover ~5 time constants of the
+        # slowest (lowest-frequency) mode's decay, capped at 4x the original
+        # length so a low-damping/long-period parameter combination can't
+        # blow up compute time for live recompute (specs/03-live-archetypes.md).
+        settle_time = 5.0 / (self.zeta * self.omega_n[0])
+        pad_len = min(4 * self.npts, self.npts + int(np.ceil(settle_time / dt)))
+
+        accel_padded = np.zeros(pad_len)
+        accel_padded[:self.npts] = acceleration
+
+        A_fft = fft(accel_padded)
+        freqs = fftfreq(pad_len, dt)
         omega = 2 * np.pi * freqs
 
-        q_time = np.zeros((self.N, self.npts))
+        q_time = np.zeros((self.N, pad_len))
         for i in range(self.N):
             wn = self.omega_n[i]
             z = self.zeta
@@ -236,6 +261,10 @@ class MDOF_ShearBuilding:
             q = np.real(ifft(Q_fft))
             q_time[i, :] = q
 
+        # Trim back to the original record length now that the padding has
+        # done its job of keeping the decaying tail out of the wraparound.
+        q_time = q_time[:, :self.npts]
+
         self.floor_disp_rel = np.zeros((self.N, self.npts))
         for i in range(self.N):
             self.floor_disp_rel += np.outer(self.phi[:, i], q_time[i, :])
@@ -243,6 +272,63 @@ class MDOF_ShearBuilding:
         self.floor_disp_abs = self.floor_disp_rel + self.ground_disp[np.newaxis, :]
 
         return self.time, self.ground_disp, self.floor_disp_rel, self.floor_disp_abs
+
+    def _integrate_accel(self, accel, dt):
+        """
+        Recover ground displacement from acceleration by double integration
+        in the frequency domain. Before integrating, the signal is passed
+        through a smooth high-pass filter (4th-order Butterworth, zero-phase
+        via filtfilt) instead of the old brick-wall FFT-bin zeroing, to avoid
+        Gibbs-type ringing in the recovered displacement.
+
+        The cutoff is adaptive -- capped at 0.1 Hz, but never above half the
+        building's own fundamental frequency, so a soft/long-period
+        archetype's genuine low-frequency structural response doesn't get
+        filtered out along with real sensor drift. f1 is always known
+        upfront since it only depends on the building parameters (no
+        circular dependency on the ground motion being processed).
+        """
+        f1 = self.omega_n[0] / (2 * np.pi)
+        f_cut = min(0.1, f1 * 0.5)
+        nyquist = 0.5 / dt
+        b, a = butter(4, f_cut / nyquist, btype='high')
+        accel_filtered = filtfilt(b, a, accel)
+
+        n = len(accel_filtered)
+        freqs = fftfreq(n, dt)
+        omega = 2 * np.pi * freqs
+        A = fft(accel_filtered)
+        omega_sq = omega**2
+        omega_sq[0] = 1.0  # guard 0/0; true DC content is ~0 after the filter
+        disp_fft = -A / omega_sq
+        disp_fft[0] = 0.0
+        disp = np.real(ifft(disp_fft))
+        disp -= np.mean(disp)
+        return disp
+
+    def _differentiate_to_accel(self, disp, dt):
+        """
+        Recover ground acceleration from displacement by double
+        differentiation in the frequency domain, with the same smooth
+        adaptive high-pass filtering as _integrate_accel (cutoff capped at
+        0.05 Hz, never above a quarter of the building's fundamental
+        frequency -- slightly lower than the integration cutoff to preserve
+        more long-period content, matching the original design intent).
+        """
+        f1 = self.omega_n[0] / (2 * np.pi)
+        f_cut = min(0.05, f1 * 0.25)
+        nyquist = 0.5 / dt
+        b, a = butter(4, f_cut / nyquist, btype='high')
+        disp_filtered = filtfilt(b, a, disp)
+
+        n = len(disp_filtered)
+        freqs = fftfreq(n, dt)
+        omega = 2 * np.pi * freqs
+        D = fft(disp_filtered)
+        accel_fft = -(omega**2) * D
+        accel = np.real(ifft(accel_fft))
+        accel -= np.mean(accel)
+        return accel
 
     def save_to_csv(self, filename, prefix=""):
         """Save absolute displacements to CSV with optional prefix for columns."""
@@ -388,7 +474,25 @@ if __name__ == "__main__":
 
         # Save JSON metadata
         building.save_to_json(os.path.join(out_folder, "building_data.json"))
-        
+
+        # Cache the raw ground acceleration and displacement (both already
+        # unit-converted) so the live-recompute backend
+        # (specs/03-live-archetypes.md) can rebuild the response for new
+        # building parameters without re-parsing the original PEER file or
+        # redoing baseline correction on every request. Both are properties
+        # of the recorded earthquake, independent of the building
+        # parameters, so they only need to be computed once here.
+        ground_accel_data = {
+            "dt": dt,
+            "X": accel_x.tolist(),
+            "Y": accel_y.tolist() if accel_y is not None else None,
+            "X_disp": disp_x.tolist(),
+            "Y_disp": disp_y.tolist() if accel_y is not None else None,
+        }
+        with open(os.path.join(out_folder, "ground_accel.json"), 'w') as f:
+            json.dump(ground_accel_data, f)
+        print(f"Saved ground acceleration cache to {os.path.join(out_folder, 'ground_accel.json')}")
+
     # After processing all folders, create a manifest file in out/
     manifest_path = os.path.join(out_dir, "folders.json")
     try:
