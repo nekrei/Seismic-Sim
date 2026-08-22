@@ -229,6 +229,17 @@ above) without the raw recordings that produced them.
    (like `python -m http.server`) will load the page fine but the sliders
    will fail, since there's no `/compute` to POST to.
 
+## The live version, hosted
+
+This project is also hosted online. GitHub Pages (static-only — no
+Python) serves the frontend and the precomputed `out/` data directly.
+The live Building Parameters sliders need real Python compute, though,
+which Pages can't run — so `index.html` sends those requests to a
+separately-deployed backend instead: see `seismic-sim-backend` (a trimmed
+mirror of `server.py`, deployed on Render — link: `TODO: fill in once
+created`). That repo's own README explains why it exists and what it
+contains.
+
 ## Current state (as of this pull)
 
 - The pipeline runs end-to-end for the 10 recordings already included in
