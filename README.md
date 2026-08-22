@@ -235,10 +235,11 @@ This project is also hosted online. GitHub Pages (static-only — no
 Python) serves the frontend and the precomputed `out/` data directly.
 The live Building Parameters sliders need real Python compute, though,
 which Pages can't run — so `index.html` sends those requests to a
-separately-deployed backend instead: see `seismic-sim-backend` (a trimmed
-mirror of `server.py`, deployed on Render — link: `TODO: fill in once
-created`). That repo's own README explains why it exists and what it
-contains.
+separately-deployed backend instead: see
+[seismic-sim-backend](https://github.com/Raufur1234/seismic-sim-backend)
+(a trimmed mirror of `server.py`, deployed on Render at
+https://seismic-sim-backend.onrender.com). That repo's own README
+explains why it exists and what it contains.
 
 ## Current state (as of this pull)
 
