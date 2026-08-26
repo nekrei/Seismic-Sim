@@ -8,6 +8,8 @@ graphify-out/
 # Python
 __pycache__/
 *.pyc
+.serena/
+dev_scripts/
 
 
 

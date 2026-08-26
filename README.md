@@ -24,15 +24,23 @@ pieces connect*.
 
 2. **Simulate a building's reaction.** A tall building doesn't move as one
    rigid block when the ground shakes — the base moves with the ground, but
-   each floor above it lags, overshoots, and sways somewhat independently,
-   like a stack of shelves connected by springs. This project models a
-   building as exactly that: a stack of floors connected by springs, and
-   calculates how far *each individual floor* moves at *each individual
-   instant* of the recording.
+   each floor above it lags, overshoots, and sways somewhat independently.
+   This project models a building as a real structural frame: concrete
+   columns and beams at the four corners of each floor, connected the way
+   an actual building's skeleton is connected (not an abstract stack of
+   floors on springs — see "Words you'll run into" below), and calculates
+   how far *each individual floor* moves at *each individual instant* of
+   the recording. It also simulates a handful of pieces of furniture
+   (tables, chairs, a fan) on every floor, each swaying slightly on its own
+   relative to the floor it sits on — the same kind of physics as the
+   building itself, just applied a second time to a much smaller, lighter
+   system riding on top of it.
 
-3. **Animate the result.** The floor-by-floor motion is played back as a 3D
-   building sway animation in a web browser, using real numbers from step 2
-   — not a fake or decorative wobble.
+3. **Animate the result.** The floor-by-floor (and furniture-by-furniture)
+   motion is played back as a 3D building sway animation in a web browser,
+   using real numbers from step 2 — not a fake or decorative wobble. The
+   building is drawn as an open cutaway — no exterior walls — so the
+   columns, beams, floor slabs, and furniture are all visible at once.
 
 ## Words you'll run into
 
@@ -43,11 +51,14 @@ The math PDF explains all of these properly, with pictures.
 |---|---|
 | **Ground motion** | How the ground itself moved during the earthquake — the raw recording. |
 | **PEER file (.AT2 / .DT2)** | The standard file format these recordings come in. `.AT2` = acceleration recording, `.DT2` = displacement recording. |
-| **Floor / story** | One level of the building. This project treats every floor as a single point with a single weight — it doesn't model rooms, columns, etc. |
+| **Floor / story** | One level of the building. Every floor moves as a single rigid unit (one lateral position per floor), but the building's *stiffness* now comes from real column and beam dimensions, not an abstract spring. |
+| **Frame (columns + beams)** | The building's actual skeleton: four corner columns per floor connected by four beams, one bay wide, fixed at the ground floor's base and genuinely free at the roof. Column cross-sections can be a different depth in each horizontal direction, which is what makes the building noticeably stiffer sideways in one direction than the other — a real effect this project didn't model before. It's an idealized single-bay frame, not a scale model of real construction. |
+| **Static condensation** | The math trick that turns "every floor has both a sideways position AND a rotation at each beam-column joint" (twice as many unknowns as before) back down to "one sideways position per floor" — the same shape the rest of the simulation already expects — by algebraically eliminating the rotation unknowns. Explained with a worked example in the math PDF. |
 | **MDOF (multi-degree-of-freedom)** | Engineering jargon for "a model with several moving parts that can each move somewhat independently" — here, each floor is one "degree of freedom." |
 | **Mode / mode shape** | A building doesn't sway randomly — it has a small number of *natural* sway patterns (like a guitar string's harmonics), and every real motion is a mix of these. Explained fully, with pictures, in the math PDF. |
 | **Damping** | Friction-like energy loss that makes swaying die down over time instead of continuing forever. |
-| **FFT (Fast Fourier Transform)** | A method for taking a wiggly signal (like the ground shaking) and figuring out which "pure tones" it's built from — similar to how your ear splits a chord into individual notes. Used here to solve the physics quickly. |
+| **FFT (Fast Fourier Transform)** | A method for taking a wiggly signal (like the ground shaking) and figuring out which "pure tones" it's built from — similar to how your ear splits a chord into individual notes. Used here to solve the physics quickly, for both the building and (a second, independent time) the furniture. |
+| **Furniture sway** | Each piece of furniture is modeled as its own tiny mass-on-a-spring riding on its floor, with the floor's own computed motion as the "ground motion" it reacts to — the exact same kind of equation as the building itself, solved the same way (FFT), just applied recursively to a lighter, independent system. Furniture mass never feeds back into the building's own physics — it's a one-way, decorative-but-honestly-computed effect. |
 | **Amplify** | A slider in the visualization that exaggerates the motion so tiny, real sway (anywhere from a fraction of a millimeter to tens of centimeters, depending on the earthquake) is visible on screen. Its default is auto-computed per record, and its range is logarithmic — it never affects the underlying numbers, only the picture. Switching records recomputes this default; adjusting a Building Parameter slider never does — those are independent knobs. |
 
 ## How the pieces connect
@@ -56,12 +67,13 @@ The math PDF explains all of these properly, with pictures.
 data/<record>/*.AT2, *.DT2          ← a real earthquake recording (you supply these)
         │
         ▼
-mdof_response.py                     ← builds the building model, computes floor-by-floor motion
+mdof_response.py                     ← builds the frame model (per axis), computes floor + furniture motion
         │
         ▼
 out/<record>/response_X.csv          ← every floor's position, at every instant, saved to a spreadsheet-like file
 out/<record>/response_Y.csv
-out/<record>/building_data.json      ← a summary: number of floors, natural sway patterns, etc.
+out/<record>/building_data.json      ← a summary: floor count, frame geometry, natural sway patterns (per axis), etc.
+out/<record>/furniture_response.bin  ← every furniture item's own extra sway, decimated for size
 out/<record>/ground_accel.json       ← the raw ground motion, cached for live recompute
 out/folders.json                     ← a list of which earthquake recordings have been processed
         │                        │           │
@@ -69,10 +81,11 @@ out/folders.json                     ← a list of which earthquake recordings h
 plot_response.py              index.html      │ POST /compute (live building-
    → static picture (PNG)   (fetch + three.js)│  parameter sliders, debounced)
                              animated 3D       ▼
-                             building sway  server.py
-                                    ▲       (reruns MDOF_ShearBuilding with
-                                    └────── your slider values, reusing the
-                                 binary response  cached ground motion)
+                             open-cutaway   server.py
+                             frame + sway   (rebuilds the frame model with
+                                    ▲       your slider values, reusing the
+                                    └────── cached ground motion)
+                                 binary response
 ```
 
 In short: you run `mdof_response.py` once per batch of earthquake
@@ -101,28 +114,48 @@ This is the heart of the project. It has three jobs:
    direction at once.
 
 2. **Build a virtual building and see how it reacts** — this is the
-   `MDOF_ShearBuilding` class. It:
-   - Decides how heavy each floor is and how "springy" the connections
-     between floors are, so the building's natural sway speed matches a
-     realistic target. The building is modeled as a real free-standing
-     cantilever — fixed at the base, genuinely free at the roof (nothing
-     holds the top floor back except the floor below it).
+   `MDOF_ShearBuilding` class, plus a set of standalone frame-assembly
+   functions above it (`column_inertia`, `beam_inertia`,
+   `assemble_frame_stiffness`, `condense_rotations`, `build_condensed_K`).
+   It:
+   - Builds the building's stiffness from **real column and beam
+     dimensions** via the matrix-stiffness method — four corner columns
+     per floor, connected by beams, fixed at the ground floor's base and
+     genuinely free at the roof (nothing holds the top floor back except
+     the floor below it). This replaced an earlier version that derived an
+     abstract spring stiffness backward from a target sway period, with no
+     real geometry behind it at all.
+   - Because a column can be a different depth in each direction, the
+     building is now genuinely **stiffer sideways one way than the
+     other** — X and Y each get their own independently-built model
+     (`axis="X"` / `axis="Y"`), instead of reusing one number for both.
    - Works out the building's small number of *natural sway patterns*
      (the "modes" from the glossary above) — this is the part of the code
      that needs the most background to understand, and it's explained
      step by step with a worked numeric example in the math PDF.
    - Combines the earthquake recording with those sway patterns to compute
-     exactly how far every floor moves, at every instant in the recording.
-   - Saves everything to files (`save_to_csv`, `save_to_json`).
+     exactly how far every floor moves, at every instant in the recording
+     — plus each floor's *acceleration*, which feeds the furniture.
+   - Also computes each **furniture class's** (table/chair/fan) own extra
+     sway relative to its floor (`compute_furniture_response`), using the
+     exact same FFT technique a second time, then shrinks that data down
+     (`get_decimated_furniture`) before saving it, since it doesn't need
+     the ground motion's full time resolution to look right (see
+     "Furniture sway" in the glossary).
+   - Saves everything to files (`save_to_csv`, `save_building_data`).
 
 3. **The bottom of the file (`if __name__ == "__main__":`)** loops over
    every earthquake recording you've placed in the `data/` folder, runs the
-   steps above on each one, and writes results into `out/`.
+   steps above on each one (building both an X and a Y model), and writes
+   results into `out/`.
 
-   One setting worth knowing: `NUM_STORIES = 7` is hardcoded near the
+   Settings worth knowing: `NUM_STORIES = 7` is hardcoded near the
    bottom — every recording currently gets simulated with a 7-floor
-   building. There's no menu option to change this per-recording yet; you'd
-   edit that line directly.
+   building. `COLUMN_DEPTH_X`, `COLUMN_DEPTH_Y`, and `BEAM_DEPTH` are also
+   hardcoded there as the *default* frame dimensions (the live sliders in
+   `index.html` can move away from these, but `out/`'s precomputed static
+   files always reflect these exact defaults). There's no menu option to
+   change any of these per-recording yet; you'd edit those lines directly.
 
 ### `plot_response.py` — makes a static picture
 
@@ -139,28 +172,78 @@ directly by double-clicking won't work) to watch the actual simulation
 results. It:
 - Shows a dropdown listing every earthquake recording that's been
   processed.
-- Loads that recording's results and builds a matching 3D building, floor
-  by floor.
+- Loads that recording's results and builds a matching 3D building as an
+  **open cutaway** — visible columns, beams, and floor slabs, no exterior
+  walls — plus a handful of procedurally-placed furniture items (tables,
+  chairs, a fan) on every floor, deterministically positioned so the same
+  record always looks the same. There's no lit-window texture any more
+  (there's no wall left to paint it on). Furniture is rendered noticeably
+  **larger than true physical scale** (a single named constant,
+  `FURNITURE_SCALE`, currently 1.6x every linear dimension) so it actually
+  reads as furniture at whole-building camera distance — the same
+  "stylized for visibility" idea the columns/beams already used, now
+  extended to furniture. This is a purely cosmetic render constant; it
+  doesn't touch the physics-computed sway amplitude at all, and each
+  instance also gets a small deterministic per-item material tint so
+  furniture doesn't look perfectly uniform.
 - Plays back the *real* computed floor positions as an animation, frame by
-  frame, matching the timing of the original recording.
+  frame, matching the timing of the original recording — columns visibly
+  lean/shear between floors as each floor sways by a different amount, and
+  furniture sways with a motion of its own, distinct from (but riding on
+  top of) its floor's rigid motion.
 - Gives you controls: play/pause, playback speed, a scrubber to jump to
-  any moment, and the **amplify** slider from the glossary above.
+  any moment, and the **amplify** slider from the glossary above — plus two
+  new camera modes (below) and a redesigned, mobile-friendly panel.
 - Has a **Building Parameters** panel (stories, mass per floor, damping,
-  target period) — moving any of these sends your values to `server.py`,
+  column depth X, column depth Y, beam depth, plus a read-only period
+  readout) — moving any of the sliders sends your values to `server.py`,
   which recomputes the *actual physics* for that building live (not a
   visual trick) and updates the animation, roughly 200-400ms after you stop
-  moving the slider. Requires `server.py` running, not a plain static
-  server — see "Running it yourself" below.
+  moving the slider. While a live recompute is in flight, a full-viewport
+  loading overlay (animated floor-bars assembling, plus a pulsing
+  "Recomputing…" label) appears over the 3D view — the control panel stays
+  fully usable throughout, this is purely a visual cue that new results are
+  on the way. Requires `server.py` running, not a plain static server —
+  see "Running it yourself" below. There's no Target Period slider any
+  more: once stiffness comes from real column/beam dimensions, the sway
+  period is an *output* of the model, not something you dial in directly —
+  the read-only `T₁ (X/Y)` readout shows what it comes out to.
+- Has a **View** section with a floor selector: pick a floor to smoothly
+  reframe the camera in close on it (playback and every animation keeps
+  running throughout — this only changes what the camera is looking at),
+  and an always-visible "Back to full view" button to return to the
+  whole-building framing. Switching earthquake records or any Building
+  Parameter always resets back to the full-building view.
 - Reframes the camera automatically whenever the building's height changes
   (e.g. the Stories slider), easing to the new shot instead of snapping, so
   a 20-story building is never cut off — the camera distance, its far
   clip plane, and the scene fog range are all derived from the same fit
   calculation instead of being independent fixed constants.
+- Slowly auto-orbits the camera on its own after a few seconds of no manual
+  input (while viewing the whole building — auto-orbit stays off while a
+  single floor is selected, since the tighter per-floor camera distance
+  would otherwise swing away from the floor you zoomed into), and yields
+  instantly the moment you touch the controls again.
 - Shows a live **Shaking** meter (how strong the *current instant* of real
   ground motion is, relative to that record's own peak) alongside a subtle
-  camera shake at high intensity, and renders lit windows/the roof beacon
+  camera shake at high intensity, and renders lit surfaces/the roof beacon
   through a bloom pass for a bit more visual punch — all purely cosmetic,
   none of it feeds back into the physics.
+- Lighting is brighter across the board than earlier versions of this
+  project, plus three fixed interior point lights (warm-neutral, no
+  shadows) specifically so the columns/beams/furniture inside the open
+  cutaway read clearly from any camera angle — the moody night exterior
+  (fog, background, hemisphere colors) is unchanged, only the amount of
+  light went up, not its color/character.
+- The control panel is a real redesign, not just a re-layout: grouped
+  collapsible sections (Playback / Building Parameters / View), a
+  deliberate system-font typography scale (headers/labels/values sized and
+  weighted differently, numeric readouts in a monospace-flavored stack with
+  tabular figures), and a genuine mobile layout — below ~600px width the
+  panel becomes a bottom sheet with a collapsed strip (record name +
+  play/pause) you can tap to expand, larger touch targets throughout, and
+  no hover-only controls. One-finger drag / two-finger pinch-pan orbiting
+  and zooming still come from `OrbitControls`' own built-in touch handling.
 
 **This is the file to open when you want to see whether the simulation
 "looks right."**
@@ -179,13 +262,15 @@ this is the wrong file — use `index.html`.
 A small Flask app with two jobs: (1) serve the project's static files
 (replacing the plain `python -m http.server` used before this existed), and
 (2) handle `POST /compute` — takes a record name plus building parameters
-(stories, mass/floor, damping, period) from `index.html`'s sliders, rebuilds
-the same `MDOF_ShearBuilding` model from `mdof_response.py` with those
-values, and returns freshly computed floor displacements. It reuses each
-record's cached `ground_accel.json` rather than re-reading the original
-earthquake file, and returns the result as compact binary data (not JSON) —
-sending the full time series as JSON text turned out to be slow enough to
-matter, since it's transferred on every slider move.
+(stories, mass/floor, damping, column depth X/Y, beam depth) from
+`index.html`'s sliders, rebuilds two `MDOF_ShearBuilding` models from
+`mdof_response.py` (one per axis, since X and Y are no longer identical)
+with those values, computes each axis's furniture response too, and
+returns freshly computed floor displacements plus furniture sway. It
+reuses each record's cached `ground_accel.json` rather than re-reading the
+original earthquake file, and returns the result as compact binary data
+(not JSON) — sending the full time series as JSON text turned out to be
+slow enough to matter, since it's transferred on every slider move.
 
 ### `style.css`
 
@@ -195,12 +280,21 @@ Everything else is styled inline inside the HTML files themselves.
 ### `out/` — the computed results (already included in this repo)
 
 One folder per earthquake recording, containing:
-- `building_data.json` — a summary of the virtual building used: how many
-  floors, its natural sway speeds, sway-pattern shapes, etc.
+- `building_data.json` — a summary of the virtual building used: floor
+  count, the frame geometry (column/beam dimensions, plan span, material),
+  and **per-axis** natural sway speeds/sway-pattern shapes/fundamental
+  period (X and Y are independently condensed now, so these are no longer
+  shared numbers), plus a `furniture` block describing
+  `furniture_response.bin`.
 - `response_X.csv` / `response_Y.csv` — the actual result: a spreadsheet
   where each row is one instant in time, and each column is one floor's
   position at that instant (X = one horizontal direction, Y = the other).
 - `response_plot_X.png` — the static picture from `plot_response.py`.
+- `furniture_response.bin` — every furniture class's (table/chair/fan) own
+  extra sway relative to its floor, for both axes, as raw binary
+  (float32). Resampled to a lower rate than the ground motion before
+  saving (see "Furniture sway" in the glossary) — this keeps the addition
+  to `out/`'s size modest (a few MB per record) instead of doubling it.
 - `ground_accel.json` — the raw ground acceleration and displacement used as
   input, cached so `server.py`'s live parameter sliders can recompute a
   building's response without re-reading the original earthquake file.
@@ -244,16 +338,28 @@ explains why it exists and what it contains.
 ## Current state (as of this pull)
 
 - The pipeline runs end-to-end for the 10 recordings already included in
-  `out/`, using a corrected free-top cantilever building model — fixed at
-  the base, genuinely free at the roof, matching how a real building is
-  actually supported (an earlier version incorrectly modeled it as fixed
-  at both ends).
+  `out/`, using a real structural frame — four corner columns per floor
+  connected by beams, fixed at the ground floor's base, genuinely free at
+  the roof — instead of the abstract "floors on springs" model this
+  project started with. Stiffness comes from actual column/beam
+  dimensions via the matrix-stiffness method with static condensation, not
+  a target-period guess.
+- X and Y sway are independently modeled now (each axis gets its own
+  condensed stiffness matrix), so a building with unequal column depths in
+  each direction is genuinely stiffer one way than the other — this
+  wasn't possible with the old single isotropic spring constant.
+- Every floor also has a handful of furniture items (tables, chairs, a
+  fan) with their own small extra sway relative to their floor, computed
+  with the same frequency-domain technique as the building itself.
 - Only the X-direction static plot is generated by default.
-- `out/`'s precomputed results still use a fixed 7-floor building (see
-  `NUM_STORIES` above) — but stories, mass, damping, and target period are
-  all now adjustable *live* via `index.html`'s Building Parameters sliders,
-  backed by `server.py`. Per-floor stiffness variation (e.g. a "soft story")
-  isn't supported yet.
+- `out/`'s precomputed results use a fixed 7-floor building with fixed
+  default column/beam dimensions (see `NUM_STORIES`/`COLUMN_DEPTH_X/Y`/
+  `BEAM_DEPTH` above) — but stories, mass, damping, and the three frame
+  dimensions are all now adjustable *live* via `index.html`'s Building
+  Parameters sliders, backed by `server.py`. The old "Target Period"
+  slider is gone — period is now an *output* of the frame dimensions, not
+  something you dial in directly (a read-only readout shows it instead).
+  Per-floor stiffness variation (e.g. a "soft story") isn't supported yet.
 - No automated test suite as a project convention.
 - Two bugs in the Building Parameters panel are fixed: a parameter tweak
   was silently changing the Amplify zoom (now decoupled — Amplify only
@@ -267,6 +373,28 @@ explains why it exists and what it contains.
   the Earthquake Record while any Building Parameter was off its default
   used to silently reload the static 7-story data, leaving the panel's
   sliders showing values that no longer matched the rendered building.
+- A visual/UI redesign pass (spec 4) followed direct feedback that
+  furniture was too small to read, the lighting felt too dark since the
+  open-cutaway rewrite, the animation felt static, and the control panel
+  needed a real redesign rather than another patch: furniture is now
+  rendered ~1.6x larger (a purely cosmetic constant, doesn't touch sway
+  physics) with per-instance material tint variety; every light's
+  intensity went up and three new interior point lights specifically
+  light the now-visible columns/beams/furniture, while the moody exterior
+  night mood is unchanged; the camera idle-auto-orbits and can also
+  reframe in close on any single selected floor (with an explicit "back to
+  full view" control); building materials got richer PBR parameters and
+  per-column tint jitter; and the control panel was rebuilt from scratch
+  (grouped collapsible sections, deliberate typography, a real mobile
+  bottom-sheet layout) with a full loading-overlay replacing the old tiny
+  "recomputing…" text line during live parameter recomputes. A follow-up
+  fix found during that pass's own review: the scene's fog range used to
+  only be recalculated at framing events (record switch, per-floor select,
+  a parameter change), so manually zooming out further than the last-framed
+  distance ran the building straight into a now-too-close, frozen fog wall
+  and faded it to black — especially noticeable on tall buildings. Fog
+  near/far are now recomputed every animation frame from the camera's
+  actual current distance, not a value cached from the last framing event.
 
 Keep this file — and the math PDF — updated as the project evolves. That's
 the whole point of having them.
