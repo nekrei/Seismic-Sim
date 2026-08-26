@@ -6,13 +6,34 @@
     <title>Seismic Response – Three.js</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { overflow: hidden; background: #0b0b1a; font-family: 'Segoe UI', system-ui, sans-serif; }
+        /* Typography (spec 4, Part E): a deliberate system-only stack, no
+           webfont network request (same "no new dependency" constraint as
+           3D assets) -- replaces the untouched 'Segoe UI', system-ui
+           default this project shipped with since spec 3. */
+        body {
+            overflow: hidden;
+            background: #0b0b1a;
+            color: rgba(255,255,255,0.85);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
         canvas { display: block; }
 
         @keyframes panelSlideIn {
             from { opacity: 0; transform: translate(-14px, -8px); }
             to { opacity: 1; transform: translate(0, 0); }
         }
+
+        /* ==================================================================
+           Control panel (spec 4, Part E) -- ported near-verbatim from the
+           approved mockup, claude_scripts/design-mockup-04.html: grouped
+           <details> accordion sections instead of a flat list, a real
+           mobile bottom-sheet reflow, and the typography scale below
+           (headers ~14-15px/600, labels ~11px uppercase/500, values
+           ~13px/400-500 with tabular-nums). Structural CSS unchanged from
+           the mockup; only the demo-only #recomputeTrigger/.stage-note/
+           .resize-hint/mood-board rules were left out (mockup-only, see
+           claude_scripts/design-mockup-04.html's own comments).
+           ================================================================== */
         #controls {
             position: fixed;
             top: 20px;
@@ -20,16 +41,15 @@
             z-index: 10;
             background: rgba(11, 11, 26, 0.85);
             backdrop-filter: blur(12px);
-            padding: 14px 18px;
             border-radius: 12px;
             border: 1px solid rgba(255,255,255,0.08);
             color: rgba(255,255,255,0.7);
-            font-size: 13px;
             display: flex;
             flex-direction: column;
-            gap: 10px;
-            min-width: 200px;
-            max-width: 280px;
+            min-width: 240px;
+            max-width: 300px;
+            max-height: calc(100% - 40px);
+            overflow-y: auto;
             user-select: none;
             animation: panelSlideIn 0.5s cubic-bezier(0.16, 1, 0.3, 1);
             transition: border-color 0.3s, box-shadow 0.3s;
@@ -38,131 +58,172 @@
             border-color: rgba(255,215,100,0.18);
             box-shadow: 0 0 24px rgba(255,215,100,0.06);
         }
-        #controls label {
+
+        /* Record block -- ungrouped, sits above the accordion */
+        .record-block {
+            padding: 14px 16px 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .panel-header {
+            font-size: 14px;
+            font-weight: 600;
+            color: rgba(255,255,255,0.85);
+            letter-spacing: 0.01em;
+        }
+        .panel-label {
             font-size: 11px;
             text-transform: uppercase;
-            letter-spacing: 0.04em;
-            color: rgba(255,255,255,0.4);
+            letter-spacing: 0.08em;
+            font-weight: 600;
+            font-family: ui-monospace, "SF Mono", "Cascadia Code", "Consolas", monospace;
+            color: rgba(255, 224, 178, 0.55);
+            min-width: 84px;
+            flex-shrink: 0;
         }
+        .panel-value {
+            font-size: 13px;
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+            font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+            color: rgba(255,255,255,0.75);
+            min-width: 44px;
+            flex-shrink: 0; /* numeric readouts are single unbreakable tokens
+                                (e.g. "1000t") -- if squeezed below their own
+                                content width they overflow the panel edge
+                                instead of wrapping, so they must never be the
+                                thing that gives up space to the slider */
+            white-space: nowrap;
+            text-align: right;
+        }
+
         #controls select,
-        #controls input {
+        #controls input[type="text"] {
             background: rgba(11, 11, 26, 0.9);
             border: 1px solid rgba(255,255,255,0.1);
             border-radius: 6px;
             color: #fff;
-            padding: 6px 8px;
+            padding: 7px 8px;
             font-size: 13px;
+            font-family: inherit;
             outline: none;
             transition: border-color 0.2s;
             width: 100%;
         }
-        #controls select option {
-            background: #1a1a2e;
-            color: #fff;
+        #controls select option { background: #1a1a2e; color: #fff; }
+        #controls select:hover, #controls select:focus { border-color: rgba(255,215,100,0.4); }
+
+        /* accordion sections */
+        #controls details {
+            border-bottom: 1px solid rgba(255,255,255,0.06);
         }
-        #controls select:hover,
-        #controls select:focus {
-            border-color: rgba(255,215,100,0.4);
+        #controls details:last-of-type { border-bottom: none; }
+        #controls summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            -webkit-tap-highlight-color: transparent;
         }
-        #controls input[type="range"] {
+        #controls summary::-webkit-details-marker { display: none; }
+        #controls summary .chevron {
+            font-size: 10px;
+            color: rgba(255,255,255,0.35);
+            transition: transform 0.2s ease;
+        }
+        #controls details[open] summary .chevron { transform: rotate(90deg); }
+        #controls summary:hover .panel-header { color: #ffd764; }
+        #controls .details-body {
+            padding: 2px 16px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        #controls .ctrl-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        /* Range-input styling applies to every slider in the panel --
+           .ctrl-row (Building Parameters/Amplify/Floor), plus the
+           Playback section's speed and seek sliders, which aren't inside a
+           .ctrl-row -- kept as one shared ruleset so every slider in the
+           panel looks/behaves identically (the mockup only wrote the
+           .ctrl-row selector explicitly; extended here during the build
+           pass, see the build report). */
+        #controls .ctrl-row input[type="range"],
+        #controls .transport-row .speed input[type="range"],
+        #controls .seek-row input[type="range"] {
             -webkit-appearance: none;
             appearance: none;
+            flex: 1;
+            min-width: 0; /* flex items default to min-width:auto, which for a
+                             range input resolves to its UA intrinsic width and
+                             blocks real shrinking -- without this override the
+                             slider refuses to compress and pushes the value
+                             label off the panel edge instead */
             height: 4px;
             background: rgba(255,255,255,0.12);
             border: none;
             border-radius: 4px;
             padding: 0;
             cursor: pointer;
+            accent-color: #ffd764;
         }
-        #controls input[type="range"]::-webkit-slider-thumb {
+        #controls .ctrl-row input[type="range"]::-webkit-slider-thumb,
+        #controls .transport-row .speed input[type="range"]::-webkit-slider-thumb,
+        #controls .seek-row input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;
-            width: 14px;
-            height: 14px;
+            width: 16px;
+            height: 16px;
             border-radius: 50%;
             background: #ffd764;
             cursor: pointer;
             box-shadow: 0 0 8px rgba(255,215,100,0.35);
             transition: transform 0.15s ease, box-shadow 0.15s ease;
         }
-        #controls input[type="range"]::-moz-range-thumb {
-            width: 14px;
-            height: 14px;
+        #controls .ctrl-row input[type="range"]::-moz-range-thumb,
+        #controls .transport-row .speed input[type="range"]::-moz-range-thumb,
+        #controls .seek-row input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
             border-radius: 50%;
             background: #ffd764;
             cursor: pointer;
             border: none;
-            transition: transform 0.15s ease, box-shadow 0.15s ease;
         }
-        #controls input[type="range"]::-webkit-slider-thumb:hover,
-        #controls input[type="range"]:active::-webkit-slider-thumb {
+        #controls .ctrl-row input[type="range"]:hover::-webkit-slider-thumb,
+        #controls .ctrl-row input[type="range"]:active::-webkit-slider-thumb,
+        #controls .transport-row .speed input[type="range"]:hover::-webkit-slider-thumb,
+        #controls .transport-row .speed input[type="range"]:active::-webkit-slider-thumb,
+        #controls .seek-row input[type="range"]:hover::-webkit-slider-thumb,
+        #controls .seek-row input[type="range"]:active::-webkit-slider-thumb {
             transform: scale(1.15);
             box-shadow: 0 0 14px rgba(255,215,100,0.65);
         }
-        #controls input[type="range"]::-moz-range-thumb:hover,
-        #controls input[type="range"]:active::-moz-range-thumb {
-            transform: scale(1.15);
-            box-shadow: 0 0 14px rgba(255,215,100,0.65);
-        }
-        #controls .row {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-        }
-        #controls .row button {
+
+        .transport-row { display: flex; gap: 8px; align-items: center; }
+        .transport-row button {
             background: rgba(255,215,100,0.15);
             border: 1px solid rgba(255,215,100,0.2);
             color: #ffd764;
-            padding: 4px 14px;
+            padding: 8px 16px;
             border-radius: 6px;
             cursor: pointer;
-            font-size: 13px;
+            font-size: 15px;
             transition: background 0.2s;
-            flex: 1;
+            min-height: 40px;
+            min-width: 40px;
         }
-        #controls .row button:hover {
-            background: rgba(255,215,100,0.25);
-        }
-        #controls .row .speed {
-            flex: 2;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        #controls .row .speed input[type="range"] {
-            flex: 1;
-            background: transparent;
-            accent-color: #ffd764;
-        }
-        #controls .row .speed span {
-            font-size: 12px;
-            min-width: 30px;
-            text-align: center;
-            color: rgba(255,255,255,0.6);
-        }
-        #controls .amplify-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        #controls .amplify-row input[type="range"] {
-            flex: 1;
-            accent-color: #ffd764;
-        }
-        #controls .amplify-row span {
-            font-size: 12px;
-            min-width: 35px;
-            text-align: center;
-            color: rgba(255,255,255,0.6);
-        }
-        #controls .intensity-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 2px;
-        }
-        #controls .intensity-row label {
-            min-width: 52px;
-        }
+        .transport-row button:hover { background: rgba(255,215,100,0.25); }
+        .transport-row .speed { flex: 1; display: flex; align-items: center; gap: 8px; }
+
+        .seek-row { display: flex; align-items: center; gap: 8px; }
+        .seek-row .panel-value { min-width: 82px; }
+
         .intensity-track {
             flex: 1;
             height: 6px;
@@ -178,44 +239,182 @@
             transition: width 0.08s linear;
             box-shadow: 0 0 6px currentColor;
         }
-        .seek-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            width: 100%;
-        }
-        .seek-row input[type="range"] {
+
+        .view-buttons { display: flex; gap: 8px; }
+        .view-buttons button {
             flex: 1;
-            background: transparent;
-            accent-color: #ffd764;
-            height: 4px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
+            color: rgba(255,255,255,0.75);
+            padding: 9px 10px;
+            border-radius: 6px;
             cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            min-height: 40px;
+            transition: background 0.2s, border-color 0.2s;
         }
-        .seek-row input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 14px;
+        .view-buttons button:hover { background: rgba(255,255,255,0.1); }
+        .view-buttons button.primary {
+            background: rgba(255,215,100,0.15);
+            border-color: rgba(255,215,100,0.25);
+            color: #ffd764;
+        }
+        .view-buttons button.primary:hover { background: rgba(255,215,100,0.25); }
+
+        /* ---- mobile bottom-sheet reflow ---- */
+        /* Collapsed strip: always visible, shows record name + play/pause.
+           Expand affordance reveals the full accordion panel as a sheet
+           sliding up from the bottom. */
+        .sheet-collapsed-strip { display: none; }
+
+        @media (max-width: 600px) {
+            #controls {
+                position: fixed;
+                top: auto;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                width: 100%;
+                max-width: none;
+                min-width: 0;
+                border-radius: 16px 16px 0 0;
+                max-height: 72%;
+                transition: transform 0.28s cubic-bezier(0.16,1,0.3,1);
+            }
+            #controls.sheet-collapsed {
+                transform: translateY(calc(100% - 56px));
+            }
+            .sheet-collapsed-strip {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                padding: 0 14px;
+                height: 56px;
+                flex: none;
+                cursor: pointer;
+            }
+            .sheet-collapsed-strip .record-name {
+                font-size: 13px;
+                font-weight: 600;
+                color: rgba(255,255,255,0.85);
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .sheet-collapsed-strip button {
+                background: rgba(255,215,100,0.18);
+                border: 1px solid rgba(255,215,100,0.25);
+                color: #ffd764;
+                border-radius: 8px;
+                min-width: 40px;
+                min-height: 40px;
+                font-size: 16px;
+                flex: none;
+            }
+            .sheet-expand-handle {
+                width: 36px;
+                height: 4px;
+                border-radius: 4px;
+                background: rgba(255,255,255,0.2);
+                margin: 8px auto 0;
+                flex: none;
+            }
+            .record-block { padding: 10px 16px 10px; }
+            /* bump touch targets: thumbs 14->22px, buttons ~44px hit area */
+            #controls .ctrl-row input[type="range"]::-webkit-slider-thumb,
+            #controls .ctrl-row input[type="range"]::-moz-range-thumb,
+            #controls .transport-row .speed input[type="range"]::-webkit-slider-thumb,
+            #controls .transport-row .speed input[type="range"]::-moz-range-thumb,
+            #controls .seek-row input[type="range"]::-webkit-slider-thumb,
+            #controls .seek-row input[type="range"]::-moz-range-thumb {
+                width: 22px;
+                height: 22px;
+            }
+            #controls summary { padding: 14px 16px; min-height: 44px; }
+            .transport-row button, .view-buttons button {
+                min-height: 44px;
+            }
+            #info {
+                font-size: 10px;
+                padding: 4px 12px;
+                bottom: 12px;
+                white-space: normal;
+            }
+        }
+        @media (max-width: 480px) {
+            #controls { max-height: 78%; }
+            .panel-label { min-width: 68px; font-size: 10.5px; letter-spacing: 0.05em; }
+        }
+
+        /* ==================================================================
+           Live-recompute loading overlay (spec 4, Part H) -- replaces the
+           old tiny "recomputing..." text line that lived in the Building
+           Parameters section. Shown/hidden by liveRecompute() around its
+           existing fetch (see the JS below), not by any UI trigger. Sits
+           below #controls in the stacking order (z-index 5 vs 10) so the
+           panel stays usable throughout. Ported near-verbatim from the
+           approved mockup's .recompute-overlay/.recompute-floor/
+           .recompute-label rules (claude_scripts/design-mockup-04.html) --
+           only #recomputeTrigger (a mockup-only demo button) was left out.
+           ================================================================== */
+        .recompute-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            background: rgba(11,11,26,0.62);
+            backdrop-filter: blur(3px);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.4s ease;
+        }
+        .recompute-overlay.is-active { opacity: 1; }
+        .recompute-stack {
+            display: flex;
+            flex-direction: column-reverse;
+            gap: 6px;
+        }
+        .recompute-floor {
+            width: 140px;
             height: 14px;
-            border-radius: 50%;
-            background: #ffd764;
-            cursor: pointer;
-            box-shadow: 0 0 8px rgba(255,215,100,0.3);
+            border: 1.5px solid rgba(255,215,100,0.55);
+            border-radius: 3px;
+            background: rgba(255,215,100,0.06);
+            opacity: 0;
+            transform: translateY(10px) scaleX(0.85);
+            animation: floorAssemble 1.5s ease-in-out infinite;
         }
-        .seek-row input[type="range"]::-moz-range-thumb {
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: #ffd764;
-            cursor: pointer;
-            border: none;
+        @keyframes floorAssemble {
+            0%   { opacity: 0; transform: translateY(10px) scaleX(0.85); box-shadow: none; }
+            18%  { opacity: 1; transform: translateY(0) scaleX(1); box-shadow: 0 0 10px rgba(255,215,100,0.4); }
+            55%  { opacity: 1; transform: translateY(0) scaleX(1); box-shadow: none; }
+            85%  { opacity: 0.12; }
+            100% { opacity: 0; transform: translateY(10px) scaleX(0.85); }
         }
-        .seek-row .time-label {
-            font-size: 11px;
-            min-width: 80px;
-            text-align: right;
-            color: rgba(255,255,255,0.5);
-            font-variant-numeric: tabular-nums;
-            white-space: nowrap;
+        .recompute-label {
+            font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+            font-size: 12px;
+            letter-spacing: 0.16em;
+            color: rgba(255,215,100,0.85);
+            text-transform: uppercase;
         }
+        .recompute-label .dots span {
+            opacity: 0;
+            animation: dotPulse 1.5s steps(1) infinite;
+        }
+        .recompute-label .dots span:nth-child(2) { animation-delay: 0.3s; }
+        .recompute-label .dots span:nth-child(3) { animation-delay: 0.6s; }
+        @keyframes dotPulse {
+            0%, 20% { opacity: 0; }
+            30%, 100% { opacity: 1; }
+        }
+
         #info {
             position: fixed;
             bottom: 24px;
@@ -252,76 +451,146 @@
             text-align: center;
             max-width: 80%;
         }
-        @media (max-width:600px) {
-            #controls {
-                top: 12px;
-                left: 12px;
-                padding: 10px 14px;
-                min-width: 160px;
-                max-width: 220px;
-            }
-            #info {
-                font-size: 10px;
-                padding: 4px 12px;
-                bottom: 12px;
-                white-space: normal;
-            }
-            .seek-row .time-label {
-                min-width: 60px;
-                font-size: 10px;
-            }
-        }
     </style>
 </head>
 <body>
+    <!-- Live-recompute loading overlay (spec 4, Part H) -- shown/hidden by
+         liveRecompute() around its fetch, see the module script below. -->
+    <div class="recompute-overlay" id="recomputeOverlay">
+        <div class="recompute-stack">
+            <div class="recompute-floor" style="animation-delay:0.5s"></div>
+            <div class="recompute-floor" style="animation-delay:0.4s"></div>
+            <div class="recompute-floor" style="animation-delay:0.3s"></div>
+            <div class="recompute-floor" style="animation-delay:0.2s"></div>
+            <div class="recompute-floor" style="animation-delay:0.1s"></div>
+            <div class="recompute-floor" style="animation-delay:0s"></div>
+        </div>
+        <div class="recompute-label">Recomputing<span class="dots"><span>.</span><span>.</span><span>.</span></span></div>
+    </div>
+
     <div id="controls">
-        <label>📍 Earthquake Record</label>
-        <select id="folderSelect">
-            <option value="">— loading… —</option>
-        </select>
-        <div class="row">
-            <button id="playBtn">⏸</button>
-            <div class="speed">
-                <input type="range" id="speedSlider" min="0.1" max="5" step="0.1" value="1" />
-                <span id="speedLabel">1×</span>
-            </div>
+        <!-- Collapsed strip: only shown/used under the mobile bottom-sheet
+             breakpoint (spec 4, Part E) -- mirrors the record name + a
+             play/pause button so playback stays reachable without
+             expanding the full sheet. -->
+        <div class="sheet-collapsed-strip" id="sheetStrip">
+            <span class="record-name" id="stripRecordName">—</span>
+            <button id="stripPlayBtn">⏸</button>
         </div>
-        <div class="seek-row">
-            <input type="range" id="seekSlider" min="0" max="1" step="0.001" value="0" />
-            <span class="time-label" id="timeDisplay">0.0s / 0.0s</span>
-        </div>
-        <div class="amplify-row">
-            <label style="font-size:11px; color:rgba(255,255,255,0.4);">Amplify</label>
-            <input type="range" id="amplifySlider" min="0" max="1000" step="1" value="0" />
-            <span id="amplifyLabel">1×</span>
-        </div>
-        <div class="intensity-row">
-            <label style="font-size:11px; color:rgba(255,255,255,0.4);">Shaking</label>
-            <div class="intensity-track"><div class="intensity-fill" id="intensityFill"></div></div>
+        <div class="sheet-expand-handle"></div>
+
+        <!-- Record: ungrouped, top -->
+        <div class="record-block">
+            <div class="panel-label" style="margin-bottom:6px;">📍 Earthquake Record</div>
+            <select id="folderSelect">
+                <option value="">— loading… —</option>
+            </select>
         </div>
 
-        <label style="margin-top:4px;">🏗️ Building Parameters</label>
-        <div class="amplify-row">
-            <label style="font-size:11px; color:rgba(255,255,255,0.4); min-width:52px;">Stories</label>
-            <input type="range" id="storiesSlider" min="1" max="20" step="1" value="7" />
-            <span id="storiesLabel">7</span>
-        </div>
-        <div class="amplify-row">
-            <label style="font-size:11px; color:rgba(255,255,255,0.4); min-width:52px;">Mass/floor</label>
-            <input type="range" id="massSlider" min="100000" max="5000000" step="50000" value="1000000" />
-            <span id="massLabel">1000t</span>
-        </div>
-        <div class="amplify-row">
-            <label style="font-size:11px; color:rgba(255,255,255,0.4); min-width:52px;">Damping</label>
-            <input type="range" id="zetaSlider" min="0.01" max="0.2" step="0.005" value="0.05" />
-            <span id="zetaLabel">5%</span>
-        </div>
-        <div class="amplify-row">
-            <label style="font-size:11px; color:rgba(255,255,255,0.4); min-width:52px;">Period</label>
-            <input type="range" id="t1Slider" min="0.02" max="0.3" step="0.01" value="0.1" />
-            <span id="t1Label">0.1s/story</span>
-        </div>
-        <div id="liveStatus" style="font-size:10px; color:rgba(255,215,100,0.6); min-height:12px;"></div>
+        <!-- Playback: open by default -->
+        <details open>
+            <summary>
+                <span class="panel-header">Playback</span>
+                <span class="chevron">▶</span>
+            </summary>
+            <div class="details-body">
+                <div class="transport-row">
+                    <button id="playBtn">⏸</button>
+                    <div class="speed">
+                        <input type="range" id="speedSlider" min="0.1" max="5" step="0.1" value="1" />
+                        <span class="panel-value" id="speedLabel">1.0×</span>
+                    </div>
+                </div>
+                <div class="seek-row">
+                    <input type="range" id="seekSlider" min="0" max="1" step="0.001" value="0" />
+                    <span class="panel-value" id="timeDisplay">0.0s / 0.0s</span>
+                </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Amplify</span>
+                    <input type="range" id="amplifySlider" min="0" max="1000" step="1" value="0" />
+                    <span class="panel-value" id="amplifyLabel">1×</span>
+                </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Shaking</span>
+                    <div class="intensity-track"><div class="intensity-fill" id="intensityFill"></div></div>
+                </div>
+            </div>
+        </details>
+
+        <!-- Building Parameters: collapsed by default -->
+        <details>
+            <summary>
+                <span class="panel-header">Building Parameters</span>
+                <span class="chevron">▶</span>
+            </summary>
+            <div class="details-body">
+                <div class="ctrl-row">
+                    <span class="panel-label">Stories</span>
+                    <input type="range" id="storiesSlider" min="1" max="20" step="1" value="7" />
+                    <span class="panel-value" id="storiesLabel">7</span>
+                </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Mass/floor</span>
+                    <input type="range" id="massSlider" min="100000" max="5000000" step="50000" value="1000000" />
+                    <span class="panel-value" id="massLabel">1000t</span>
+                </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Damping</span>
+                    <input type="range" id="zetaSlider" min="0.01" max="0.2" step="0.005" value="0.05" />
+                    <span class="panel-value" id="zetaLabel">5%</span>
+                </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Column X</span>
+                    <input type="range" id="columnXSlider" min="0.30" max="1.50" step="0.05" value="1.10" />
+                    <span class="panel-value" id="columnXLabel">1.10m</span>
+                </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Column Y</span>
+                    <input type="range" id="columnYSlider" min="0.30" max="1.50" step="0.05" value="1.10" />
+                    <span class="panel-value" id="columnYLabel">1.10m</span>
+                </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Beam</span>
+                    <input type="range" id="beamSlider" min="0.30" max="2.50" step="0.05" value="1.50" />
+                    <span class="panel-value" id="beamLabel">1.50m</span>
+                </div>
+                <!-- Target Period is gone (spec 5): once k comes from real
+                     column/beam dimensions, period is an OUTPUT of the
+                     model, not an input -- a slider here would either
+                     silently do nothing or fight the dimension sliders for
+                     control of the same number. Read-only instead, makes
+                     that "period is now an output" argument legible rather
+                     than just an absence. -->
+                <div class="ctrl-row">
+                    <span class="panel-label">T₁ (X/Y)</span>
+                    <span class="panel-value" id="periodReadout" style="flex:1;">–</span>
+                </div>
+                <!-- The old tiny "recomputing..." text line lived here;
+                     replaced by the viewport-level .recompute-overlay
+                     above (spec 4, Part H), which now owns this signal on
+                     its own -- keeping both would just be a duplicate,
+                     weaker indicator next to a much clearer one. -->
+            </div>
+        </details>
+
+        <!-- View: new, per Part B -- open by default -->
+        <details open>
+            <summary>
+                <span class="panel-header">View</span>
+                <span class="chevron">▶</span>
+            </summary>
+            <div class="details-body">
+                <div class="ctrl-row">
+                    <span class="panel-label">Floor</span>
+                    <select id="floorSelect" style="flex:1;">
+                        <option value="full">Full building</option>
+                    </select>
+                </div>
+                <div class="view-buttons">
+                    <button class="primary" id="backToFullViewBtn">⤢ Back to full view</button>
+                </div>
+            </div>
+        </details>
     </div>
 
     <div id="info">🏗️ <span>seismic response</span> · drag to orbit · scroll to zoom</div>
@@ -361,9 +630,35 @@
         const massLabel = document.getElementById('massLabel');
         const zetaSlider = document.getElementById('zetaSlider');
         const zetaLabel = document.getElementById('zetaLabel');
-        const t1Slider = document.getElementById('t1Slider');
-        const t1Label = document.getElementById('t1Label');
-        const liveStatusEl = document.getElementById('liveStatus');
+        const columnXSlider = document.getElementById('columnXSlider');
+        const columnXLabel = document.getElementById('columnXLabel');
+        const columnYSlider = document.getElementById('columnYSlider');
+        const columnYLabel = document.getElementById('columnYLabel');
+        const beamSlider = document.getElementById('beamSlider');
+        const beamLabel = document.getElementById('beamLabel');
+        const periodReadout = document.getElementById('periodReadout');
+        // spec 4, Part B (per-floor viewing) / Part E (redesigned panel) / Part H (recompute overlay)
+        const floorSelect = document.getElementById('floorSelect');
+        const backToFullViewBtn = document.getElementById('backToFullViewBtn');
+        const recomputeOverlay = document.getElementById('recomputeOverlay');
+        const sheetStrip = document.getElementById('sheetStrip');
+        const stripPlayBtn = document.getElementById('stripPlayBtn');
+        const stripRecordName = document.getElementById('stripRecordName');
+        const controlsPanel = document.getElementById('controls');
+
+        // Frame-geometry defaults -- MUST match mdof_response.py's __main__
+        // COLUMN_DEPTH_X/Y/BEAM_DEPTH and server.py's DEFAULT_COLUMN_DEPTH_X/Y/
+        // DEFAULT_BEAM_DEPTH exactly (see the matching comment at both of
+        // those sites). buildingParamsAtDefault() below uses equality
+        // against these to decide whether out/'s precomputed static files
+        // are still valid for the current slider positions.
+        const DEFAULT_COLUMN_DEPTH_X = 1.10;
+        const DEFAULT_COLUMN_DEPTH_Y = 1.10;
+        const DEFAULT_BEAM_DEPTH = 1.50;
+        const BEAM_WIDTH = 0.5;
+        const PLAN_SPAN_X = 8.4;
+        const PLAN_SPAN_Y = 6.0;
+        const FURNITURE_CLASS_NAMES = ['table', 'chair', 'fan'];
 
         // --- Live-compute backend base URL ---------------------------------
         // Locally (conda run python server.py), Flask serves the frontend
@@ -417,9 +712,16 @@
         controls.update();
 
         // Lights
-        scene.add(new THREE.AmbientLight(0x40406b, 0.5));
-        scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a1a3a, 0.8));
-        const sunLight = new THREE.DirectionalLight(0xffeedd, 2.8);
+        // Intensities bumped across the board (spec 4, Part C) -- the
+        // open-cutaway rewrite (spec 5) removed the old lit-window texture
+        // that used to suggest interior illumination, and the exterior-only
+        // lighting that was tuned for that older look now reads too dark.
+        // Hues are all UNCHANGED on purpose -- this keeps the moody-night
+        // exterior identity (fog, background, hemisphere palette) intact;
+        // only the amount of light changes, not its character.
+        scene.add(new THREE.AmbientLight(0x40406b, 0.7));
+        scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a1a3a, 1.0));
+        const sunLight = new THREE.DirectionalLight(0xffeedd, 3.4);
         sunLight.position.set(10, 18, 8);
         sunLight.castShadow = true;
         sunLight.shadow.mapSize.width = 2048;
@@ -432,12 +734,44 @@
         sunLight.shadow.camera.bottom = -15;
         sunLight.shadow.bias = -0.001;
         scene.add(sunLight);
-        const fillLight = new THREE.DirectionalLight(0x8888ff, 0.5);
+        const fillLight = new THREE.DirectionalLight(0x8888ff, 0.7);
         fillLight.position.set(-8, 6, -10);
         scene.add(fillLight);
-        const rimLight = new THREE.DirectionalLight(0xffaa66, 0.4);
+        const rimLight = new THREE.DirectionalLight(0xffaa66, 0.55);
         rimLight.position.set(-5, 10, -8);
         scene.add(rimLight);
+
+        // New interior fill lighting (spec 4, Part C2) -- the open cutaway
+        // (spec 5) means columns/beams/furniture are visible from every
+        // angle now, but nothing was ever lighting them specifically; the
+        // exterior lights above leave the interior volume comparatively
+        // dark/uneven. A small FIXED set of 3 point lights (not one per
+        // floor -- cost stays constant regardless of story count, up to the
+        // 20-story slider max), warm-neutral (deliberately NOT the moody
+        // purple/blue exterior hue), soft/flat, non-shadow-casting (sunLight
+        // already owns the one shadow-casting light -- a second shadow
+        // caster would be needlessly expensive for a fill light). Created
+        // once at module scope; positioned/resized in applyLoadedData()
+        // once the current building's height is known -- see
+        // repositionInteriorLights().
+        const INTERIOR_LIGHT_COLOR = 0xfff2e0;
+        const INTERIOR_LIGHT_INTENSITY = 1.2;
+        const INTERIOR_LIGHT_FRACTIONS = [0.15, 0.5, 0.85];
+        const interiorLights = INTERIOR_LIGHT_FRACTIONS.map(() => {
+            const light = new THREE.PointLight(INTERIOR_LIGHT_COLOR, INTERIOR_LIGHT_INTENSITY, 20, 2);
+            light.castShadow = false;
+            scene.add(light);
+            return light;
+        });
+
+        function repositionInteriorLights(totalHeight) {
+            const dist = Math.max(totalHeight, 10) * 1.5;
+            for (let i = 0; i < interiorLights.length; i++) {
+                const light = interiorLights[i];
+                light.distance = dist;
+                light.position.set(0, totalHeight * INTERIOR_LIGHT_FRACTIONS[i], 0);
+            }
+        }
 
         // --- Static Ground (fixed reference) ---
         const groundGeo = new THREE.PlaneGeometry(60, 60);
@@ -453,7 +787,8 @@
         scene.add(gridHelper);
 
         // --- State ---
-        let buildingGroups = [];
+        let buildingGroups = [];   // N floor groups (index f = floor f+1), NOT including a separate roof group -- the roof rides as a child of the topmost floor group.
+        let columnMeshes = [];     // flat list of {mesh, storyIndex, cornerX, cornerZ} -- columns live at scene top level, not inside a floor group, since each spans two differently-displaced levels (spec 5, Part C3).
         let lightSphere = null;
         let foundationSlab = null;
         let timeData = [];
@@ -461,6 +796,14 @@
             groundYData = [];
         let floorXData = [],
             floorYData = [];
+        // Furniture (spec 5, Part B): furnitureData[axis]['table'|'chair'|'fan'][floorIndex] is a
+        // decimated Float32Array of that class's relative-sway response for that floor, on that axis.
+        // furnitureRate/furnitureNpts describe the decimated sample grid; furnitureItems holds the
+        // placed instances (deterministic per-floor placement, see placeFurniture()).
+        let furnitureData = null;  // { X: {table:[...], chair:[...], fan:[...]}, Y: {...} } or null if unavailable
+        let furnitureRateHz = 0;
+        let furnitureNpts = 0;
+        let furnitureItems = [];   // [{ mesh, floorIndex, className, baseX, baseZ }]
         let currentIndex = 0;
         let totalFrames = 0;
         let totalDuration = 0;
@@ -471,6 +814,14 @@
         let sceneObjects = [];
         let isSeeking = false;
         let peakGroundDisp = 1e-9; // for the shake-intensity meter + camera shake, independent of amplify
+
+        // Per-floor camera view state (spec 4, Part B). null = whole-building
+        // view. currentTotalHeight/currentStoryHeight are set inside
+        // applyLoadedData() whenever the building is (re)built, and are also
+        // what repositionInteriorLights()/frameCameraToFloor() key off of.
+        let activeFloorIndex = null;
+        let currentTotalHeight = 0;
+        let currentStoryHeight = 0;
 
         // --- Amplify: logarithmic slider mapping ---
         // Real sway magnitude varies ~500x across real earthquake records
@@ -504,12 +855,205 @@
             amplifyLabel.textContent = amplify < 10 ? amplify.toFixed(1) + '×' : Math.round(amplify) + '×';
         }
 
-        // --- Building creation ---
-        function createBuilding(numFloors, floorHeight) {
-            // Cleanup old building objects
+        // --- Furniture templates (spec 5, Part B4) -- plain procedural
+        // THREE.js primitives (boxes/cylinders), built ONCE and cloned per
+        // placed instance, matching every other piece of geometry in this
+        // file (no external model loading, no asset pipeline this project
+        // has never had). Sizes are in scene units, tuned against the
+        // default 2.8x2.0 footprint / 3.5-unit floor height -- purely
+        // cosmetic, independent of the physical furniture-class constants
+        // (FURNITURE_CLASSES in mdof_response.py) that drive the SWAY.
+        // FURNITURE_SCALE (spec 4, Part A): furniture at true physical scale
+        // read as an invisible speck once the camera is framed for a whole
+        // multi-story building -- this bumps every template's overall size
+        // uniformly (applied as a single group-level scale, so relative
+        // table/chair/fan proportions never change) without touching the
+        // physics-driven sway amplitude at all. Chosen at the top of the
+        // spec's suggested 1.5-1.8x range.
+        const FURNITURE_SCALE = 1.6;
+
+        function buildTableTemplate() {
+            const g = new THREE.Group();
+            const topMat = new THREE.MeshStandardMaterial({ color: 0x8b5a3c, roughness: 0.7 });
+            const legMat = new THREE.MeshStandardMaterial({ color: 0x4a3524, roughness: 0.8 });
+            const top = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.035, 0.22), topMat);
+            top.position.y = 0.24;
+            top.castShadow = true;
+            g.add(top);
+            // Segment count bumped 6->8 (spec 4, Part F) now that furniture
+            // renders larger -- faceting was starting to show at the bigger
+            // scale.
+            const legGeo = new THREE.CylinderGeometry(0.014, 0.014, 0.24, 8);
+            for (const [lx, lz] of [[0.14, 0.09], [0.14, -0.09], [-0.14, 0.09], [-0.14, -0.09]]) {
+                const leg = new THREE.Mesh(legGeo, legMat);
+                leg.position.set(lx, 0.12, lz);
+                leg.castShadow = true;
+                g.add(leg);
+            }
+            g.scale.setScalar(FURNITURE_SCALE);
+            return g;
+        }
+
+        function buildChairTemplate() {
+            const g = new THREE.Group();
+            const mat = new THREE.MeshStandardMaterial({ color: 0x5a6b8c, roughness: 0.75 });
+            const seat = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.03, 0.17), mat);
+            seat.position.y = 0.14;
+            seat.castShadow = true;
+            g.add(seat);
+            const back = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.18, 0.03), mat);
+            back.position.set(0, 0.24, -0.07);
+            back.castShadow = true;
+            g.add(back);
+            const legGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.14, 8);
+            for (const [lx, lz] of [[0.07, 0.07], [0.07, -0.07], [-0.07, 0.07], [-0.07, -0.07]]) {
+                const leg = new THREE.Mesh(legGeo, mat);
+                leg.position.set(lx, 0.07, lz);
+                leg.castShadow = true;
+                g.add(leg);
+            }
+            g.scale.setScalar(FURNITURE_SCALE);
+            return g;
+        }
+
+        function buildFanTemplate() {
+            const g = new THREE.Group();
+            const poleMat = new THREE.MeshStandardMaterial({ color: 0x9098a8, metalness: 0.6, roughness: 0.35 });
+            const bladeMat = new THREE.MeshStandardMaterial({ color: 0xd8dde6, metalness: 0.2, roughness: 0.5, side: THREE.DoubleSide });
+            const base = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.065, 0.02, 12), poleMat);
+            base.position.y = 0.01;
+            g.add(base);
+            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.34, 8), poleMat);
+            pole.position.y = 0.19;
+            pole.castShadow = true;
+            g.add(pole);
+            const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.03, 12), poleMat);
+            hub.rotation.x = Math.PI / 2;
+            hub.position.y = 0.37;
+            g.add(hub);
+            for (let i = 0; i < 3; i++) {
+                const blade = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.02, 0.035), bladeMat);
+                const ang = (i / 3) * Math.PI * 2;
+                blade.position.set(Math.cos(ang) * 0.075, 0.37, Math.sin(ang) * 0.075);
+                blade.rotation.y = ang;
+                g.add(blade);
+            }
+            g.scale.setScalar(FURNITURE_SCALE);
+            return g;
+        }
+
+        const FURNITURE_TEMPLATES = {
+            table: buildTableTemplate(),
+            chair: buildChairTemplate(),
+            fan: buildFanTemplate(),
+        };
+
+        // --- Deterministic per-floor furniture placement (spec B4) -- seeded
+        // from (record name, floor index) so out/ regeneration never causes
+        // spurious placement churn, and switching records/params reshuffles
+        // furniture in a reproducible way rather than randomly every load. ---
+        function hashSeed(str) {
+            let h = 2166136261 >>> 0;
+            for (let i = 0; i < str.length; i++) {
+                h ^= str.charCodeAt(i);
+                h = Math.imul(h, 16777619);
+            }
+            return h >>> 0;
+        }
+        function mulberry32(seed) {
+            let a = seed >>> 0;
+            return function () {
+                a |= 0; a = (a + 0x6D2B79F5) | 0;
+                let t = Math.imul(a ^ (a >>> 15), 1 | a);
+                t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            };
+        }
+
+        // Fixed clearance (scene units) around the footprint edge -- large
+        // enough to clear a corner column at the MAXIMUM column-depth
+        // slider value, so furniture placement never needs to react to the
+        // current slider position to stay clear of the columns (spec C3's
+        // open cutaway skips walls, but not the actual structural columns).
+        // Widened slightly (0.45 -> 0.55, spec 4 Part A) alongside the
+        // FURNITURE_SCALE bump above -- a bigger footprint plus rotation
+        // could otherwise poke into a neighboring cell.
+        const FURNITURE_MARGIN = 0.55;
+        const FURNITURE_GRID = 3; // 3x3 -> ~9 items/floor (spec B4)
+        // Jitter multiplier reduced (0.5 -> 0.3, spec 4 Part A) for the same
+        // reason -- per the spec, overlap risk from the size bump is fixed
+        // by tightening placement, never by shrinking FURNITURE_SCALE back
+        // down.
+        const FURNITURE_JITTER = 0.3;
+
+        // Per-instance material tint jitter (spec 4, Part F) -- reuses the
+        // existing hashSeed()/mulberry32() PRNG (no new one), seeded per
+        // instance so re-placing furniture on `out/` regeneration is still
+        // reproducible. +/-4% brightness offset, applied to a cloned
+        // material (templates are shared across instances via .clone(true),
+        // but clone(true) shares the material reference by default -- so
+        // each instance needs its own material clone before tinting it,
+        // otherwise every instance of a class would flash the same random
+        // tint together).
+        const FURNITURE_TINT_JITTER = 0.04;
+        function applyFurnitureTint(mesh, rand) {
+            mesh.traverse((node) => {
+                if (!node.isMesh || !node.material) return;
+                const mat = node.material.clone();
+                const factor = 1 + (rand() * 2 - 1) * FURNITURE_TINT_JITTER;
+                mat.color.multiplyScalar(factor);
+                node.material = mat;
+            });
+        }
+
+        function placeFurnitureForFloor(recordName, floorIndex, floorGroup, width, depth, slabTop) {
+            const seed = hashSeed(`${recordName}#${floorIndex}`);
+            const rand = mulberry32(seed);
+            const innerW = Math.max(0.2, width - 2 * FURNITURE_MARGIN);
+            const innerD = Math.max(0.2, depth - 2 * FURNITURE_MARGIN);
+            const cellW = innerW / FURNITURE_GRID;
+            const cellD = innerD / FURNITURE_GRID;
+            const items = [];
+            let classCursor = Math.floor(rand() * FURNITURE_CLASS_NAMES.length);
+            for (let r = 0; r < FURNITURE_GRID; r++) {
+                for (let c = 0; c < FURNITURE_GRID; c++) {
+                    const cx = -innerW / 2 + (c + 0.5) * cellW;
+                    const cz = -innerD / 2 + (r + 0.5) * cellD;
+                    const baseX = cx + (rand() - 0.5) * cellW * FURNITURE_JITTER;
+                    const baseZ = cz + (rand() - 0.5) * cellD * FURNITURE_JITTER;
+                    const className = FURNITURE_CLASS_NAMES[classCursor % FURNITURE_CLASS_NAMES.length];
+                    classCursor++;
+                    const mesh = FURNITURE_TEMPLATES[className].clone(true);
+                    mesh.rotation.y = rand() * Math.PI * 2;
+                    mesh.position.set(baseX, slabTop, baseZ);
+                    applyFurnitureTint(mesh, rand);
+                    floorGroup.add(mesh);
+                    items.push({ mesh, floorIndex, className, baseX, baseZ });
+                }
+            }
+            return items;
+        }
+
+        const UP_VECTOR = new THREE.Vector3(0, 1, 0);
+        const _dirVec = new THREE.Vector3();
+
+        // --- Building creation (spec 5, Part A/C -- open-cutaway frame) ---
+        // Structure: opaque thin floor SLABS (furniture needs something to
+        // visibly sit on) plus perimeter BEAMS, both grouped per floor and
+        // moving rigidly with that floor's computed displacement; COLUMNS
+        // live at scene top level (not inside a floor group), since a
+        // column spans two DIFFERENTLY displaced levels -- each column's
+        // transform is derived every frame from its bottom/top floor-group
+        // positions (see updateColumnTransforms()). `frame` carries the
+        // physical column/beam dimensions and plan span (from
+        // building_data.json or /compute's header); `folderName` seeds
+        // furniture placement.
+        function createBuilding(numFloors, floorHeight, frame, folderName) {
             for (const obj of sceneObjects) scene.remove(obj);
             sceneObjects = [];
             buildingGroups = [];
+            columnMeshes = [];
+            furnitureItems = [];
 
             const groups = [];
             const width = 2.8,
@@ -519,65 +1063,37 @@
             const colorBottom = new THREE.Color(0xc47a5a);
             const colorTop = new THREE.Color(0x7ab8d4);
 
-            function createWindowTexture() {
-                const canvas = document.createElement('canvas');
-                const size = 512;
-                canvas.width = size;
-                canvas.height = size;
-                const ctx = canvas.getContext('2d');
-                const grad = ctx.createLinearGradient(0, 0, 0, size);
-                grad.addColorStop(0, '#2c2c44');
-                grad.addColorStop(0.5, '#3a3a5a');
-                grad.addColorStop(1, '#2c2c44');
-                ctx.fillStyle = grad;
-                ctx.fillRect(0, 0, size, size);
-                const cols = 5,
-                    rows = 8,
-                    gapW = 6;
-                const w = (size - (cols + 1) * gapW) / cols;
-                const h = (size - (rows + 1) * gapW) / rows;
-                let rng = 42;
-                const rand = () => { rng = (rng * 9301 + 49297) % 233280; return rng / 233280; };
-                for (let r = 0; r < rows; r++) {
-                    for (let c = 0; c < cols; c++) {
-                        const x = gapW + c * (w + gapW);
-                        const y = gapW + r * (h + gapW);
-                        const lit = rand() > 0.35;
-                        if (lit) {
-                            ctx.fillStyle = `rgb(${240 + 15 * rand()}, ${200 + 40 * rand()}, ${80 + 30 * rand()})`;
-                        } else {
-                            const dark = 20 + rand() * 30;
-                            ctx.fillStyle = `rgb(${dark}, ${dark + 8}, ${dark + 20})`;
-                        }
-                        ctx.fillRect(x, y, w, h);
-                        ctx.strokeStyle = 'rgba(80,80,120,0.5)';
-                        ctx.lineWidth = 1.2;
-                        ctx.strokeRect(x, y, w, h);
-                        if (lit) {
-                            ctx.fillStyle = 'rgba(255,255,230,0.08)';
-                            ctx.fillRect(x + 3, y + 2, w * 0.3, h * 0.15);
-                            ctx.fillStyle = 'rgba(255,255,255,0.04)';
-                            ctx.fillRect(x + 2, y + 2, w * 0.15, h * 0.4);
-                        } else {
-                            ctx.fillStyle = 'rgba(100,100,160,0.04)';
-                            ctx.fillRect(x + 2, y + 2, w * 0.2, h * 0.2);
-                        }
-                    }
-                }
-                for (let r = 0; r <= rows; r++) {
-                    const y = gapW + r * (h + gapW) - gapW / 2;
-                    ctx.fillStyle = 'rgba(60,60,90,0.15)';
-                    ctx.fillRect(0, y, size, 1.5);
-                }
-                const tex = new THREE.CanvasTexture(canvas);
-                tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-                tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-                return tex;
-            }
-            const windowTex = createWindowTexture();
+            // Column/beam render thickness derives from the REAL physical
+            // dimensions via the same plan-to-scene ratio the footprint
+            // already uses (width/depth are fixed scene units representing
+            // PLAN_SPAN_X/Y at roughly 1:3), times a named cosmetic
+            // exaggeration constant -- spec C1 explicitly permits
+            // stylized-for-visibility scaling, not true-to-scale (members
+            // this thin at a literal 1:3 scale would be a couple of pixels
+            // wide and effectively invisible).
+            const sceneScaleX = width / frame.planSpanX;
+            const sceneScaleZ = depth / frame.planSpanY;
+            const memberScale = (sceneScaleX + sceneScaleZ) / 2;
+            const FRAME_RENDER_EXAGGERATION = 1.3;
+            const colThickX = frame.columnDepthX * sceneScaleX * FRAME_RENDER_EXAGGERATION;
+            const colThickZ = frame.columnDepthY * sceneScaleZ * FRAME_RENDER_EXAGGERATION;
+            const beamHeight = frame.beamDepth * memberScale * FRAME_RENDER_EXAGGERATION;
+            const beamThick = frame.beamWidth * memberScale * FRAME_RENDER_EXAGGERATION;
+            const slabThickness = 0.10;
 
-            for (let i = 0; i < numFloors; i++) {
-                const yPos = i * (floorH + gap);
+            const corners = [
+                [width / 2, depth / 2],
+                [width / 2, -depth / 2],
+                [-width / 2, depth / 2],
+                [-width / 2, -depth / 2],
+            ];
+
+            const columnGeo = new THREE.BoxGeometry(1, 1, 1);
+            const beamGeo = new THREE.BoxGeometry(1, 1, 1);
+            const slabGeo = new THREE.BoxGeometry(width + 0.1, slabThickness, depth + 0.1);
+
+            for (let f = 0; f < numFloors; f++) {
+                const yPos = (f + 1) * (floorH + gap);
                 const group = new THREE.Group();
                 group.position.set(0, yPos, 0);
                 scene.add(group);
@@ -589,70 +1105,193 @@
                 // color derived from baseColor below -- NaN components
                 // render as solid black in WebGL, so a 1-story building
                 // came out as a plain black box instead of tinted like
-                // every other floor count.
-                const t = numFloors > 1 ? i / (numFloors - 1) : 0.5;
+                // every other floor count (spec 2's fix, preserved here).
+                const t = numFloors > 1 ? f / (numFloors - 1) : 0.5;
                 const baseColor = colorBottom.clone().lerp(colorTop, t);
-                const emissive = baseColor.clone().multiplyScalar(0.06);
 
-                const sideMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.85), roughness: 0.7, metalness: 0.15 });
-                const topMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(1.05), roughness: 0.8, metalness: 0.1 });
-                const bottomMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.7), roughness: 0.9, metalness: 0.05 });
-                const frontMat = new THREE.MeshStandardMaterial({ map: windowTex, color: baseColor, emissive: emissive, roughness: 0.65, metalness: 0.2 });
-                const backMat = frontMat.clone();
+                // Floor slab -- opaque, so furniture visibly sits on
+                // something and floor levels still read clearly even with
+                // the exterior walls gone (spec C3). Roughness/metalness
+                // pushed toward a flatter "poured concrete" read (spec 4,
+                // Part F) -- widens the gap against beams/columns below,
+                // which previously clustered closely around 0.5/0.3-0.6/0.2.
+                const slabMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.9), roughness: 0.9, metalness: 0.05 });
+                const slab = new THREE.Mesh(slabGeo, slabMat);
+                slab.castShadow = true;
+                slab.receiveShadow = true;
+                group.add(slab);
 
-                const geo = new THREE.BoxGeometry(width, floorH, depth);
-                const mats = [sideMat, sideMat, topMat, bottomMat, frontMat, backMat];
-                const mesh = new THREE.Mesh(geo, mats);
-                mesh.position.y = floorH / 2;
-                mesh.castShadow = true;
-                mesh.receiveShadow = true;
-                group.add(mesh);
+                // Perimeter beams at this floor level (spec A2's 4 beams
+                // per floor) -- front/back span X, left/right span Z.
+                // roughness/metalness (spec 4, Part F): less "structural
+                // dense" than columns, less flat than slabs.
+                const beamMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(1.05), roughness: 0.65, metalness: 0.15 });
+                const beamY = -slabThickness / 2 - beamHeight / 2 - 0.01;
 
-                if (i < numFloors - 1) {
-                    const edgeGeo = new THREE.BoxGeometry(width + 0.02, 0.02, depth + 0.02);
-                    const edgeMat = new THREE.MeshStandardMaterial({
-                        color: 0x6a6a9a,
-                        emissive: 0x222244,
-                        emissiveIntensity: 0.15,
-                        transparent: true,
-                        opacity: 0.25,
+                const beamFront = new THREE.Mesh(beamGeo, beamMat);
+                beamFront.scale.set(width, beamHeight, beamThick);
+                beamFront.position.set(0, beamY, depth / 2);
+                beamFront.castShadow = true;
+                group.add(beamFront);
+
+                const beamBack = beamFront.clone();
+                beamBack.position.z = -depth / 2;
+                group.add(beamBack);
+
+                const beamLeft = new THREE.Mesh(beamGeo, beamMat);
+                beamLeft.scale.set(beamThick, beamHeight, depth);
+                beamLeft.position.set(width / 2, beamY, 0);
+                beamLeft.castShadow = true;
+                group.add(beamLeft);
+
+                const beamRight = beamLeft.clone();
+                beamRight.position.x = -width / 2;
+                group.add(beamRight);
+
+                // Furniture, parented to this floor group so it inherits
+                // the floor's own rigid lateral sway "for free" -- only the
+                // furniture's ADDITIONAL relative-sway offset (spec B) is
+                // applied as a per-frame local-position tweak in
+                // updateFurnitureOffsets(), on top of whatever base
+                // position it's placed at here.
+                const items = placeFurnitureForFloor(folderName || 'unknown', f, group, width, depth, slabThickness / 2 + 0.01);
+                furnitureItems.push(...items);
+
+                // Columns for the story BELOW this floor: story f+1, from
+                // level f (floor f's group, or the ground when f===0) up to
+                // level f+1 (this floor's group). Columns live at scene top
+                // level, not as a child of either floor group -- see
+                // updateColumnTransforms(). roughness/metalness pushed more
+                // "structural/dense" (spec 4, Part F) vs. beams/slabs above.
+                const colBaseColor = baseColor.clone().multiplyScalar(0.75);
+                for (let cornerIndex = 0; cornerIndex < corners.length; cornerIndex++) {
+                    const [cx, cz] = corners[cornerIndex];
+                    // Deterministic per-column tint jitter (spec 4, Part F)
+                    // -- reuses the existing hashSeed()/mulberry32() PRNG
+                    // (no new one), seeded per (record, story, corner) so
+                    // regenerating out/ never causes spurious re-tinting.
+                    const colSeed = hashSeed(`${folderName || 'unknown'}#col#${f}#${cornerIndex}`);
+                    const colRand = mulberry32(colSeed);
+                    const tintFactor = 1 + (colRand() * 2 - 1) * 0.04; // +/-4%
+                    const colMat = new THREE.MeshStandardMaterial({
+                        color: colBaseColor.clone().multiplyScalar(tintFactor),
+                        roughness: 0.45,
+                        metalness: 0.25,
                     });
-                    const edge = new THREE.Mesh(edgeGeo, edgeMat);
-                    edge.position.y = floorH;
-                    group.add(edge);
+                    const mesh = new THREE.Mesh(columnGeo, colMat);
+                    mesh.castShadow = true;
+                    mesh.receiveShadow = true;
+                    scene.add(mesh);
+                    sceneObjects.push(mesh);
+                    columnMeshes.push({
+                        mesh,
+                        cornerX: cx,
+                        cornerZ: cz,
+                        thicknessX: colThickX,
+                        thicknessZ: colThickZ,
+                        bottomSource: f === 0 ? { type: 'ground' } : { type: 'floor', index: f - 1 },
+                        topSource: { type: 'floor', index: f },
+                    });
                 }
             }
 
-            // Roof
-            const roofGroup = new THREE.Group();
-            roofGroup.position.set(0, numFloors * (floorH + gap), 0);
-            scene.add(roofGroup);
-            sceneObjects.push(roofGroup);
-            groups.push(roofGroup);
-
-            const roofGeo = new THREE.BoxGeometry(width + 0.3, 0.25, depth + 0.3);
+            // Roof cap (decorative -- antenna + blinking light) rides as a
+            // child of the topmost floor group, so it needs no separate
+            // per-frame position update; it moves for free via the group's
+            // own transform (simpler than the old standalone roof group
+            // that had to re-derive the top floor's displacement itself).
+            const topGroup = groups[groups.length - 1];
+            const roofGeo = new THREE.BoxGeometry(width + 0.15, 0.1, depth + 0.15);
             const roofMat = new THREE.MeshStandardMaterial({ color: 0x6a7a9a, roughness: 0.3, metalness: 0.5, emissive: 0x223355, emissiveIntensity: 0.1 });
             const roofMesh = new THREE.Mesh(roofGeo, roofMat);
-            roofMesh.position.y = 0.125;
+            roofMesh.position.y = slabThickness / 2 + 0.05;
             roofMesh.castShadow = true;
             roofMesh.receiveShadow = true;
-            roofGroup.add(roofMesh);
+            topGroup.add(roofMesh);
 
             const antGeo = new THREE.CylinderGeometry(0.03, 0.05, 0.4, 6);
             const antMat = new THREE.MeshStandardMaterial({ color: 0x8899bb, metalness: 0.7, roughness: 0.3 });
             const ant = new THREE.Mesh(antGeo, antMat);
-            ant.position.set(0, 0.45, 0);
+            ant.position.set(0, slabThickness / 2 + 0.3, 0);
             ant.castShadow = true;
-            roofGroup.add(ant);
+            topGroup.add(ant);
 
             const lightGeo = new THREE.SphereGeometry(0.05, 8, 8);
             const lightMat = new THREE.MeshStandardMaterial({ color: 0xff4444, emissive: 0xff2222, emissiveIntensity: 0.8 });
-            const lightSphere = new THREE.Mesh(lightGeo, lightMat);
-            lightSphere.position.set(0, 0.7, 0);
-            roofGroup.add(lightSphere);
+            const lightMesh = new THREE.Mesh(lightGeo, lightMat);
+            lightMesh.position.set(0, slabThickness / 2 + 0.55, 0);
+            topGroup.add(lightMesh);
 
             buildingGroups = groups;
-            return { groups, lightSphere, totalHeight: numFloors * (floorH + gap) };
+            return { lightSphere: lightMesh, totalHeight: numFloors * (floorH + gap) };
+        }
+
+        // --- Per-frame column transform update -- a column's world
+        // position/orientation/length are derived from its bottom and top
+        // endpoints' CURRENT world positions (already updated for this
+        // frame by the floor-group position loop in animate()), not stored
+        // directly, since a column spans two independently-swaying levels. ---
+        function sourceWorldPos(source) {
+            if (source.type === 'ground') {
+                return {
+                    x: foundationSlab ? foundationSlab.position.x : 0,
+                    y: 0,
+                    z: foundationSlab ? foundationSlab.position.z : 0,
+                };
+            }
+            const g = buildingGroups[source.index];
+            return { x: g.position.x, y: g.position.y, z: g.position.z };
+        }
+
+        function updateColumnTransforms() {
+            for (const c of columnMeshes) {
+                const b = sourceWorldPos(c.bottomSource);
+                const t = sourceWorldPos(c.topSource);
+                const bx = b.x + c.cornerX, by = b.y, bz = b.z + c.cornerZ;
+                const tx = t.x + c.cornerX, ty = t.y, tz = t.z + c.cornerZ;
+                const dx = tx - bx, dy = ty - by, dz = tz - bz;
+                const length = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+                c.mesh.position.set((bx + tx) / 2, (by + ty) / 2, (bz + tz) / 2);
+                c.mesh.scale.set(c.thicknessX, length, c.thicknessZ);
+                _dirVec.set(dx, dy, dz).normalize();
+                c.mesh.quaternion.setFromUnitVectors(UP_VECTOR, _dirVec);
+            }
+        }
+
+        // Caps the furniture's rendered relative-sway offset regardless of
+        // Amplify (spec B4 / verification 7's "not wildly divergent"
+        // guarantee) -- without this an untouched high Amplify value would
+        // fling furniture through walls that no longer exist once the open
+        // cutaway (C3) removed them.
+        const FURNITURE_RENDER_CLAMP = 0.35;
+
+        function updateFurnitureOffsets(tSeconds) {
+            if (!furnitureItems.length || !furnitureData || furnitureRateHz <= 0) return;
+            const fdt = 1 / furnitureRateHz;
+            const fIdxFloat = Math.max(0, tSeconds) / fdt;
+            const i0 = Math.floor(fIdxFloat);
+            const frac = fIdxFloat - i0;
+
+            for (const item of furnitureItems) {
+                const seriesX = furnitureData.X?.[item.className]?.[item.floorIndex];
+                const seriesZ = furnitureData.Y?.[item.className]?.[item.floorIndex];
+
+                let ox = 0, oz = 0;
+                if (seriesX && seriesX.length > 1) {
+                    const n = seriesX.length;
+                    ox = seriesX[Math.min(i0, n - 1)] * (1 - frac) + seriesX[Math.min(i0 + 1, n - 1)] * frac;
+                }
+                if (seriesZ && seriesZ.length > 1) {
+                    const n = seriesZ.length;
+                    oz = seriesZ[Math.min(i0, n - 1)] * (1 - frac) + seriesZ[Math.min(i0 + 1, n - 1)] * frac;
+                }
+
+                ox = Math.max(-FURNITURE_RENDER_CLAMP, Math.min(FURNITURE_RENDER_CLAMP, ox * amplify));
+                oz = Math.max(-FURNITURE_RENDER_CLAMP, Math.min(FURNITURE_RENDER_CLAMP, oz * amplify));
+
+                item.mesh.position.x = item.baseX + ox;
+                item.mesh.position.z = item.baseZ + oz;
+            }
         }
 
         // --- Create foundation slab (moves with ground) ---
@@ -682,6 +1321,46 @@
             return foundationSlab;
         }
 
+        // --- Furniture/frame data-plumbing helpers, shared by the static
+        // out/ path (loadFolderData) and the live /compute path
+        // (liveRecompute) -- neither should duplicate this parsing logic. ---
+
+        // Slices a flat (classes*floors*npts_dec) Float32Array into
+        // {className: [Float32Array per floor]}, matching the row-major
+        // layout mdof_response.py/server.py write (class outer, floor
+        // inner, both ahead of the sample axis).
+        function sliceFurnitureAxis(flatArray, classNames, numFloors, nptsDec) {
+            const out = {};
+            let offset = 0;
+            for (const cls of classNames) {
+                const perFloor = [];
+                for (let f = 0; f < numFloors; f++) {
+                    perFloor.push(flatArray.subarray(offset, offset + nptsDec));
+                    offset += nptsDec;
+                }
+                out[cls] = perFloor;
+            }
+            return out;
+        }
+
+        // Frame-geometry fields are defensively gated (fall back to the
+        // JS-side defaults) since the separately-deployed backend
+        // (seismic-sim-backend) may not have been mirrored yet with spec
+        // 5's changes -- see AGENTS.md's standing mirror-sync rule. An
+        // un-mirrored backend's /compute response simply won't have these
+        // fields, and this project should degrade gracefully rather than
+        // throw.
+        function normalizeFrame(raw) {
+            return {
+                columnDepthX: raw?.column_depth_x ?? DEFAULT_COLUMN_DEPTH_X,
+                columnDepthY: raw?.column_depth_y ?? DEFAULT_COLUMN_DEPTH_Y,
+                beamDepth: raw?.beam_depth ?? DEFAULT_BEAM_DEPTH,
+                beamWidth: raw?.beam_width ?? BEAM_WIDTH,
+                planSpanX: raw?.plan_span_x ?? PLAN_SPAN_X,
+                planSpanY: raw?.plan_span_y ?? PLAN_SPAN_Y,
+            };
+        }
+
         // --- Load data for a folder ---
         async function loadFolderData(folder) {
             if (!folder) return;
@@ -695,6 +1374,35 @@
                 const meta = await metaRes.json();
                 const numStories = meta.num_stories;
                 const storyHeight = meta.story_height;
+                const frame = normalizeFrame(meta);
+
+                // Furniture (spec 5, Part B) -- defensively gated on the
+                // metadata actually advertising a furniture block/artifact,
+                // and on the fetch succeeding, so a partially-regenerated
+                // out/ (missing furniture_response.bin) degrades to "no
+                // furniture sway" instead of a hard failure.
+                let furniture = null;
+                let furnitureRate = 0;
+                if (meta.furniture && meta.furniture.artifact && meta.furniture.npts_decimated) {
+                    try {
+                        const binRes = await fetch(`out/${folder}/${meta.furniture.artifact}`);
+                        if (binRes.ok) {
+                            const flat = new Float32Array(await binRes.arrayBuffer());
+                            const classNames = meta.furniture.classes || FURNITURE_CLASS_NAMES;
+                            const nptsDec = meta.furniture.npts_decimated;
+                            const perAxisLen = classNames.length * numStories * nptsDec;
+                            furniture = {
+                                X: sliceFurnitureAxis(flat.subarray(0, perAxisLen), classNames, numStories, nptsDec),
+                                Y: sliceFurnitureAxis(flat.subarray(perAxisLen, perAxisLen * 2), classNames, numStories, nptsDec),
+                            };
+                            furnitureRate = meta.furniture.decimated_rate_hz || 0;
+                        } else {
+                            console.warn(`⚠️ Furniture data not found for ${folder} (${binRes.status}) -- rendering without furniture sway.`);
+                        }
+                    } catch (furnErr) {
+                        console.warn('⚠️ Failed to load furniture data -- rendering without furniture sway.', furnErr);
+                    }
+                }
 
                 const [xRes, yRes] = await Promise.all([
                     fetch(`out/${folder}/response_X.csv`),
@@ -745,7 +1453,14 @@
                 console.log(`📊 Ground X range: ${Math.min(...groundX).toFixed(4)} to ${Math.max(...groundX).toFixed(4)} m`);
                 console.log(`📊 Ground Y range: ${Math.min(...groundY).toFixed(4)} to ${Math.max(...groundY).toFixed(4)} m`);
 
-                applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY);
+                applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY, {
+                    frame,
+                    furniture,
+                    furnitureRate,
+                    periodX: meta.fundamental_period_s_X ?? null,
+                    periodY: meta.fundamental_period_s_Y ?? null,
+                    recordName: folder,
+                });
                 progressEl.style.display = 'none';
                 console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
             } catch (err) {
@@ -803,6 +1518,67 @@
             tweenCameraTo(toPos, toTarget);
         }
 
+        // --- Per-floor camera view (spec 4, Part B) -- a new sibling
+        // function, not an overload of frameCameraToBuilding(): the latter
+        // must keep owning the whole-building maxDistance/far/fog sizing,
+        // which frameCameraToFloor() deliberately does NOT touch, so
+        // returning to full view (or just manually orbiting out) never
+        // fights limits that were sized for a single floor. Reuses the same
+        // FOV-derived fit-distance math as frameCameraToBuilding(), applied
+        // to a tight box around one floor instead of the whole height. ---
+        function frameCameraToFloor(floorIndex) {
+            if (!buildingGroups[floorIndex]) return;
+            activeFloorIndex = floorIndex;
+
+            const vFov = camera.fov * Math.PI / 180;
+            const margin = 1.5; // a bit more headroom than the whole-building fit -- there's less context to read the shot by at this zoom
+            const boxHeight = Math.max(currentStoryHeight * 2.2, 2);
+            const footprint = 3.0; // slightly tighter than the whole-building footprint (3.5) -- one floor's plan, not the antenna/roof included
+
+            const distForHeight = (boxHeight / 2) / Math.tan(vFov / 2) * margin;
+            const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+            const distForWidth = footprint / Math.tan(hFov / 2) * margin;
+            const dist = Math.max(distForHeight, distForWidth, 5);
+
+            const floorY = buildingGroups[floorIndex].position.y; // floors only move in X/Z, so Y is safe/static to read here
+            const dir = new THREE.Vector3(1.2, 0.5, 1.5).normalize().multiplyScalar(dist);
+            const toPos = dir.clone();
+            toPos.y += floorY;
+            const toTarget = new THREE.Vector3(0, floorY, 0);
+
+            // activeFloorIndex is already set above, so tweenCameraTo()'s own
+            // scheduleAutoOrbit() call (Part D) picks up the per-floor guard
+            // immediately -- no separate call needed here.
+            tweenCameraTo(toPos, toTarget);
+        }
+
+        function frameCameraToFullBuilding() {
+            activeFloorIndex = null;
+            frameCameraToBuilding(currentTotalHeight);
+        }
+
+        // Rebuilds the View panel's floor <select> options ("Full building"
+        // + "Floor 1".."Floor N") whenever the building is (re)built -- a
+        // native <select> scales to 20 stories with no wrap/scroll handling
+        // needed and gives free mobile touch support (spec 4, Part B).
+        // Always resets the selection back to "Full building", matching
+        // applyLoadedData()'s activeFloorIndex reset above.
+        function populateFloorSelect(numStories) {
+            if (!floorSelect) return;
+            floorSelect.innerHTML = '';
+            const fullOpt = document.createElement('option');
+            fullOpt.value = 'full';
+            fullOpt.textContent = 'Full building';
+            floorSelect.appendChild(fullOpt);
+            for (let f = 0; f < numStories; f++) {
+                const opt = document.createElement('option');
+                opt.value = String(f);
+                opt.textContent = `Floor ${f + 1}`;
+                floorSelect.appendChild(opt);
+            }
+            floorSelect.value = 'full';
+        }
+
         // --- Camera tween: eases position/target from wherever the camera
         // currently is to a new framing over `duration` ms, instead of
         // snapping. Interrupted (not fought) by a manual drag -- see the
@@ -822,9 +1598,37 @@
                 start: performance.now(),
                 duration,
             };
+            // Guard against auto-orbit racing a camera tween (spec 4, Part
+            // D) -- OrbitControls.update() reads back whatever position a
+            // tween just wrote, so an autoRotate that's still active during
+            // a tween would visibly fight it.
+            scheduleAutoOrbit();
         }
 
-        controls.addEventListener('start', () => { cameraTween = null; });
+        // --- Idle-triggered auto-orbit (spec 4, Part D) -- uses
+        // OrbitControls' own built-in autoRotate/autoRotateSpeed, already
+        // consumed by the existing controls.update() call in animate(), so
+        // no animate-loop changes are needed beyond that. Off by default
+        // while a per-floor view (Part B) is active: per-floor camera
+        // distances are much tighter, so the same angular speed circles
+        // faster in absolute terms and risks swinging away from the one
+        // floor the user zoomed into. ---
+        controls.autoRotate = false;
+        controls.autoRotateSpeed = 0.5; // gentler than OrbitControls' 2.0 default
+        let autoOrbitTimer = null;
+        const AUTO_ORBIT_IDLE_MS = 4000;
+
+        function scheduleAutoOrbit() {
+            clearTimeout(autoOrbitTimer);
+            controls.autoRotate = false;
+            if (activeFloorIndex === null) {
+                autoOrbitTimer = setTimeout(() => { controls.autoRotate = true; }, AUTO_ORBIT_IDLE_MS);
+            }
+        }
+
+        controls.addEventListener('start', () => { cameraTween = null; scheduleAutoOrbit(); });
+        controls.addEventListener('end', () => { scheduleAutoOrbit(); });
+        scheduleAutoOrbit(); // arm on load
 
         // --- Shared by both the static out/ path (loadFolderData) and the
         // live /compute path (liveRecompute) -- builds the 3D building,
@@ -833,14 +1637,41 @@
         // true only for an actual record switch: real sway magnitude varies
         // ~500x across different earthquake records, so the zoom needs a
         // fresh default there. Building-parameter tweaks (stories/mass/
-        // damping/period) must NOT touch amplify -- that's a separate, purely
-        // visual "zoom" the user controls, and re-deriving it on every slider
-        // drag made the sway appear to change for reasons unrelated to what
-        // the user just changed. ---
-        function applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY, autoScaleAmplify = true) {
-            const { groups, lightSphere: light, totalHeight } = createBuilding(numStories, storyHeight);
+        // damping/column/beam dimensions) must NOT touch amplify -- that's
+        // a separate, purely visual "zoom" the user controls, and
+        // re-deriving it on every slider drag made the sway appear to
+        // change for reasons unrelated to what the user just changed.
+        //
+        // `extra` bundles spec 5's additions: `frame` (column/beam
+        // dimensions + plan span, from normalizeFrame()), `furniture`
+        // (parsed per-class/per-floor decimated sway series, or null),
+        // `furnitureRate` (its sample rate), `periodX`/`periodY` (for the
+        // read-only T1 readout -- period is now an OUTPUT, not a slider,
+        // spec C1), and `recordName` (furniture placement's seed). ---
+        function applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY, extra, autoScaleAmplify = true) {
+            const { frame, furniture, furnitureRate, periodX, periodY, recordName } = extra;
+            const { lightSphere: light, totalHeight } = createBuilding(numStories, storyHeight, frame, recordName);
             lightSphere = light;
             createFoundationSlab();
+
+            // Per-floor view state (spec 4, Part B) -- every rebuild (record
+            // switch OR any Building Parameter change) resets to whole-
+            // building view, avoiding a stale out-of-range floor index after
+            // e.g. the Stories slider drops. currentTotalHeight/
+            // currentStoryHeight are what frameCameraToFloor()/
+            // frameCameraToFullBuilding() key off of.
+            activeFloorIndex = null;
+            currentTotalHeight = totalHeight;
+            currentStoryHeight = numStories > 0 ? totalHeight / numStories : 0;
+            repositionInteriorLights(totalHeight); // spec 4, Part C -- interior fill lights move with building height
+            populateFloorSelect(numStories);
+
+            furnitureData = furniture;
+            furnitureRateHz = furnitureRate || 0;
+
+            periodReadout.textContent = (periodX != null && periodY != null)
+                ? `${periodX.toFixed(2)}s / ${periodY.toFixed(2)}s`
+                : '–';
 
             timeData = time;
             groundXData = groundX;
@@ -898,11 +1729,15 @@
         }
 
         // --- Live recompute: POST current building-parameter sliders to
-        // the Flask backend (specs/03-live-archetypes.md) and re-render
-        // with the result, instead of the static out/ files. Binary
-        // response format: [4-byte LE header length][JSON header][float32
-        // arrays: time, X ground_disp, X floors_abs (floor-major), then
-        // the same for Y if present] -- see server.py's /compute. ---
+        // the Flask backend (specs/03-live-archetypes.md, extended by spec
+        // 5) and re-render with the result, instead of the static out/
+        // files. Binary response format: [4-byte LE header length][JSON
+        // header][float32 arrays: time, X ground_disp, X floors_abs
+        // (floor-major), then the same for Y if present, then furniture
+        // furn_x(3xNxnpts_dec), then furn_y(...) if present] -- see
+        // server.py's /compute. T1_factor is gone (spec 5 -- period is now
+        // an output, not an input); column_depth_x/y and beam_depth take
+        // its place. ---
         let liveAbortController = null;
 
         async function liveRecompute(folder, autoScaleAmplify = false) {
@@ -916,10 +1751,18 @@
                 num_stories: parseInt(storiesSlider.value, 10),
                 mass_per_floor: parseFloat(massSlider.value),
                 zeta: parseFloat(zetaSlider.value),
-                T1_factor: parseFloat(t1Slider.value),
+                column_depth_x: parseFloat(columnXSlider.value),
+                column_depth_y: parseFloat(columnYSlider.value),
+                beam_depth: parseFloat(beamSlider.value),
             };
 
-            liveStatusEl.textContent = '⏳ recomputing…';
+            // Loading overlay (spec 4, Part H) -- shown for the duration of
+            // the in-flight request, hidden once applyLoadedData() has run
+            // below (or on error/abort). Replaces the old tiny
+            // "recomputing..." text line; a superseded (aborted) request
+            // simply lets the newer request's own show/hide own the
+            // overlay's lifecycle instead of flickering it off here.
+            recomputeOverlay.classList.add('is-active');
             try {
                 const res = await fetch(COMPUTE_URL, {
                     method: 'POST',
@@ -960,13 +1803,47 @@
                     for (let f = 0; f < N; f++) floorY.push(Array.from(takeFloats(npts)));
                 }
 
-                applyLoadedData(header.num_stories, header.story_height, time, groundX, groundY, floorX, floorY, autoScaleAmplify);
-                liveStatusEl.textContent = '';
+                // Furniture -- defensively gated on the response actually
+                // advertising a `furniture` block. This matters once the
+                // separately-deployed backend exists: until
+                // seismic-sim-backend is manually mirrored with spec 5's
+                // changes (AGENTS.md's standing rule), its /compute
+                // response won't have this field, and this degrades to "no
+                // furniture sway" instead of throwing.
+                let furniture = null;
+                let furnitureRate = 0;
+                if (header.furniture && header.furniture.npts_decimated) {
+                    const classNames = header.furniture.classes || FURNITURE_CLASS_NAMES;
+                    const nptsDec = header.furniture.npts_decimated;
+                    const perAxisCount = classNames.length * N * nptsDec;
+                    const furnXFlat = takeFloats(perAxisCount);
+                    const furnYFlat = header.has_y ? takeFloats(perAxisCount) : null;
+                    furniture = {
+                        X: sliceFurnitureAxis(furnXFlat, classNames, N, nptsDec),
+                        Y: furnYFlat ? sliceFurnitureAxis(furnYFlat, classNames, N, nptsDec) : {},
+                    };
+                    furnitureRate = header.furniture.decimated_rate_hz || 0;
+                }
+
+                applyLoadedData(header.num_stories, header.story_height, time, groundX, groundY, floorX, floorY, {
+                    frame: normalizeFrame(header),
+                    furniture,
+                    furnitureRate,
+                    periodX: header.fundamental_period_s_X ?? null,
+                    periodY: header.fundamental_period_s_Y ?? null,
+                    recordName: folder,
+                }, autoScaleAmplify);
+                recomputeOverlay.classList.remove('is-active');
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
             } catch (err) {
-                if (err.name === 'AbortError') return; // superseded by a newer request
+                // A superseded (aborted) request leaves the overlay exactly
+                // as it found it -- either already hidden, or still active
+                // because a newer request is still in flight and owns
+                // turning it off itself. Only a genuine failure needs to
+                // hide it here, so it never gets stuck on indefinitely.
+                if (err.name === 'AbortError') return;
                 console.error('❌ Live recompute failed:', err);
-                liveStatusEl.textContent = `❌ ${err.message}`;
+                recomputeOverlay.classList.remove('is-active');
             }
         }
 
@@ -1000,6 +1877,7 @@
                     folderSelect.appendChild(opt);
                 }
                 folderSelect.value = folders[0];
+                stripRecordName.textContent = folders[0];
                 await loadFolderData(folders[0]);
             } catch (err) {
                 console.error('❌ Failed to load manifest:', err);
@@ -1009,9 +1887,42 @@
                 const folderParam = params.get('folder');
                 if (folderParam) {
                     folderSelect.innerHTML = `<option value="${folderParam}">${folderParam}</option>`;
+                    stripRecordName.textContent = folderParam;
                     await loadFolderData(folderParam);
                 }
             }
+        }
+
+        // --- Continuous fog range (bug fix) -- scene.fog.near/.far used to
+        // only be recalculated at discrete framing events
+        // (frameCameraToBuilding()/frameCameraToFloor()), so the instant a
+        // user manually scrolled/pinched the camera further out than
+        // whatever distance was last auto-framed to, the fog window stayed
+        // frozen at the old (smaller) values and the building ran straight
+        // into a now-too-close fixed fog wall, fading toward the
+        // background the further out they went. Taller buildings made it
+        // worse on top of that: a taller building needs a larger auto-fit
+        // distance to begin with, and the oblique camera angle (not a
+        // top-down view) spreads a tall building's base-to-roof across a
+        // wider range of actual camera-relative depth than a tight fog
+        // window comfortably covers, especially right after framing.
+        //
+        // Fixed by recomputing the fog range every frame from the camera's
+        // ACTUAL current distance to controls.target, instead of a value
+        // fixed at framing time. frameCameraToBuilding()/frameCameraToFloor()
+        // still set an initial value (avoids a one-frame pop before the
+        // first animate() tick runs), but this is the source of truth
+        // thereafter -- as the camera eases through a tween, this tracks
+        // right along with it, and it keeps tracking indefinitely for any
+        // later manual zoom too. Slightly more generous than the original
+        // framing-time ratio (0.6x/1.2x dist) on the `far` side
+        // specifically, to give a tall building's oblique-angle depth
+        // spread more headroom without starting the fog noticeably closer
+        // to the camera.
+        function updateFogRange() {
+            const dist = camera.position.distanceTo(controls.target);
+            scene.fog.near = dist * 0.55;
+            scene.fog.far = dist * 1.6;
         }
 
         // --- Animation loop ---
@@ -1025,11 +1936,12 @@
                 const e = easeInOutCubic(t);
                 camera.position.lerpVectors(cameraTween.fromPos, cameraTween.toPos, e);
                 controls.target.lerpVectors(cameraTween.fromTarget, cameraTween.toTarget, e);
-                if (t >= 1) cameraTween = null;
+                if (t >= 1) { cameraTween = null; scheduleAutoOrbit(); }
             }
 
             if (!timeData.length || !buildingGroups.length) {
                 controls.update();
+                updateFogRange(); // resolved camera position for this frame -- see updateFogRange()'s comment above
                 composer.render();
                 return;
             }
@@ -1062,23 +1974,29 @@
                 foundationSlab.position.z = gy;
             }
 
-            // Update floors (their absolute positions already include ground displacement)
+            // Update floors (their absolute positions already include
+            // ground displacement). buildingGroups holds exactly numFloors
+            // groups now -- the roof rides as a child of the topmost group
+            // (see createBuilding()), so there's no separate "isRoof" case
+            // to special-case here any more.
             for (let f = 0; f < buildingGroups.length; f++) {
                 const group = buildingGroups[f];
-                const isRoof = (f === buildingGroups.length - 1);
-                let fx = 0,
-                    fy = 0;
-                if (!isRoof) {
-                    fx = (floorXData[f]?.[idx] || 0) * scale;
-                    fy = (floorYData[f]?.[idx] || 0) * scale;
-                } else {
-                    const lastFloor = floorXData.length - 1;
-                    fx = (floorXData[lastFloor]?.[idx] || 0) * scale;
-                    fy = (floorYData[lastFloor]?.[idx] || 0) * scale;
-                }
+                const fx = (floorXData[f]?.[idx] || 0) * scale;
+                const fy = (floorYData[f]?.[idx] || 0) * scale;
                 group.position.x = fx;
                 group.position.z = fy;
             }
+
+            // Columns span two differently-displaced levels, so their
+            // transforms are re-derived every frame from the floor groups'
+            // (and the foundation slab's) positions just set above -- see
+            // updateColumnTransforms()'s docstring.
+            updateColumnTransforms();
+
+            // Furniture's OWN relative-sway offset (spec B), on top of
+            // whatever rigid motion it already inherits from its parent
+            // floor group.
+            updateFurnitureOffsets(animTime);
 
             // Blink roof light
             if (lightSphere) {
@@ -1095,6 +2013,7 @@
             intensityFill.style.width = (intensity * 100).toFixed(1) + '%';
 
             controls.update();
+            updateFogRange(); // resolved camera position for this frame, before the (reverted-after-render) shake offset below -- see updateFogRange()'s comment above animate()
 
             // Subtle camera shake driven by the same intensity, for a bit of
             // visceral "you are here" feedback during the strongest moments.
@@ -1127,18 +2046,27 @@
 
         // --- Event bindings ---
         // Building Parameters' own defaults -- matches out/'s precomputed
-        // static files exactly (mdof_response.py's NUM_STORIES=7 and
-        // MDOF_ShearBuilding's own defaults).
+        // static files exactly (mdof_response.py's NUM_STORIES=7,
+        // MDOF_ShearBuilding's own defaults, AND the new
+        // COLUMN_DEPTH_X/Y/BEAM_DEPTH constants -- see the matching
+        // comment at all three sites: mdof_response.py's __main__,
+        // server.py's DEFAULT_*, and this file's DEFAULT_* consts above).
+        // Compared via parseFloat rather than string equality so a step
+        // value that round-trips differently (e.g. "1.1" vs "1.10") can't
+        // silently break this fast-path check.
         function buildingParamsAtDefault() {
             return storiesSlider.value === '7'
                 && massSlider.value === '1000000'
-                && zetaSlider.value === '0.05'
-                && t1Slider.value === '0.1';
+                && parseFloat(zetaSlider.value) === 0.05
+                && parseFloat(columnXSlider.value) === DEFAULT_COLUMN_DEPTH_X
+                && parseFloat(columnYSlider.value) === DEFAULT_COLUMN_DEPTH_Y
+                && parseFloat(beamSlider.value) === DEFAULT_BEAM_DEPTH;
         }
 
         folderSelect.addEventListener('change', async (e) => {
             const folder = e.target.value;
             if (!folder) return;
+            stripRecordName.textContent = folder;
             if (buildingParamsAtDefault()) {
                 // Fast path: out/'s precomputed static files already match
                 // the current (default) Building Parameters exactly.
@@ -1154,10 +2082,50 @@
             }
         });
 
-        playBtn.addEventListener('click', () => {
+        // Shared by both the main Playback play/pause button and the
+        // mobile bottom-sheet's collapsed-strip button (spec 4, Part E) --
+        // one piece of state, two buttons kept in sync, instead of
+        // duplicating the toggle logic.
+        function togglePlayback() {
             isPlaying = !isPlaying;
-            playBtn.textContent = isPlaying ? '⏸' : '▶️';
+            const icon = isPlaying ? '⏸' : '▶️';
+            playBtn.textContent = icon;
+            stripPlayBtn.textContent = icon;
+        }
+        playBtn.addEventListener('click', togglePlayback);
+        stripPlayBtn.addEventListener('click', togglePlayback);
+
+        // Per-floor view controls (spec 4, Part B).
+        floorSelect.addEventListener('change', (e) => {
+            const val = e.target.value;
+            if (val === 'full') {
+                frameCameraToFullBuilding();
+            } else {
+                frameCameraToFloor(parseInt(val, 10));
+            }
         });
+        backToFullViewBtn.addEventListener('click', () => {
+            floorSelect.value = 'full';
+            frameCameraToFullBuilding();
+        });
+
+        // Mobile bottom-sheet expand/collapse (spec 4, Part E) -- tapping
+        // the collapsed strip toggles the sheet open/closed; tapping the
+        // strip's own play/pause button (which bubbles up to this same
+        // listener) must NOT also toggle the sheet.
+        sheetStrip.addEventListener('click', (e) => {
+            if (e.target.id === 'stripPlayBtn') return;
+            controlsPanel.classList.toggle('sheet-collapsed');
+        });
+        function initSheetState() {
+            if (window.innerWidth <= 600) {
+                controlsPanel.classList.add('sheet-collapsed');
+            } else {
+                controlsPanel.classList.remove('sheet-collapsed');
+            }
+        }
+        window.addEventListener('resize', initSheetState);
+        initSheetState();
 
         speedSlider.addEventListener('input', (e) => {
             speed = parseFloat(e.target.value);
@@ -1180,8 +2148,16 @@
             zetaLabel.textContent = (parseFloat(e.target.value) * 100).toFixed(1) + '%';
             scheduleLiveRecompute();
         });
-        t1Slider.addEventListener('input', (e) => {
-            t1Label.textContent = parseFloat(e.target.value).toFixed(2) + 's/story';
+        columnXSlider.addEventListener('input', (e) => {
+            columnXLabel.textContent = parseFloat(e.target.value).toFixed(2) + 'm';
+            scheduleLiveRecompute();
+        });
+        columnYSlider.addEventListener('input', (e) => {
+            columnYLabel.textContent = parseFloat(e.target.value).toFixed(2) + 'm';
+            scheduleLiveRecompute();
+        });
+        beamSlider.addEventListener('input', (e) => {
+            beamLabel.textContent = parseFloat(e.target.value).toFixed(2) + 'm';
             scheduleLiveRecompute();
         });
 

@@ -2,3 +2,11 @@ numpy
 scipy
 matplotlib
 flask
+
+# --- Docs-build-time only, below this line ---
+# Used solely by claude_scripts/generate_math_pdf.py to (re)build
+# "Seismic-Sim Math.pdf". Nothing in the running app (mdof_response.py,
+# server.py, index.html) imports these -- if you're just running the
+# pipeline or the live server, you don't need them.
+reportlab
+pypdf

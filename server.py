@@ -1,11 +1,14 @@
 """
-Flask backend for Seismic-Sim (specs/03-live-archetypes.md).
+Flask backend for Seismic-Sim (specs/03-live-archetypes.md, extended by
+specs/05-structural-frame-furniture.md).
 
 Serves the static frontend (replacing `python -m http.server` for local
-dev) and a POST /compute endpoint that reruns the modal/FFT solver for
-user-adjustable building parameters against a cached earthquake record,
-so index.html's parameter sliders can recompute the response live instead
-of only ever showing the fixed out/ precomputed results.
+dev) and a POST /compute endpoint that reruns the modal/FFT solver (now
+built from real column/beam frame geometry, independently per axis, plus
+each axis's furniture secondary-system response) for user-adjustable
+building parameters against a cached earthquake record, so index.html's
+parameter sliders can recompute the response live instead of only ever
+showing the fixed out/ precomputed results.
 
 Run: conda run -p .conda python server.py
 """
@@ -16,7 +19,20 @@ import struct
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from mdof_response import MDOF_ShearBuilding
+from mdof_response import (
+    MDOF_ShearBuilding, FURNITURE_CLASSES, BEAM_WIDTH,
+    PLAN_SPAN_X, PLAN_SPAN_Y,
+)
+
+# Frame-geometry defaults -- MUST match mdof_response.py's __main__
+# COLUMN_DEPTH_X/Y/BEAM_DEPTH constants AND index.html's slider defaults
+# exactly (see the matching comment at each of the other two sites).
+# index.html's buildingParamsAtDefault() uses equality against these to
+# decide whether out/'s precomputed static files are still valid for the
+# current slider positions.
+DEFAULT_COLUMN_DEPTH_X = 1.10  # m
+DEFAULT_COLUMN_DEPTH_Y = 1.10  # m
+DEFAULT_BEAM_DEPTH = 1.50      # m
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(PROJECT_ROOT, "out")
@@ -43,12 +59,18 @@ def _load_ground(record):
 
 def _validate_params(body):
     """Clamp incoming slider values to sane bounds -- protects against
-    pathological compute times or degenerate models, not against malice."""
+    pathological compute times or degenerate models, not against malice.
+    T1_factor is gone (spec 5): period is now an output of the frame
+    dimensions, not an input -- see specs/05-structural-frame-furniture.md
+    Part C1. Column/beam depths are clamped strictly positive so K can
+    never go singular."""
     num_stories = max(1, min(30, int(body.get("num_stories", 7))))
     mass_per_floor = max(1e3, min(1e8, float(body.get("mass_per_floor", 1000e3))))
     zeta = max(0.005, min(0.5, float(body.get("zeta", 0.05))))
-    t1_factor = max(0.01, min(2.0, float(body.get("T1_factor", 0.1))))
-    return num_stories, mass_per_floor, zeta, t1_factor
+    column_depth_x = max(0.15, min(2.0, float(body.get("column_depth_x", DEFAULT_COLUMN_DEPTH_X))))
+    column_depth_y = max(0.15, min(2.0, float(body.get("column_depth_y", DEFAULT_COLUMN_DEPTH_Y))))
+    beam_depth = max(0.10, min(3.0, float(body.get("beam_depth", DEFAULT_BEAM_DEPTH))))
+    return num_stories, mass_per_floor, zeta, column_depth_x, column_depth_y, beam_depth
 
 
 @app.route("/compute", methods=["POST"])
@@ -63,41 +85,81 @@ def compute():
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 404
 
-    num_stories, mass_per_floor, zeta, t1_factor = _validate_params(body)
+    (num_stories, mass_per_floor, zeta,
+     column_depth_x, column_depth_y, beam_depth) = _validate_params(body)
     dt = ground["dt"]
 
-    building = MDOF_ShearBuilding(
-        num_stories, mass_per_floor=mass_per_floor, zeta=zeta, T1_factor=t1_factor
+    # X and Y each need their own instance -- independent condensed K per
+    # axis (spec A1's anisotropy), exactly like the offline __main__
+    # pipeline in mdof_response.py (never duplicate that logic here).
+    building_x = MDOF_ShearBuilding(
+        num_stories, mass_per_floor=mass_per_floor, zeta=zeta,
+        column_depth_x=column_depth_x, column_depth_y=column_depth_y,
+        beam_depth=beam_depth, axis="X",
+    )
+    building_y = MDOF_ShearBuilding(
+        num_stories, mass_per_floor=mass_per_floor, zeta=zeta,
+        column_depth_x=column_depth_x, column_depth_y=column_depth_y,
+        beam_depth=beam_depth, axis="Y",
     )
 
     accel_x = np.array(ground["X"])
     disp_x = np.array(ground["X_disp"])
-    time_arr, gdisp_x, _, abs_x = building.compute_response(accel_x, disp_x, dt)
+    time_arr, gdisp_x, _, abs_x = building_x.compute_response(accel_x, disp_x, dt)
+    furn_x, npts_dec_x, q_x, rate_x = building_x.get_decimated_furniture()
 
     has_y = ground.get("Y") is not None
     if has_y:
         accel_y = np.array(ground["Y"])
         disp_y = np.array(ground["Y_disp"])
-        # compute_response overwrites self.floor_disp_* per call, so this
-        # second call for the Y component has to happen after X is read out.
-        _, gdisp_y, _, abs_y = building.compute_response(accel_y, disp_y, dt)
+        _, gdisp_y, _, abs_y = building_y.compute_response(accel_y, disp_y, dt)
+        furn_y, npts_dec_y, q_y, rate_y = building_y.get_decimated_furniture()
+        npts_dec = min(npts_dec_x, npts_dec_y)
+        furn_x = furn_x[:, :, :npts_dec]
+        furn_y = furn_y[:, :, :npts_dec]
+    else:
+        npts_dec = npts_dec_x
+        furn_y = None
 
-    # The metadata (frequencies, mode shapes) is tiny -- JSON is fine for
-    # it. The time-series arrays are not: at full resolution they're
-    # hundreds of thousands of floats, and profiling showed JSON
-    # encode+decode of that (not the actual physics, which takes ~20-50ms)
-    # is what was blowing the live-recompute latency budget past 2 seconds
-    # per request. Binary float32 transfer cuts both the payload size
-    # (~5.5x, float32 vs ASCII decimal) and, more importantly, the
-    # per-element text formatting/parsing cost that dominated the old
-    # all-JSON response.
+    # The metadata (frequencies, mode shapes, frame geometry) is tiny --
+    # JSON is fine for it. The time-series arrays are not: at full
+    # resolution they're hundreds of thousands of floats, and profiling
+    # showed JSON encode+decode of that (not the actual physics, which
+    # takes ~20-50ms) is what was blowing the live-recompute latency
+    # budget past 2 seconds per request. Binary float32 transfer cuts both
+    # the payload size (~5.5x, float32 vs ASCII decimal) and, more
+    # importantly, the per-element text formatting/parsing cost that
+    # dominated the old all-JSON response.
     header = {
         "num_stories": num_stories,
-        "story_height": building.h,
-        "natural_frequencies_Hz": (building.omega_n / (2 * np.pi)).tolist(),
-        "mode_shapes": building.phi.tolist(),
+        "story_height": building_x.h,
         "npts": len(time_arr),
         "has_y": has_y,
+
+        "elastic_modulus_Pa": building_x.E,
+        "column_depth_x": column_depth_x,
+        "column_depth_y": column_depth_y,
+        "beam_depth": beam_depth,
+        "beam_width": BEAM_WIDTH,
+        "plan_span_x": PLAN_SPAN_X,
+        "plan_span_y": PLAN_SPAN_Y,
+
+        "natural_frequencies_Hz_X": (building_x.omega_n / (2 * np.pi)).tolist(),
+        "mode_shapes_X": building_x.phi.tolist(),
+        "fundamental_period_s_X": float(2 * np.pi / building_x.omega_n[0]),
+        "story_stiffness_X_N_per_m": building_x.story_stiffness,
+
+        "natural_frequencies_Hz_Y": (building_y.omega_n / (2 * np.pi)).tolist(),
+        "mode_shapes_Y": building_y.phi.tolist(),
+        "fundamental_period_s_Y": float(2 * np.pi / building_y.omega_n[0]),
+        "story_stiffness_Y_N_per_m": building_y.story_stiffness,
+
+        "furniture": {
+            "classes": list(FURNITURE_CLASSES.keys()),
+            "class_params": FURNITURE_CLASSES,
+            "npts_decimated": npts_dec,
+            "decimated_rate_hz": rate_x,
+        },
     }
     header_bytes = json.dumps(header).encode("utf-8")
     # Float32Array requires its byte offset to be a multiple of 4, but the
@@ -106,6 +168,10 @@ def compute():
     # applies the same padding calculation when it reads header_len back out.
     pad = (-(4 + len(header_bytes))) % 4
 
+    # Binary payload is append-only after the existing spec-3 prefix:
+    # time, gdisp_x, abs_x, [gdisp_y, abs_y], furn_x(3xNxnpts_dec),
+    # [furn_y(...)] -- the 4-byte alignment established by the header pad
+    # still holds since every array here is float32 (spec 5, plan section 3).
     parts = [struct.pack("<I", len(header_bytes)), header_bytes, b"\x00" * pad]
     parts.append(time_arr.astype(np.float32).tobytes())
     parts.append(gdisp_x.astype(np.float32).tobytes())
@@ -113,6 +179,9 @@ def compute():
     if has_y:
         parts.append(gdisp_y.astype(np.float32).tobytes())
         parts.append(abs_y.astype(np.float32).tobytes())
+    parts.append(furn_x.tobytes())  # (3, num_stories, npts_dec) float32
+    if has_y:
+        parts.append(furn_y.tobytes())
 
     return Response(b"".join(parts), mimetype="application/octet-stream")
 

@@ -11,6 +11,8 @@ graphify-out/
 # Python
 __pycache__/
 *.pyc
+.serena/
+claude_scripts/
 
 
 
