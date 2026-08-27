@@ -956,7 +956,8 @@ def save_ground_spectrum(filename, accel_x, accel_y, dt, n_bins=400):
         json.dump(data, f)
 
 
-def save_building_data(filename, building_x, building_y, furniture_meta=None):
+def save_building_data(filename, building_x, building_y, furniture_meta=None,
+                        reference_magnitude=6.0):
     """
     Module-level replacement for the old per-instance save_to_json --
     spec 5 needs BOTH axes' independent condensed-stiffness modal results
@@ -969,6 +970,10 @@ def save_building_data(filename, building_x, building_y, furniture_meta=None):
         "num_stories": int(building_x.N),
         "story_height": float(building_x.h),
         "damping_ratio": float(building_x.zeta),
+        # Richter magnitude this record corresponds to (data/richter
+        # readings.json), used as the Earthquake Parameters panel's
+        # per-record Richter slider default -- spec 7, Part A.
+        "reference_magnitude": float(reference_magnitude),
 
         # Frame geometry (spec A2) -- shared by both axes.
         "elastic_modulus_Pa": float(building_x.E),
@@ -1030,6 +1035,21 @@ if __name__ == "__main__":
     COLUMN_DEPTH_Y = 1.10  # m
     BEAM_DEPTH = 1.50      # m
 
+    # Per-record Richter magnitude (spec 7, Part A) -- maps folder name to
+    # the record's real-world magnitude, used as the Earthquake Parameters
+    # panel's per-record slider default. This __main__ block only stores
+    # the value; apply_synthetic_earthquake_scaling() itself is only ever
+    # invoked by server.py's /compute, never here, so regenerating out/
+    # stays byte-identical except for this one new field.
+    richter_path = os.path.join(data_dir, "richter readings.json")
+    if os.path.isfile(richter_path):
+        with open(richter_path) as f:
+            RICHTER_READINGS = json.load(f)
+    else:
+        print(f"Warning: {richter_path} not found -- reference_magnitude "
+              f"will default to 6.0 for every record.")
+        RICHTER_READINGS = {}
+
     folders = [f for f in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, f))]
     if not folders:
         print("No subfolders found in data/. Please place earthquake folders inside data/.")
@@ -1037,6 +1057,7 @@ if __name__ == "__main__":
 
     for folder in folders:
         folder_path = os.path.join(data_dir, folder)
+        reference_magnitude = RICHTER_READINGS.get(folder, 6.0)
         print(f"\nProcessing folder: {folder}")
 
         all_files = os.listdir(folder_path)
@@ -1177,7 +1198,8 @@ if __name__ == "__main__":
         # Save JSON metadata (both axes' modal results + frame geometry +
         # furniture metadata).
         save_building_data(os.path.join(out_folder, "building_data.json"),
-                            building_x, building_y, furniture_meta)
+                            building_x, building_y, furniture_meta,
+                            reference_magnitude=reference_magnitude)
 
         # Cache the raw ground acceleration and displacement (both already
         # unit-converted) so the live-recompute backend
@@ -1192,6 +1214,7 @@ if __name__ == "__main__":
             "Y": accel_y.tolist() if accel_y is not None else None,
             "X_disp": disp_x.tolist(),
             "Y_disp": disp_y.tolist() if accel_y is not None else None,
+            "reference_magnitude": reference_magnitude,
         }
         with open(os.path.join(out_folder, "ground_accel.json"), 'w') as f:
             json.dump(ground_accel_data, f)
