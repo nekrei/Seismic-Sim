@@ -722,11 +722,6 @@
                     <span class="panel-value" id="timeDisplay">0.0s / 0.0s</span>
                 </div>
                 <div class="ctrl-row">
-                    <span class="panel-label">Amplify</span>
-                    <input type="range" id="amplifySlider" min="0" max="1000" step="1" value="0" />
-                    <span class="panel-value" id="amplifyLabel">1×</span>
-                </div>
-                <div class="ctrl-row">
                     <span class="panel-label">Shaking</span>
                     <div class="intensity-track"><div class="intensity-fill" id="intensityFill"></div></div>
                 </div>
@@ -786,6 +781,35 @@
                      above (spec 4, Part H), which now owns this signal on
                      its own -- keeping both would just be a duplicate,
                      weaker indicator next to a much clearer one. -->
+            </div>
+        </details>
+
+        <!-- Earthquake Parameters: collapsed by default (spec 7) -->
+        <details>
+            <summary>
+                <span class="panel-header">Earthquake Parameters</span>
+                <span class="chevron">▶</span>
+            </summary>
+            <div class="details-body">
+                <div class="ctrl-row">
+                    <span class="panel-label">Epicenter Dist.</span>
+                    <input type="range" id="epicenterDistanceSlider" min="1" max="200" step="1" value="20" />
+                    <span class="panel-value" id="epicenterDistanceLabel">20 km</span>
+                </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Epicenter Depth</span>
+                    <input type="range" id="epicenterDepthSlider" min="1" max="100" step="1" value="10" />
+                    <span class="panel-value" id="epicenterDepthLabel">10 km</span>
+                </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Magnitude</span>
+                    <input type="range" id="richterSlider" min="3.0" max="9.0" step="0.1" value="6.0" />
+                    <span class="panel-value" id="richterLabel">6.0 M</span>
+                </div>
+                <!-- The epicenter cross-section map (#epicenterMap, Part C)
+                     is a fixed viewport overlay, not inside this panel --
+                     it must stay visible whether this section is open or
+                     collapsed. See its markup near #progress. -->
             </div>
         </details>
 
@@ -871,8 +895,12 @@
         const playBtn = document.getElementById('playBtn');
         const speedSlider = document.getElementById('speedSlider');
         const speedLabel = document.getElementById('speedLabel');
-        const amplifySlider = document.getElementById('amplifySlider');
-        const amplifyLabel = document.getElementById('amplifyLabel');
+        const epicenterDistanceSlider = document.getElementById('epicenterDistanceSlider');
+        const epicenterDistanceLabel = document.getElementById('epicenterDistanceLabel');
+        const epicenterDepthSlider = document.getElementById('epicenterDepthSlider');
+        const epicenterDepthLabel = document.getElementById('epicenterDepthLabel');
+        const richterSlider = document.getElementById('richterSlider');
+        const richterLabel = document.getElementById('richterLabel');
         const seekSlider = document.getElementById('seekSlider');
         const timeDisplay = document.getElementById('timeDisplay');
         const progressEl = document.getElementById('progress');
@@ -921,6 +949,16 @@
         const PLAN_SPAN_X = 8.4;
         const PLAN_SPAN_Y = 6.0;
         const FURNITURE_CLASS_NAMES = ['table', 'chair', 'fan'];
+
+        // Synthetic earthquake defaults (spec 7) -- MUST match
+        // mdof_response.py's and server.py's DEFAULT_EPICENTER_DISTANCE_KM/
+        // DEFAULT_EPICENTER_DEPTH_KM exactly (comment at each other site).
+        const DEFAULT_EPICENTER_DISTANCE_KM = 20.0;
+        const DEFAULT_EPICENTER_DEPTH_KM = 10.0;
+
+        // Placeholder -- Task 6 replaces this with the real epicenter
+        // cross-section map (#epicenterMap) update logic.
+        function updateEpicenterMap() {}
 
         // --- Live-compute backend base URL ---------------------------------
         // Locally (conda run python server.py), Flask serves the frontend
@@ -1085,6 +1123,15 @@
         let currentTotalHeight = 0;
         let currentStoryHeight = 0;
 
+        // Which record/reference-magnitude the Earthquake Parameters panel
+        // is currently showing (spec 7) -- distinguishes a genuine record
+        // switch (reset Richter's default + epicenter sliders) from a
+        // same-record live recompute triggered by dragging an Earthquake
+        // Parameter itself (must NOT reset, even though both pass
+        // autoScaleAmplify=true into applyLoadedData below).
+        let currentRecordName = null;
+        let currentReferenceMagnitude = null;
+
         // --- Frequency-domain drawer state (spec 6) ---
         // modalData: { freqsX, freqsY, phiX, phiY, gammaX, gammaY, zeta } --
         // set from building_data.json (static path) or /compute's header
@@ -1104,36 +1151,20 @@
         let spectrumAxis = 'X';
         let spectrumDrawerOpen = false;
 
-        // --- Amplify: logarithmic slider mapping ---
+        // --- Amplify: auto-computed sway scaling (spec 7 removed the manual slider) ---
         // Real sway magnitude varies ~500x across real earthquake records
         // (sub-mm for a small quake to hundreds of mm for a near-fault
-        // record) -- a single fixed linear range can't serve both ends, so
-        // the slider's raw position (0-1000) maps logarithmically onto the
-        // actual amplify value (AMPLIFY_MIN..AMPLIFY_MAX), and the default
-        // is auto-computed per record (see loadFolderData) instead of
-        // always starting at 1x.
+        // record) -- amplify is auto-computed per record/recompute (see
+        // applyLoadedData) so on-screen sway stays legible without a manual
+        // control.
         const AMPLIFY_MIN = 1;
         const AMPLIFY_MAX = 3000;
-        const AMPLIFY_SLIDER_MAX = 1000;
         // Target: at the auto-computed default, the tallest sway on screen
         // should be about this fraction of one story's height.
         const TARGET_SWAY_FRACTION = 0.175;
 
-        function sliderPosToAmplify(pos) {
-            const t = Math.max(0, Math.min(1, pos / AMPLIFY_SLIDER_MAX));
-            return AMPLIFY_MIN * Math.pow(AMPLIFY_MAX / AMPLIFY_MIN, t);
-        }
-
-        function amplifyToSliderPos(amp) {
-            const clamped = Math.max(AMPLIFY_MIN, Math.min(AMPLIFY_MAX, amp));
-            const t = Math.log(clamped / AMPLIFY_MIN) / Math.log(AMPLIFY_MAX / AMPLIFY_MIN);
-            return Math.round(t * AMPLIFY_SLIDER_MAX);
-        }
-
         function setAmplify(amp) {
             amplify = Math.max(AMPLIFY_MIN, Math.min(AMPLIFY_MAX, amp));
-            amplifySlider.value = amplifyToSliderPos(amplify);
-            amplifyLabel.textContent = amplify < 10 ? amplify.toFixed(1) + '×' : Math.round(amplify) + '×';
         }
 
         // --- Furniture templates (spec 5, Part B4) -- plain procedural
@@ -2206,6 +2237,7 @@
                     periodY: meta.fundamental_period_s_Y ?? null,
                     recordName: folder,
                     modal: normalizeModal(meta),
+                    referenceMagnitude: meta.reference_magnitude,
                 });
                 progressEl.style.display = 'none';
                 console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
@@ -2395,7 +2427,7 @@
         // read-only T1 readout -- period is now an OUTPUT, not a slider,
         // spec C1), and `recordName` (furniture placement's seed). ---
         function applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY, extra, autoScaleAmplify = true) {
-            const { frame, furniture, furnitureRate, periodX, periodY, recordName } = extra;
+            const { frame, furniture, furnitureRate, periodX, periodY, recordName, referenceMagnitude } = extra;
             const { lightSphere: light, totalHeight } = createBuilding(numStories, storyHeight, frame, recordName);
             lightSphere = light;
             createFoundationSlab();
@@ -2475,6 +2507,21 @@
 
             frameCameraToBuilding(totalHeight);
 
+            // Record switch (not a same-record Earthquake Parameter drag) --
+            // reset the Richter default to this record's own magnitude and
+            // the epicenter sliders back to their defaults (spec 7).
+            if (recordName !== currentRecordName) {
+                currentReferenceMagnitude = referenceMagnitude ?? 6.0;
+                richterSlider.value = currentReferenceMagnitude;
+                richterLabel.textContent = currentReferenceMagnitude.toFixed(1) + ' M';
+                epicenterDistanceSlider.value = DEFAULT_EPICENTER_DISTANCE_KM;
+                epicenterDepthSlider.value = DEFAULT_EPICENTER_DEPTH_KM;
+                epicenterDistanceLabel.textContent = DEFAULT_EPICENTER_DISTANCE_KM.toFixed(0) + ' km';
+                epicenterDepthLabel.textContent = DEFAULT_EPICENTER_DEPTH_KM.toFixed(0) + ' km';
+                currentRecordName = recordName;
+            }
+            updateEpicenterMap();
+
             // spec 6 -- recompute the drawer's three subplots for the new
             // data (record switch or a live-slider recompute). Cheap even
             // when the drawer is closed; see redrawSpectrumPanels()'s own
@@ -2508,6 +2555,9 @@
                 column_depth_x: parseFloat(columnXSlider.value),
                 column_depth_y: parseFloat(columnYSlider.value),
                 beam_depth: parseFloat(beamSlider.value),
+                epicenter_distance_km: parseFloat(epicenterDistanceSlider.value),
+                epicenter_depth_km: parseFloat(epicenterDepthSlider.value),
+                richter_magnitude: parseFloat(richterSlider.value),
             };
 
             // Loading overlay (spec 4, Part H) -- shown for the duration of
@@ -2587,6 +2637,7 @@
                     periodY: header.fundamental_period_s_Y ?? null,
                     recordName: folder,
                     modal: normalizeModal(header),
+                    referenceMagnitude: header.reference_magnitude,
                 }, autoScaleAmplify);
                 recomputeOverlay.classList.remove('is-active');
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
@@ -2606,10 +2657,10 @@
         // ~200ms after the user stops moving a slider, not on every
         // intermediate value -- see specs/03-live-archetypes.md.
         let liveDebounceTimer = null;
-        function scheduleLiveRecompute() {
+        function scheduleLiveRecompute(autoScaleAmplify = false) {
             if (liveDebounceTimer) clearTimeout(liveDebounceTimer);
             liveDebounceTimer = setTimeout(() => {
-                liveRecompute(folderSelect.value);
+                liveRecompute(folderSelect.value, autoScaleAmplify);
             }, 200);
         }
 
@@ -2809,13 +2860,26 @@
         // Compared via parseFloat rather than string equality so a step
         // value that round-trips differently (e.g. "1.1" vs "1.10") can't
         // silently break this fast-path check.
+        // Earthquake Parameters' own default check (spec 7) -- separate
+        // from buildingParamsAtDefault() so the frequency-domain drawer
+        // (Part B4) can keep using the exact cached spectrum.json when only
+        // a Building Parameter (e.g. Column X) is non-default; only an
+        // actual Earthquake Parameter change requires the live approximate
+        // recompute there.
+        function earthquakeParamsAtDefault() {
+            return parseFloat(epicenterDistanceSlider.value) === DEFAULT_EPICENTER_DISTANCE_KM
+                && parseFloat(epicenterDepthSlider.value) === DEFAULT_EPICENTER_DEPTH_KM
+                && (currentReferenceMagnitude == null || parseFloat(richterSlider.value) === currentReferenceMagnitude);
+        }
+
         function buildingParamsAtDefault() {
             return storiesSlider.value === '7'
                 && massSlider.value === '1000000'
                 && parseFloat(zetaSlider.value) === 0.05
                 && parseFloat(columnXSlider.value) === DEFAULT_COLUMN_DEPTH_X
                 && parseFloat(columnYSlider.value) === DEFAULT_COLUMN_DEPTH_Y
-                && parseFloat(beamSlider.value) === DEFAULT_BEAM_DEPTH;
+                && parseFloat(beamSlider.value) === DEFAULT_BEAM_DEPTH
+                && earthquakeParamsAtDefault();
         }
 
         folderSelect.addEventListener('change', async (e) => {
@@ -2914,8 +2978,20 @@
             speedLabel.textContent = speed.toFixed(1) + '×';
         });
 
-        amplifySlider.addEventListener('input', (e) => {
-            setAmplify(sliderPosToAmplify(parseFloat(e.target.value)));
+        epicenterDistanceSlider.addEventListener('input', (e) => {
+            epicenterDistanceLabel.textContent = parseFloat(e.target.value).toFixed(0) + ' km';
+            updateEpicenterMap();
+            scheduleLiveRecompute(true);
+        });
+        epicenterDepthSlider.addEventListener('input', (e) => {
+            epicenterDepthLabel.textContent = parseFloat(e.target.value).toFixed(0) + ' km';
+            updateEpicenterMap();
+            scheduleLiveRecompute(true);
+        });
+        richterSlider.addEventListener('input', (e) => {
+            richterLabel.textContent = parseFloat(e.target.value).toFixed(1) + ' M';
+            updateEpicenterMap();
+            scheduleLiveRecompute(true);
         });
 
         storiesSlider.addEventListener('input', (e) => {
