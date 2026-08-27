@@ -148,11 +148,22 @@ def compute():
         "mode_shapes_X": building_x.phi.tolist(),
         "fundamental_period_s_X": float(2 * np.pi / building_x.omega_n[0]),
         "story_stiffness_X_N_per_m": building_x.story_stiffness,
+        # Modal participation factors -- the live path's building_data.json
+        # equivalent already carries these (save_building_data), but the
+        # /compute header didn't, so the frontend's transfer-function panel
+        # (spec 6 Part C1) had no live-recompute source for them. Closes
+        # that static/live asymmetry.
+        "participation_factors_X": building_x.Gamma.tolist(),
 
         "natural_frequencies_Hz_Y": (building_y.omega_n / (2 * np.pi)).tolist(),
         "mode_shapes_Y": building_y.phi.tolist(),
         "fundamental_period_s_Y": float(2 * np.pi / building_y.omega_n[0]),
         "story_stiffness_Y_N_per_m": building_y.story_stiffness,
+        "participation_factors_Y": building_y.Gamma.tolist(),
+
+        # Damping ratio -- same reason as the participation factors above;
+        # X and Y share one zeta (spec A1), so no _Y suffix needed.
+        "damping_ratio": zeta,
 
         "furniture": {
             "classes": list(FURNITURE_CLASSES.keys()),

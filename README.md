@@ -58,6 +58,8 @@ The math PDF explains all of these properly, with pictures.
 | **Mode / mode shape** | A building doesn't sway randomly — it has a small number of *natural* sway patterns (like a guitar string's harmonics), and every real motion is a mix of these. Explained fully, with pictures, in the math PDF. |
 | **Damping** | Friction-like energy loss that makes swaying die down over time instead of continuing forever. |
 | **FFT (Fast Fourier Transform)** | A method for taking a wiggly signal (like the ground shaking) and figuring out which "pure tones" it's built from — similar to how your ear splits a chord into individual notes. Used here to solve the physics quickly, for both the building and (a second, independent time) the furniture. |
+| **Spectrum** | The output of an FFT, drawn as a picture: frequency along the bottom, "how much of the signal is at that frequency" up the side. A tall spike at 1 Hz means the signal contains a lot of once-per-second wobble. |
+| **Transfer function** | A building's "answer sheet" for every possible frequency of shaking: for each one, how much does the roof move? It peaks at the building's natural sway frequencies (that's resonance) and is small everywhere else. It depends only on the building, never on the earthquake. |
 | **Furniture sway** | Each piece of furniture is modeled as its own tiny mass-on-a-spring riding on its floor, with the floor's own computed motion as the "ground motion" it reacts to — the exact same kind of equation as the building itself, solved the same way (FFT), just applied recursively to a lighter, independent system. Furniture mass never feeds back into the building's own physics — it's a one-way, decorative-but-honestly-computed effect. |
 | **Amplify** | A slider in the visualization that exaggerates the motion so tiny, real sway (anywhere from a fraction of a millimeter to tens of centimeters, depending on the earthquake) is visible on screen. Its default is auto-computed per record, and its range is logarithmic — it never affects the underlying numbers, only the picture. Switching records recomputes this default; adjusting a Building Parameter slider never does — those are independent knobs. |
 
@@ -75,17 +77,20 @@ out/<record>/response_Y.csv
 out/<record>/building_data.json      ← a summary: floor count, frame geometry, natural sway patterns (per axis), etc.
 out/<record>/furniture_response.bin  ← every furniture item's own extra sway, decimated for size
 out/<record>/ground_accel.json       ← the raw ground motion, cached for live recompute
+out/<record>/spectrum.json           ← the ground motion's FFT magnitude spectrum, log-binned
 out/folders.json                     ← a list of which earthquake recordings have been processed
         │                        │           │
         ▼                        ▼           │
-plot_response.py              index.html      │ POST /compute (live building-
-   → static picture (PNG)   (fetch + three.js)│  parameter sliders, debounced)
-                             animated 3D       ▼
-                             open-cutaway   server.py
-                             frame + sway   (rebuilds the frame model with
-                                    ▲       your slider values, reusing the
-                                    └────── cached ground motion)
-                                 binary response
+plot_response.py              index.html     │ POST /compute (live building-
+  → response_plot_X.png    (fetch + three.js)│  parameter sliders, debounced)
+  → spectrum_plot_X.png     animated 3D      ▼
+                            open-cutaway   server.py
+                            frame + sway   (rebuilds the frame model with
+                            + frequency-    your slider values, reusing the
+                              domain drawer  cached ground motion)
+                                   ▲                │
+                                   └────────────────┘
+                                     binary response
 ```
 
 In short: you run `mdof_response.py` once per batch of earthquake
@@ -165,6 +170,12 @@ line per floor plus a black line for the ground itself. Saved as a PNG
 image. This is independent of the 3D browser animation — a quick way to
 eyeball whether a result "looks reasonable" without opening a browser.
 
+It also draws a second figure, `spectrum_plot_X.png` — the same three stacked
+frequency-domain panels that `index.html`'s drawer shows (see below), for the
+roof floor in the X direction. Having both means a screenshot from the browser
+and a figure in a written report are recognisably the same argument, drawn from
+the same numbers.
+
 ### `index.html` — the real, interactive 3D animation
 
 Open this file **through a local web server** (see below — opening it
@@ -224,6 +235,22 @@ results. It:
   single floor is selected, since the tighter per-floor camera distance
   would otherwise swing away from the floor you zoomed into), and yields
   instantly the moment you touch the controls again.
+- Has a **Frequency Domain** drawer (the small chart button on the right edge)
+  showing three stacked panels that share one horizontal frequency axis:
+  **Input** (the earthquake's own spectrum), **Transfer** (this building's
+  answer sheet — see the glossary), and **Output** (how the selected floor
+  actually ended up moving, relative to the ground). Read top to bottom, the
+  picture *is* the calculation: **input × transfer = output**, which is exactly
+  what `mdof_response.py` computes internally. The peaks in the Transfer panel
+  are the building's resonances, and wherever one lines up with energy in the
+  Input panel, the Output panel shows a peak too. A floor selector and an X/Y
+  toggle drive the bottom two panels; the Input panel never changes, because
+  the earthquake doesn't care what you built. Everything here is recomputed
+  live when you move a Building Parameter slider — stiffen the columns and you
+  can watch the resonance peak slide to the right. The Output panel is measured
+  from the actual computed floor motion, *not* derived by multiplying the other
+  two panels together, which would make the agreement true by construction and
+  therefore meaningless.
 - Shows a live **Shaking** meter (how strong the *current instant* of real
   ground motion is, relative to that record's own peak) alongside a subtle
   camera shake at high intensity, and renders lit surfaces/the roof beacon
@@ -290,6 +317,7 @@ One folder per earthquake recording, containing:
   where each row is one instant in time, and each column is one floor's
   position at that instant (X = one horizontal direction, Y = the other).
 - `response_plot_X.png` — the static picture from `plot_response.py`.
+- `spectrum_plot_X.png` — the static version of the frequency-domain panels.
 - `furniture_response.bin` — every furniture class's (table/chair/fan) own
   extra sway relative to its floor, for both axes, as raw binary
   (float32). Resampled to a lower rate than the ground motion before
@@ -298,6 +326,14 @@ One folder per earthquake recording, containing:
 - `ground_accel.json` — the raw ground acceleration and displacement used as
   input, cached so `server.py`'s live parameter sliders can recompute a
   building's response without re-reading the original earthquake file.
+- `spectrum.json` (~10 KB) — the ground motion's magnitude spectrum, averaged
+  into 400 logarithmically-spaced frequency bins. This is what feeds the
+  drawer's Input panel. It's precomputed for two reasons: the ground motion
+  doesn't change when you move a Building Parameter slider (so recomputing it
+  per drag would be pure waste), and the browser only ever receives ground
+  *displacement*, never ground acceleration, so it couldn't derive this one
+  itself even if it wanted to. Unlike the response files, it's read only by
+  the frontend — `server.py` never touches it.
 
 Plus `out/folders.json`, a simple list of which recordings have been
 processed (this is what fills the dropdown in `index.html`).
@@ -351,7 +387,13 @@ explains why it exists and what it contains.
 - Every floor also has a handful of furniture items (tables, chairs, a
   fan) with their own small extra sway relative to their floor, computed
   with the same frequency-domain technique as the building itself.
-- Only the X-direction static plot is generated by default.
+- Only the X-direction static plots are generated by default.
+- The frequency-domain drawer (spec 6) makes the FFT machinery visible instead
+  of merely internal: input spectrum, transfer function and output spectrum on
+  one shared axis, live under the parameter sliders. The `input × transfer =
+  output` identity behind it is checked numerically, not just asserted — it
+  holds to ~3e-15 on the zero-padded grid the solver actually works on — and
+  the browser's hand-written FFT is checked against `scipy.fft` to 3.4e-14.
 - `out/`'s precomputed results use a fixed 7-floor building with fixed
   default column/beam dimensions (see `NUM_STORIES`/`COLUMN_DEPTH_X/Y`/
   `BEAM_DEPTH` above) — but stories, mass, damping, and the three frame
