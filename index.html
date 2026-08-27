@@ -451,6 +451,173 @@
             text-align: center;
             max-width: 80%;
         }
+
+        /* ==================================================================
+           Frequency-domain drawer (spec 6) -- a co-equal *view* onto the
+           same record data, not a control, so it is a standalone
+           right-side drawer (toggled by a small floating button) rather
+           than a 5th accordion section in #controls: the panel is already
+           four sections deep with a mobile bottom-sheet breakpoint that
+           would have to fight a ~400px-tall plot for the same space, and
+           burying the spectrum in an accordion undersells exactly the
+           audience it exists for. Reuses spec 4's panel language
+           (glass background/blur/border, .panel-label/.panel-value type,
+           the project's existing cubic-bezier(0.16,1,0.3,1) easing) rather
+           than inventing a second visual system beside it. The 3D scene
+           keeps rendering behind/beside the drawer at all times -- no
+           dimming scrim, unlike .recompute-overlay, since this is a view
+           the user compares against the live building, not a blocking
+           wait state. */
+        #spectrumToggleBtn {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 11;
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            background: rgba(11, 11, 26, 0.85);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255,255,255,0.08);
+            color: rgba(255, 224, 178, 0.75);
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+            transition: transform 150ms ease-out, border-color 200ms ease, background 200ms ease, color 200ms ease;
+        }
+        @media (hover: hover) and (pointer: fine) {
+            #spectrumToggleBtn:hover { border-color: rgba(255,215,100,0.4); background: rgba(20,20,40,0.92); }
+        }
+        #spectrumToggleBtn:active { transform: scale(0.97); }
+        #spectrumToggleBtn.is-open { border-color: rgba(255,215,100,0.45); color: #ffd764; }
+
+        #spectrumDrawer {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            width: 420px;
+            max-width: 92vw;
+            z-index: 10;
+            background: rgba(11, 11, 26, 0.88);
+            backdrop-filter: blur(16px);
+            border-left: 1px solid rgba(255,255,255,0.08);
+            box-shadow: -12px 0 40px rgba(0,0,0,0.35);
+            display: flex;
+            flex-direction: column;
+            transform: translateX(100%);
+            transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        #spectrumDrawer.is-open { transform: translateX(0); }
+
+        #spectrumDrawer .drawer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 18px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            flex-shrink: 0;
+        }
+        #spectrumDrawer .drawer-header .panel-header { letter-spacing: 0.02em; }
+        #spectrumDrawer .drawer-subtitle {
+            font-size: 11px;
+            color: rgba(255,255,255,0.4);
+            margin-top: 2px;
+        }
+        #spectrumDrawer .drawer-close-btn {
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.7);
+            border-radius: 8px;
+            width: 30px;
+            height: 30px;
+            font-size: 14px;
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: background 150ms ease, transform 150ms ease-out;
+        }
+        @media (hover: hover) and (pointer: fine) {
+            #spectrumDrawer .drawer-close-btn:hover { background: rgba(255,255,255,0.12); }
+        }
+        #spectrumDrawer .drawer-close-btn:active { transform: scale(0.94); }
+
+        #spectrumDrawer .drawer-body {
+            padding: 14px 18px 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            flex: 1;
+            min-height: 0;
+        }
+        #spectrumDrawer .ctrl-row { display: flex; align-items: center; gap: 12px; }
+
+        .axis-toggle { display: flex; gap: 6px; flex: 1; }
+        .axis-toggle button {
+            flex: 1;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.55);
+            border-radius: 8px;
+            padding: 6px 0;
+            font-size: 12px;
+            font-weight: 600;
+            font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+            cursor: pointer;
+            transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+        }
+        .axis-toggle button.active {
+            background: rgba(255,215,100,0.15);
+            border-color: rgba(255,215,100,0.35);
+            color: #ffd764;
+        }
+
+        .spectrum-canvas-wrap {
+            position: relative;
+            width: 100%;
+            flex: 1;
+            min-height: 340px;
+        }
+        #spectrumCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            border-radius: 8px;
+            transition: opacity 140ms ease-out, filter 140ms ease-out;
+        }
+        #spectrumCanvas.is-updating { opacity: 0.5; filter: blur(1.5px); }
+
+        .spectrum-disabled-note {
+            font-size: 12px;
+            color: rgba(255,255,255,0.45);
+            line-height: 1.6;
+            padding: 32px 8px;
+            text-align: center;
+            display: none;
+        }
+
+        @media (max-width: 600px) {
+            #spectrumDrawer {
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: auto;
+                width: auto;
+                max-width: none;
+                max-height: 62vh;
+                border-left: none;
+                border-bottom: 1px solid rgba(255,255,255,0.08);
+                border-radius: 0 0 16px 16px;
+                transform: translateY(-100%);
+                transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
+            }
+            #spectrumDrawer.is-open { transform: translateY(0); }
+            .spectrum-canvas-wrap { min-height: 240px; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            #spectrumDrawer, #spectrumToggleBtn, #spectrumCanvas { transition-duration: 1ms; }
+        }
     </style>
 </head>
 <body>
@@ -596,6 +763,40 @@
     <div id="info">🏗️ <span>seismic response</span> · drag to orbit · scroll to zoom</div>
     <div id="progress">⏳ loading data…</div>
 
+    <!-- Frequency-domain drawer (spec 6) -- co-equal view onto the same
+         record data, not a control. Toggled independently of #controls; the
+         3D scene keeps rendering behind it while open. See CSS block above
+         for the full rationale. -->
+    <button id="spectrumToggleBtn" aria-label="Toggle frequency-domain panel" aria-expanded="false" title="Frequency domain">📶</button>
+    <div id="spectrumDrawer" aria-hidden="true">
+        <div class="drawer-header">
+            <div>
+                <div class="panel-header">Frequency Domain</div>
+                <div class="drawer-subtitle">input × transfer = output</div>
+            </div>
+            <button class="drawer-close-btn" id="spectrumCloseBtn" aria-label="Close frequency-domain panel">✕</button>
+        </div>
+        <div class="drawer-body">
+            <div class="ctrl-row">
+                <span class="panel-label">Floor</span>
+                <select id="spectrumFloorSelect" style="flex:1;"></select>
+            </div>
+            <div class="ctrl-row">
+                <span class="panel-label">Axis</span>
+                <div class="axis-toggle" id="spectrumAxisToggle">
+                    <button type="button" data-axis="X" class="active">X</button>
+                    <button type="button" data-axis="Y">Y</button>
+                </div>
+            </div>
+            <div class="spectrum-canvas-wrap">
+                <canvas id="spectrumCanvas"></canvas>
+            </div>
+            <div class="spectrum-disabled-note" id="spectrumDisabledNote">
+                Frequency-domain data isn't available for this record/axis yet.
+            </div>
+        </div>
+    </div>
+
     <script type="importmap">
         {
             "imports": {
@@ -645,6 +846,14 @@
         const stripPlayBtn = document.getElementById('stripPlayBtn');
         const stripRecordName = document.getElementById('stripRecordName');
         const controlsPanel = document.getElementById('controls');
+        // spec 6 (frequency-domain drawer)
+        const spectrumToggleBtn = document.getElementById('spectrumToggleBtn');
+        const spectrumDrawer = document.getElementById('spectrumDrawer');
+        const spectrumCloseBtn = document.getElementById('spectrumCloseBtn');
+        const spectrumFloorSelect = document.getElementById('spectrumFloorSelect');
+        const spectrumAxisToggle = document.getElementById('spectrumAxisToggle');
+        const spectrumCanvas = document.getElementById('spectrumCanvas');
+        const spectrumDisabledNote = document.getElementById('spectrumDisabledNote');
 
         // Frame-geometry defaults -- MUST match mdof_response.py's __main__
         // COLUMN_DEPTH_X/Y/BEAM_DEPTH and server.py's DEFAULT_COLUMN_DEPTH_X/Y/
@@ -822,6 +1031,25 @@
         let activeFloorIndex = null;
         let currentTotalHeight = 0;
         let currentStoryHeight = 0;
+
+        // --- Frequency-domain drawer state (spec 6) ---
+        // modalData: { freqsX, freqsY, phiX, phiY, gammaX, gammaY, zeta } --
+        // set from building_data.json (static path) or /compute's header
+        // (live path) inside applyLoadedData(), same as `frame`/`furniture`.
+        // Defensively null when either source doesn't carry the fields yet
+        // (un-mirrored backend, older out/) -- the drawer degrades to a
+        // disabled note rather than throwing, matching the furniture pattern.
+        let modalData = null;
+        // groundSpectrum: { dt, npts, nyquist_Hz, f_Hz, X_mag, Y_mag } from
+        // out/<record>/spectrum.json -- parameter-independent (Building
+        // Parameters never change the record), so it's fetched ONCE per
+        // record (loadFolderData only) and reused across every live-slider
+        // recompute for that same record, never refetched on a drag.
+        let groundSpectrum = null;
+        let groundSpectrumRecord = null; // which record groundSpectrum belongs to, for the cache check above
+        let spectrumFloorIndex = null;   // null until first populateSpectrumFloorSelect() -- independent of View section's activeFloorIndex on purpose (see Part B4)
+        let spectrumAxis = 'X';
+        let spectrumDrawerOpen = false;
 
         // --- Amplify: logarithmic slider mapping ---
         // Real sway magnitude varies ~500x across real earthquake records
@@ -1500,6 +1728,316 @@
             };
         }
 
+        // Modal data for the frequency-domain drawer (spec 6, Part A2/C1) --
+        // shared shape from either building_data.json (static path) or
+        // /compute's header (live path), both using the same key names
+        // (natural_frequencies_Hz_X/Y, mode_shapes_X/Y,
+        // participation_factors_X/Y, damping_ratio). Returns null --
+        // rather than a partially-filled object -- if any required field is
+        // missing, so callers only need one guard (`if (!modalData) ...`),
+        // same defensive-gating pattern as furniture/frame above.
+        function normalizeModal(raw) {
+            if (!raw || !raw.natural_frequencies_Hz_X || !raw.mode_shapes_X
+                || !raw.participation_factors_X || raw.damping_ratio == null) {
+                return null;
+            }
+            return {
+                freqsX: raw.natural_frequencies_Hz_X,
+                freqsY: raw.natural_frequencies_Hz_Y || null,
+                phiX: raw.mode_shapes_X,
+                phiY: raw.mode_shapes_Y || null,
+                gammaX: raw.participation_factors_X,
+                gammaY: raw.participation_factors_Y || null,
+                zeta: raw.damping_ratio,
+            };
+        }
+
+        // out/<record>/spectrum.json (spec 6, Part A3) -- the ground-motion
+        // input spectrum is invariant under every Building Parameter (sliders
+        // change the building, never the record), so it's fetched once per
+        // record and reused across every live-slider recompute for that same
+        // record. Frontend-only artifact -- NOT mirrored to seismic-sim-backend
+        // (see AGENTS.md) -- so a 404 here just disables the drawer, never a
+        // hard failure.
+        async function loadGroundSpectrum(folder) {
+            if (groundSpectrumRecord === folder && groundSpectrum) return; // already cached for this record
+            groundSpectrum = null;
+            groundSpectrumRecord = folder;
+            try {
+                const res = await fetch(`out/${folder}/spectrum.json`);
+                if (!res.ok) {
+                    console.warn(`⚠️ spectrum.json not found for ${folder} (${res.status}) -- frequency-domain drawer disabled.`);
+                    return;
+                }
+                const data = await res.json();
+                if (!data.f_Hz || !data.X_mag || !data.dt || !data.nyquist_Hz) {
+                    console.warn(`⚠️ spectrum.json malformed for ${folder} -- frequency-domain drawer disabled.`);
+                    return;
+                }
+                groundSpectrum = data;
+            } catch (err) {
+                console.warn('⚠️ Failed to load spectrum.json -- frequency-domain drawer disabled.', err);
+            }
+        }
+
+        // ==================================================================
+        // Frequency-domain drawer maths + rendering (spec 6, Part A2/A4/B).
+        // Recomputed on data load or floor/axis change ONLY -- never inside
+        // animate() (Part B2); a 32768-point FFT is ~2ms, cheap for a
+        // handful of calls per interaction but not for 60fps.
+        // ==================================================================
+
+        const SPECTRUM_F_MIN = 0.1, SPECTRUM_F_MAX = 50; // fixed shared log-frequency window, Part B4
+        const SPECTRUM_MAG_FLOOR = 1e-12; // clamp before 20*log10 so a zero magnitude never produces -Infinity
+
+        function toDb(mag) {
+            return 20 * Math.log10(Math.max(mag, SPECTRUM_MAG_FLOOR));
+        }
+
+        // The transfer function itself -- spec 6 Part A2, the correctness
+        // crux of this feature. Ground acceleration drives modal coordinate
+        // j through Q_j(jw) = -Gamma_j * A_g(jw) * H_j(jw), with
+        // H_j(jw) = 1/(w_j^2 - w^2 + 2i*zeta*w_j*w); floor i's *relative*
+        // displacement is the modal superposition u_i = sum_j phi_ij q_j, so
+        // T_i(jw) = -sum_j phi_ij * Gamma_j * H_j(jw). Complex addition
+        // matters here (mode phases interfere), so the total is accumulated
+        // as real/imaginary parts, not by summing per-mode magnitudes.
+        // Returns { total: Float64Array, perMode: Float64Array[] } of
+        // magnitudes at each of `fHz`'s frequencies, or null if this axis's
+        // modal data isn't available (e.g. a Y-less record).
+        function transferFunctionForFloor(modal, axis, floorIndex, fHz) {
+            const freqs = axis === 'Y' ? modal.freqsY : modal.freqsX;
+            const phi = axis === 'Y' ? modal.phiY : modal.phiX;
+            const gamma = axis === 'Y' ? modal.gammaY : modal.gammaX;
+            if (!freqs || !phi || !gamma || !phi[floorIndex]) return null;
+            const zeta = modal.zeta;
+            const nModes = freqs.length;
+            const nBins = fHz.length;
+            const totalRe = new Float64Array(nBins);
+            const totalIm = new Float64Array(nBins);
+            const perMode = [];
+            for (let j = 0; j < nModes; j++) {
+                const wj = 2 * Math.PI * freqs[j];
+                const coeff = -(phi[floorIndex][j] ?? 0) * gamma[j];
+                const modeMag = new Float64Array(nBins);
+                for (let k = 0; k < nBins; k++) {
+                    const w = 2 * Math.PI * fHz[k];
+                    const denomRe = wj * wj - w * w;
+                    const denomIm = 2 * zeta * wj * w;
+                    const denomMagSq = denomRe * denomRe + denomIm * denomIm;
+                    // H_j = 1/(denomRe + i*denomIm) = (denomRe - i*denomIm)/|denom|^2
+                    const hRe = denomRe / denomMagSq;
+                    const hIm = -denomIm / denomMagSq;
+                    const termRe = coeff * hRe;
+                    const termIm = coeff * hIm;
+                    totalRe[k] += termRe;
+                    totalIm[k] += termIm;
+                    modeMag[k] = Math.hypot(termRe, termIm);
+                }
+                perMode.push(modeMag);
+            }
+            const total = new Float64Array(nBins);
+            for (let k = 0; k < nBins; k++) total[k] = Math.hypot(totalRe[k], totalIm[k]);
+            return { total, perMode };
+        }
+
+        // Output panel -- spec 6 Part A4, THE TRAP. floorXData/floorYData
+        // hold *absolute* displacement (includes the ground's own motion),
+        // so |FFT(absolute)| != |T_i| * |A_g|. This must FFT the *relative*
+        // displacement (floor minus ground) instead, and this is the ONLY
+        // place that relative signal is computed -- never multiply the
+        // Input and Transfer traces together to derive this; that would
+        // make "input x transfer = output" true by construction instead of
+        // by measurement, defeating the entire point of the panel.
+        function computeOutputSpectrum(axis, floorIndex) {
+            const floorArr = axis === 'Y' ? floorYData[floorIndex] : floorXData[floorIndex];
+            const groundArr = axis === 'Y' ? groundYData : groundXData;
+            if (!floorArr || !groundArr || !groundArr.length || timeData.length < 2) return null;
+            const dt = timeData[1] - timeData[0];
+            if (!dt) return null;
+            const rel = new Float64Array(floorArr.length);
+            for (let i = 0; i < floorArr.length; i++) rel[i] = floorArr[i] - groundArr[i];
+            return logBinSpectrum(rel, dt);
+        }
+
+        function freqToX(f, x0, w) {
+            const lf = Math.log10(Math.min(Math.max(f, SPECTRUM_F_MIN), SPECTRUM_F_MAX));
+            const t = (lf - Math.log10(SPECTRUM_F_MIN)) / (Math.log10(SPECTRUM_F_MAX) - Math.log10(SPECTRUM_F_MIN));
+            return x0 + t * w;
+        }
+
+        function dbToY(db, y0, h, dbMin, dbMax) {
+            const t = (db - dbMin) / (dbMax - dbMin || 1);
+            return y0 + h - Math.min(Math.max(t, 0), 1) * h;
+        }
+
+        // Draws one of the three stacked subplots. `curves` is drawn in
+        // array order (faint per-mode terms first, so the bold total line
+        // ends up on top) and all share one dB scale per panel, auto-scaled
+        // to that panel's own peak (Part B4) -- an Input/Output pair with a
+        // 40dB gap would otherwise flatten one of them into a flat line.
+        function drawSpectrumSubplot(ctx, x, y, w, h, label, curves, nyquistHz) {
+            ctx.fillStyle = 'rgba(255,255,255,0.02)';
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+            let dbMax = -Infinity;
+            for (const c of curves) {
+                for (let i = 0; i < c.mag.length; i++) {
+                    const db = toDb(c.mag[i]);
+                    if (db > dbMax) dbMax = db;
+                }
+            }
+            if (!isFinite(dbMax)) dbMax = 0;
+            const dbMin = dbMax - 70; // fixed 70dB dynamic range below this panel's own peak
+
+            // Grey out the region above this record's own Nyquist frequency
+            // (Part B4) -- always zero-width for this dataset's 100/200Hz
+            // records (nyquist 50/100Hz >= the 50Hz axis cap), kept correct
+            // for any future lower-rate record.
+            if (nyquistHz < SPECTRUM_F_MAX) {
+                const nx = freqToX(nyquistHz, x, w);
+                ctx.fillStyle = 'rgba(0,0,0,0.4)';
+                ctx.fillRect(nx, y, x + w - nx, h);
+            }
+
+            // Shared log-frequency gridlines/ticks -- decade marks plus the
+            // fixed axis edges, aligned identically across all three panels
+            // since they all share freqToX/x/w (Part A1: this alignment is
+            // the whole point, multiplication reads as vertical alignment).
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+            ctx.font = '9px ui-monospace, "SF Mono", "Cascadia Code", monospace';
+            ctx.textAlign = 'center';
+            for (const f of [0.1, 1, 10, 50]) {
+                const px = freqToX(f, x, w);
+                ctx.beginPath();
+                ctx.moveTo(px, y);
+                ctx.lineTo(px, y + h);
+                ctx.stroke();
+                ctx.fillStyle = 'rgba(255,224,178,0.4)';
+                ctx.fillText(f < 1 ? f.toFixed(1) : String(f), px, y + h + 11);
+            }
+
+            for (const c of curves) {
+                ctx.strokeStyle = c.color;
+                ctx.lineWidth = c.width || 1.5;
+                ctx.globalAlpha = c.alpha ?? 1;
+                ctx.beginPath();
+                for (let i = 0; i < c.f.length; i++) {
+                    const px = freqToX(c.f[i], x, w);
+                    const py = dbToY(toDb(c.mag[i]), y, h, dbMin, dbMax);
+                    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+            }
+
+            ctx.textAlign = 'left';
+            ctx.fillStyle = 'rgba(255,255,255,0.6)';
+            ctx.font = '10px ui-monospace, "SF Mono", "Cascadia Code", monospace';
+            ctx.fillText(label, x + 4, y + 11);
+        }
+
+        // Rebuilds the drawer's floor <select> whenever the building is
+        // (re)built. Deliberately independent of the View section's
+        // #floorSelect/activeFloorIndex (Part B4) -- that one drives a
+        // camera tween and resets to "full building" on every
+        // applyLoadedData() call, which has no meaning for a single floor's
+        // output spectrum. Keeps the current selection across a Building
+        // Parameter tweak (so dragging Column-X doesn't keep yanking the
+        // view back to the roof); only resets when the previous selection is
+        // unset or now out of range (e.g. the Stories slider dropped below it).
+        function populateSpectrumFloorSelect(numStories) {
+            if (!spectrumFloorSelect) return;
+            const prev = spectrumFloorIndex;
+            spectrumFloorSelect.innerHTML = '';
+            for (let f = 0; f < numStories; f++) {
+                const opt = document.createElement('option');
+                opt.value = String(f);
+                opt.textContent = `Floor ${f + 1}`;
+                spectrumFloorSelect.appendChild(opt);
+            }
+            spectrumFloorIndex = (prev == null || prev >= numStories) ? numStories - 1 : prev; // default: roof
+            spectrumFloorSelect.value = String(spectrumFloorIndex);
+        }
+
+        // Full redraw of all three subplots. Called on data load (record
+        // switch or live recompute) and on floor/axis change -- never from
+        // animate(). Cheap to call even while the drawer is closed (a
+        // hidden canvas still costs the same handful of ms to paint), which
+        // keeps this one function the single recompute path instead of
+        // needing an open-state special case.
+        function redrawSpectrumPanels() {
+            if (!spectrumCanvas) return;
+            const wrap = spectrumCanvas.parentElement;
+            const cssW = wrap.clientWidth || 300, cssH = wrap.clientHeight || 340;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const pxW = Math.round(cssW * dpr), pxH = Math.round(cssH * dpr);
+            if (spectrumCanvas.width !== pxW || spectrumCanvas.height !== pxH) {
+                spectrumCanvas.width = pxW;
+                spectrumCanvas.height = pxH;
+            }
+            const ctx = spectrumCanvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, cssW, cssH);
+
+            const axis = spectrumAxis;
+            const disabledBase = !modalData || !groundSpectrum || spectrumFloorIndex == null || !timeData.length;
+            const gMag = disabledBase ? null : (axis === 'Y' ? groundSpectrum.Y_mag : groundSpectrum.X_mag);
+            const tf = disabledBase || !gMag ? null : transferFunctionForFloor(modalData, axis, spectrumFloorIndex, groundSpectrum.f_Hz);
+            const outSpec = disabledBase || !gMag || !tf ? null : computeOutputSpectrum(axis, spectrumFloorIndex);
+
+            const disabled = disabledBase || !gMag || !tf || !outSpec;
+            spectrumDisabledNote.style.display = disabled ? 'block' : 'none';
+            spectrumCanvas.style.display = disabled ? 'none' : 'block';
+            if (disabled) {
+                spectrumDisabledNote.textContent = (!modalData || !groundSpectrum)
+                    ? "Frequency-domain data isn't available for this record yet."
+                    : `No ${axis} data for this record.`;
+                return;
+            }
+
+            const topM = 8, bottomM = 16, sideM = 4, gap = 26;
+            const panelH = (cssH - topM - bottomM - gap * 2) / 3;
+            const plotX = sideM, plotW = cssW - sideM * 2;
+            const floorLabel = `floor ${spectrumFloorIndex + 1}`;
+
+            drawSpectrumSubplot(ctx, plotX, topM, plotW, panelH,
+                `Input |A_g(f)| · ${axis}`,
+                [{ f: groundSpectrum.f_Hz, mag: gMag, color: '#7fd4ff' }],
+                groundSpectrum.nyquist_Hz);
+
+            drawSpectrumSubplot(ctx, plotX, topM + panelH + gap, plotW, panelH,
+                `Transfer |T(jω)| · ${floorLabel}`,
+                [
+                    ...tf.perMode.map(m => ({ f: groundSpectrum.f_Hz, mag: m, color: 'rgba(255,215,100,0.5)', width: 1 })),
+                    { f: groundSpectrum.f_Hz, mag: tf.total, color: '#ffd764', width: 2 },
+                ],
+                groundSpectrum.nyquist_Hz);
+
+            drawSpectrumSubplot(ctx, plotX, topM + 2 * (panelH + gap), plotW, panelH,
+                `Output |U_rel(f)| · ${floorLabel}`,
+                [{ f: outSpec.fHz, mag: outSpec.mag, color: '#7fffb0' }],
+                groundSpectrum.nyquist_Hz);
+        }
+
+        // Brief blur/opacity dip on the canvas during a floor/axis-driven
+        // redraw (animate skill guidance) -- the repaint itself is a single
+        // synchronous ~2ms canvas clear+redraw with no native transition, so
+        // without this the curves would appear to jump-cut. The dip and its
+        // recovery are both CSS transitions (interruptible if the user
+        // flips floor/axis again mid-dip), not keyframes.
+        function redrawSpectrumPanelsAnimated() {
+            if (!spectrumCanvas) { redrawSpectrumPanels(); return; }
+            spectrumCanvas.classList.add('is-updating');
+            requestAnimationFrame(() => {
+                redrawSpectrumPanels();
+                requestAnimationFrame(() => spectrumCanvas.classList.remove('is-updating'));
+            });
+        }
+
         // --- Load data for a folder ---
         async function loadFolderData(folder) {
             if (!folder) return;
@@ -1592,6 +2130,12 @@
                 console.log(`📊 Ground X range: ${Math.min(...groundX).toFixed(4)} to ${Math.max(...groundX).toFixed(4)} m`);
                 console.log(`📊 Ground Y range: ${Math.min(...groundY).toFixed(4)} to ${Math.max(...groundY).toFixed(4)} m`);
 
+                // spectrum.json is parameter-independent (Part A3) -- fetch
+                // it once per record here, never inside applyLoadedData()
+                // (which also runs on every live-slider recompute for the
+                // SAME record).
+                await loadGroundSpectrum(folder);
+
                 applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY, {
                     frame,
                     furniture,
@@ -1599,6 +2143,7 @@
                     periodX: meta.fundamental_period_s_X ?? null,
                     periodY: meta.fundamental_period_s_Y ?? null,
                     recordName: folder,
+                    modal: normalizeModal(meta),
                 });
                 progressEl.style.display = 'none';
                 console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
@@ -1804,9 +2349,11 @@
             currentStoryHeight = numStories > 0 ? totalHeight / numStories : 0;
             repositionInteriorLights(totalHeight); // spec 4, Part C -- interior fill lights move with building height
             populateFloorSelect(numStories);
+            populateSpectrumFloorSelect(numStories); // spec 6 -- independent of the View section's floor select, see its own comment
 
             furnitureData = furniture;
             furnitureRateHz = furnitureRate || 0;
+            modalData = extra.modal ?? null; // spec 6 -- null-safe; the drawer degrades to a disabled note if this or groundSpectrum is missing
 
             periodReadout.textContent = (periodX != null && periodY != null)
                 ? `${periodX.toFixed(2)}s / ${periodY.toFixed(2)}s`
@@ -1865,6 +2412,12 @@
             timeDisplay.textContent = `0.0s / ${totalDuration.toFixed(1)}s`;
 
             frameCameraToBuilding(totalHeight);
+
+            // spec 6 -- recompute the drawer's three subplots for the new
+            // data (record switch or a live-slider recompute). Cheap even
+            // when the drawer is closed; see redrawSpectrumPanels()'s own
+            // comment.
+            redrawSpectrumPanels();
         }
 
         // --- Live recompute: POST current building-parameter sliders to
@@ -1971,6 +2524,7 @@
                     periodX: header.fundamental_period_s_X ?? null,
                     periodY: header.fundamental_period_s_Y ?? null,
                     recordName: folder,
+                    modal: normalizeModal(header),
                 }, autoScaleAmplify);
                 recomputeOverlay.classList.remove('is-active');
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
@@ -2247,6 +2801,31 @@
             floorSelect.value = 'full';
             frameCameraToFullBuilding();
         });
+
+        // --- Frequency-domain drawer wiring (spec 6, Part B4/B5/B6) ---
+        function setSpectrumDrawerOpen(open) {
+            spectrumDrawerOpen = open;
+            spectrumDrawer.classList.toggle('is-open', open);
+            spectrumToggleBtn.classList.toggle('is-open', open);
+            spectrumDrawer.setAttribute('aria-hidden', String(!open));
+            spectrumToggleBtn.setAttribute('aria-expanded', String(open));
+            if (open) redrawSpectrumPanels(); // canvas may have been resized/hidden while closed
+        }
+        spectrumToggleBtn.addEventListener('click', () => setSpectrumDrawerOpen(!spectrumDrawerOpen));
+        spectrumCloseBtn.addEventListener('click', () => setSpectrumDrawerOpen(false));
+        spectrumFloorSelect.addEventListener('change', (e) => {
+            spectrumFloorIndex = parseInt(e.target.value, 10);
+            redrawSpectrumPanelsAnimated();
+        });
+        spectrumAxisToggle.querySelectorAll('button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (btn.classList.contains('active')) return;
+                spectrumAxis = btn.dataset.axis;
+                spectrumAxisToggle.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
+                redrawSpectrumPanelsAnimated();
+            });
+        });
+        window.addEventListener('resize', () => { if (spectrumDrawerOpen) redrawSpectrumPanels(); });
 
         // Mobile bottom-sheet expand/collapse (spec 4, Part E) -- tapping
         // the collapsed strip toggles the sheet open/closed; tapping the
