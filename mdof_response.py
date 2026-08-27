@@ -126,11 +126,17 @@ def apply_synthetic_earthquake_scaling(accel, dt, magnitude, distance_km,
     2. spreading_scale = R0 / R -- geometric spreading amplitude decay,
        where R = hypot(distance_km, depth_km) is hypocentral distance and
        R0 is the same hypocentral distance at the reference geometry.
-    3. attenuation(f) = exp(-pi * f * (R - R0) * 1000 / (Q * v)) --
+    3. attenuation(f) = exp(-pi * f * max(R - R0, 0) * 1000 / (Q * v)) --
        anelastic attenuation, a genuine per-frequency-bin filter (removes
        high frequencies faster than low ones as R grows past R0), not a
        uniform amplitude scale in disguise. (R - R0) converted km -> m to
-       match velocity in m/s.
+       match velocity in m/s. Clamped at R0 -- Q attenuation only ever
+       removes energy the recorded trace still has; when R < R0 the
+       un-clamped formula would run the exponential in reverse and
+       "restore" high-frequency energy the reference recording never had
+       in the first place, blowing up without bound as R -> 0. Physically
+       there's nothing to restore, so the correct value for R <= R0 is no
+       attenuation adjustment at all (factor 1), not amplification.
     """
     n = len(accel)
     freqs = np.fft.rfftfreq(n, dt)
@@ -141,7 +147,7 @@ def apply_synthetic_earthquake_scaling(accel, dt, magnitude, distance_km,
     magnitude_scale = 10.0 ** (magnitude - reference_magnitude)
     spreading_scale = R0 / R
     attenuation = np.exp(
-        -np.pi * freqs * (R - R0) * 1000.0
+        -np.pi * freqs * max(R - R0, 0.0) * 1000.0
         / (ATTENUATION_Q * ATTENUATION_VELOCITY_MPS)
     )
     scale = magnitude_scale * spreading_scale * attenuation
