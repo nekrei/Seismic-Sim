@@ -37,6 +37,19 @@ N_PARALLEL_FRAMES = 2
 # just a size fudge.
 FURNITURE_TARGET_RATE_HZ = 50.0
 
+# --- Synthetic earthquake constants (spec 7, Part A) ----------------------
+# Reference epicenter geometry: the "no reshaping" point where
+# apply_synthetic_earthquake_scaling() must be the identity transform, so
+# regenerating out/ (which never calls it) stays exactly reproducible.
+# MUST match server.py's and index.html's DEFAULT_EPICENTER_DISTANCE_KM/
+# DEFAULT_EPICENTER_DEPTH_KM exactly (comment at each of the other sites).
+DEFAULT_EPICENTER_DISTANCE_KM = 20.0  # km
+DEFAULT_EPICENTER_DEPTH_KM = 10.0     # km
+# Anelastic (Q) attenuation constants -- typical crustal shear-wave Q and
+# velocity, fixed (not user-adjustable, same reasoning as E_CONCRETE above).
+ATTENUATION_Q = 200.0
+ATTENUATION_VELOCITY_MPS = 3500.0
+
 # Illustrative furniture-class parameters (spec Part B3) -- representative
 # constants, not derived from any real furniture-stiffness database (none
 # exists), freely adjustable for visual plausibility. Order matters: it
@@ -92,6 +105,49 @@ def frame_span(axis):
         return PLAN_SPAN_Y
     else:
         raise ValueError(f"axis must be 'X' or 'Y', got {axis!r}")
+
+
+def apply_synthetic_earthquake_scaling(accel, dt, magnitude, distance_km,
+                                        depth_km, reference_magnitude):
+    """
+    Reshape a real recorded ground acceleration trace into a synthetic
+    earthquake at a different Richter magnitude and epicenter geometry, by
+    multiplying its FFT spectrum by a real, non-negative, frequency-
+    dependent scale factor (spec 7, Part A) -- no phase change, matching
+    this project's existing zero-phase filtering convention.
+
+    Three effects, all identity at (magnitude=reference_magnitude,
+    distance_km=DEFAULT_EPICENTER_DISTANCE_KM,
+    depth_km=DEFAULT_EPICENTER_DEPTH_KM):
+
+    1. magnitude_scale = 10**(magnitude - reference_magnitude) -- the
+       literal historical Richter definition (M = log10(A) - log10(A0)),
+       applied directly rather than approximated.
+    2. spreading_scale = R0 / R -- geometric spreading amplitude decay,
+       where R = hypot(distance_km, depth_km) is hypocentral distance and
+       R0 is the same hypocentral distance at the reference geometry.
+    3. attenuation(f) = exp(-pi * f * (R - R0) * 1000 / (Q * v)) --
+       anelastic attenuation, a genuine per-frequency-bin filter (removes
+       high frequencies faster than low ones as R grows past R0), not a
+       uniform amplitude scale in disguise. (R - R0) converted km -> m to
+       match velocity in m/s.
+    """
+    n = len(accel)
+    freqs = np.fft.rfftfreq(n, dt)
+
+    R0 = np.hypot(DEFAULT_EPICENTER_DISTANCE_KM, DEFAULT_EPICENTER_DEPTH_KM)
+    R = np.hypot(distance_km, depth_km)
+
+    magnitude_scale = 10.0 ** (magnitude - reference_magnitude)
+    spreading_scale = R0 / R
+    attenuation = np.exp(
+        -np.pi * freqs * (R - R0) * 1000.0
+        / (ATTENUATION_Q * ATTENUATION_VELOCITY_MPS)
+    )
+    scale = magnitude_scale * spreading_scale * attenuation
+
+    spectrum = np.fft.rfft(accel)
+    return np.fft.irfft(spectrum * scale, n=n)
 
 
 def assemble_frame_stiffness(N, E, I_c, I_b, h, L):
