@@ -12,6 +12,7 @@ import json
 import csv
 import numpy as np
 import matplotlib.pyplot as plt
+import mdof_response as mr
 from matplotlib.ticker import AutoMinorLocator
 
 # ------------------------------------------------------------
@@ -97,6 +98,110 @@ def plot_response(folder_path, axis='X'):
     plt.close(fig)
     print(f"  Saved plot: {out_path}")
 
+def plot_spectrum(folder_path, axis='X'):
+    """
+    Generate the frequency-domain figure -- spectrum_plot_<axis>.png, the
+    offline twin of index.html's drawer (spec 6 Part D). Three stacked
+    panels sharing one log-frequency axis, so "input x transfer = output"
+    reads as vertical alignment in the report exactly as it does on screen:
+
+        Input     |A_g(f)|      the record's ground-acceleration spectrum
+        Transfer  |T_i(jw)|     the building's frequency response (+ per-mode terms)
+        Output    |U_i^rel(f)|  the roof's relative-displacement spectrum
+
+    The Output panel is an INDEPENDENT FFT of (floor - ground) read back
+    from response_<axis>.csv -- the same trimmed arrays the browser holds.
+    Never derive it by multiplying the other two panels: that would make
+    the identity true by construction instead of by measurement, which is
+    the one thing this figure exists to demonstrate.
+    """
+    meta_path = os.path.join(folder_path, 'building_data.json')
+    spec_path = os.path.join(folder_path, 'spectrum.json')
+    csv_path = os.path.join(folder_path, f'response_{axis}.csv')
+    for path in (meta_path, spec_path, csv_path):
+        if not os.path.exists(path):
+            print(f"  Warning: {path} not found, skipping {axis} spectrum plot.")
+            return
+
+    with open(meta_path, 'r') as f:
+        meta = json.load(f)
+    with open(spec_path, 'r') as f:
+        spec = json.load(f)
+
+    g_mag = spec.get(f'{axis}_mag')
+    freqs_hz = meta.get(f'natural_frequencies_Hz_{axis}')
+    phi = meta.get(f'mode_shapes_{axis}')
+    gamma = meta.get(f'participation_factors_{axis}')
+    if g_mag is None or freqs_hz is None or phi is None or gamma is None:
+        print(f"  Warning: no {axis} spectrum/modal data, skipping.")
+        return
+
+    f_hz = np.array(spec['f_Hz'])
+    g_mag = np.array(g_mag)
+    num_stories = meta['num_stories']
+    roof = num_stories - 1
+
+    # --- Transfer: analytic, at the artifact's own bin centres (shared grid) ---
+    T, mode_terms = mr.transfer_function(
+        f_hz, 2 * np.pi * np.array(freqs_hz), np.array(phi),
+        np.array(gamma), meta['damping_ratio'], roof)
+
+    # --- Output: independent FFT of the roof's relative displacement ---
+    time, disp = load_csv_data(csv_path)
+    dt = float(time[1] - time[0])
+    u_rel = disp[:, 1 + roof] - disp[:, 0]
+    f_out, out_mag = mr.log_bin_spectrum(u_rel, dt)
+
+    def to_db(mag):
+        return 20 * np.log10(np.maximum(np.asarray(mag), 1e-12))
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    cmap = plt.cm.plasma
+    panels = [
+        (axes[0], f_hz, g_mag, [], f'Input  $|A_g(f)|$  ({axis})', 'black', 2),
+        (axes[1], f_hz, np.abs(T), np.abs(mode_terms),
+         rf'Transfer  $|T_i(j\omega)|$  (floor {roof + 1})', cmap(0.55), 2),
+        (axes[2], f_out, out_mag, [], f'Output  $|U^{{rel}}_i(f)|$  (floor {roof + 1})', cmap(0.15), 2),
+    ]
+    for ax, xf, mag, extra, label, color, lw in panels:
+        db = to_db(mag)
+        db_max = float(db.max())
+        for k, term in enumerate(extra):
+            ax.semilogx(xf, to_db(term), color=cmap(k / max(1, len(extra) - 1)),
+                        alpha=0.35, linewidth=0.9,
+                        label='per-mode terms' if k == 0 else None)
+        ax.semilogx(xf, db, color=color, linewidth=lw)
+        ax.set_xlim(0.1, 50)
+        ax.set_ylim(db_max - 70, db_max + 5)   # 70 dB below this panel's own peak, matching the drawer
+        ax.set_ylabel('dB', fontsize=10)
+        ax.grid(True, alpha=0.3, linestyle='--', which='both')
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
+        ax.set_title(label, fontsize=11, loc='left')
+        if len(extra):
+            ax.legend(loc='upper right', fontsize=8)
+
+    # Grey the region above this record's own Nyquist -- zero-width for
+    # every record in this dataset (dt 0.005/0.01), kept correct for any
+    # future lower-rate record. The annotation below is what makes the
+    # sampling rate visible today.
+    nyq = spec['nyquist_Hz']
+    if nyq < 50:
+        for ax in axes:
+            ax.axvspan(nyq, 50, color='black', alpha=0.25)
+
+    axes[2].set_xlabel('Frequency (Hz)', fontsize=12)
+    fig.suptitle(f'{os.path.basename(folder_path)} - {axis}-axis frequency domain '
+                 f'(input x transfer = output)', fontsize=14, fontweight='semibold')
+    axes[0].annotate(f'fs = {1 / spec["dt"]:.0f} Hz  ·  Nyquist {nyq:.0f} Hz',
+                     xy=(1, 1.02), xycoords='axes fraction', ha='right',
+                     fontsize=9, color='0.35')
+
+    plt.tight_layout()
+    out_path = os.path.join(folder_path, f'spectrum_plot_{axis}.png')
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved plot: {out_path}")
+
 # ------------------------------------------------------------
 #  Main
 # ------------------------------------------------------------
@@ -127,8 +232,10 @@ def main():
         folder_path = os.path.join(OUT_DIR, folder)
         print(f"\nProcessing: {folder}")
         plot_response(folder_path, axis='X')
+        plot_spectrum(folder_path, axis='X')
         if PLOT_Y_AXIS:
             plot_response(folder_path, axis='Y')
+            plot_spectrum(folder_path, axis='Y')
 
     print("\nAll plots generated.")
 
