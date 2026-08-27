@@ -948,6 +948,145 @@
             fan: buildFanTemplate(),
         };
 
+        // --- Frequency-domain spectrum helpers (spec 6, frequency-domain
+        // panel) -- hand-rolled radix-2 FFT rather than pulling in a
+        // library. This project's course context (AGENTS.md) is why: the
+        // whole point of the drawer these feed is to make the DFT/FFT
+        // machinery this project already runs *visible*, not just call a
+        // black box that happens to compute it. The Python side gets
+        // scipy.fft "for free" since scipy is a real, load-bearing
+        // dependency there already (mdof_response.py's physics) -- hand-
+        // rolling it there too would just be duplication, not a
+        // demonstration. This block is checked bit-for-bit against
+        // scipy.fft by claude_scripts/fft_check.mjs + fft_check_scipy.py,
+        // which extract it verbatim from between the sentinel comments
+        // below at test time (never hold their own copy of the algorithm --
+        // a copy could silently drift from this file and pass anyway).
+        // Keep the block between the sentinels self-contained (no DOM/
+        // three.js references) so that extraction keeps working.
+        // ---8<--- SPECTRUM-HELPERS-BEGIN (extracted verbatim by claude_scripts/fft_check.mjs)
+        function nextPow2(n) {
+            let p = 1;
+            while (p < n) p <<= 1;
+            return p;
+        }
+
+        // In-place iterative radix-2 Cooley-Tukey, decimation-in-time.
+        // `re`/`im` must be same-length Float64Arrays with length a power
+        // of two. Forward transform, unnormalized (no 1/N), standard sign
+        // convention matching numpy/scipy: X[k] = sum_n x[n]*exp(-2pi*i*k*n/N).
+        function fftRadix2(re, im) {
+            const n = re.length;
+            // Bit-reversal permutation.
+            for (let i = 1, j = 0; i < n; i++) {
+                let bit = n >> 1;
+                for (; j & bit; bit >>= 1) j ^= bit;
+                j ^= bit;
+                if (i < j) {
+                    [re[i], re[j]] = [re[j], re[i]];
+                    [im[i], im[j]] = [im[j], im[i]];
+                }
+            }
+            // Iterative butterflies, doubling stage length each pass.
+            for (let len = 2; len <= n; len <<= 1) {
+                const half = len >> 1;
+                const ang = -2 * Math.PI / len; // negative: forward transform
+                const wRe = Math.cos(ang), wIm = Math.sin(ang);
+                for (let i = 0; i < n; i += len) {
+                    let curRe = 1, curIm = 0;
+                    for (let j = 0; j < half; j++) {
+                        const aRe = re[i + j], aIm = im[i + j];
+                        const bRe0 = re[i + j + half], bIm0 = im[i + j + half];
+                        const bRe = bRe0 * curRe - bIm0 * curIm;
+                        const bIm = bRe0 * curIm + bIm0 * curRe;
+                        re[i + j] = aRe + bRe;
+                        im[i + j] = aIm + bIm;
+                        re[i + j + half] = aRe - bRe;
+                        im[i + j + half] = aIm - bIm;
+                        const nextRe = curRe * wRe - curIm * wIm;
+                        const nextIm = curRe * wIm + curIm * wRe;
+                        curRe = nextRe;
+                        curIm = nextIm;
+                    }
+                }
+            }
+        }
+
+        // Geometric (log-spaced) bin edges from fMin to nyquistHz,
+        // nBins+1 edges for nBins bins -- matches mdof_response.py's
+        // np.geomspace(fMin, nyquist, nBins+1) bit-for-bit rule (see
+        // spec 6 / claude_scripts/verify_spectrum.py).
+        function logBinEdges(nyquistHz, fMin = 0.1, nBins = 400) {
+            const edges = new Float64Array(nBins + 1);
+            const ratio = nyquistHz / fMin;
+            for (let b = 0; b <= nBins; b++) {
+                edges[b] = fMin * Math.pow(ratio, b / nBins);
+            }
+            return edges;
+        }
+
+        // Zero-pads `signal` to the next power of two, runs it through
+        // fftRadix2, and reduces the raw linear-frequency spectrum to
+        // `nBins` log-spaced bins (geometric-mean bin centres). The `*dt`
+        // on each magnitude turns the unnormalized DFT into an approximation
+        // of the continuous Fourier transform, so the panel's absolute
+        // values (not just their shape) are physically meaningful -- it
+        // cancels out in the Output/Input ratio anyway, so it's free to keep.
+        function logBinSpectrum(signal, dt, nBins = 400) {
+            const fMin = 0.1;
+            const nfft = nextPow2(signal.length);
+            const re = new Float64Array(nfft);
+            re.set(signal);
+            const im = new Float64Array(nfft);
+            fftRadix2(re, im);
+
+            const half = nfft / 2; // inclusive -> half+1 raw bins
+            const mag = new Float64Array(half + 1);
+            const freq = new Float64Array(half + 1);
+            for (let k = 0; k <= half; k++) {
+                mag[k] = Math.hypot(re[k], im[k]) * dt;
+                freq[k] = k / (nfft * dt);
+            }
+
+            const nyquist = 1 / (2 * dt);
+            const edges = logBinEdges(nyquist, fMin, nBins);
+            const fHz = new Float64Array(nBins);
+            const magBinned = new Float64Array(nBins);
+            for (let b = 0; b < nBins; b++) {
+                fHz[b] = Math.sqrt(edges[b] * edges[b + 1]);
+                const lo = edges[b], hi = edges[b + 1];
+                const lastBin = b === nBins - 1; // inclusive on the right so freq === nyquist is captured
+                let sum = 0, count = 0;
+                for (let k = 0; k <= half; k++) {
+                    const f = freq[k];
+                    if (f >= lo && (lastBin ? f <= hi : f < hi)) {
+                        sum += mag[k];
+                        count++;
+                    }
+                }
+                if (count > 0) {
+                    magBinned[b] = sum / count;
+                } else {
+                    // Empty bin -- common at the log-spaced low end, where
+                    // the bin is narrower than the FFT's linear spacing
+                    // df = 1/(NFFT*dt). Fall back to the single nearest
+                    // raw bin rather than interpolating, zero-filling, or
+                    // leaving a NaN.
+                    let bestK = 0, bestDist = Infinity;
+                    for (let k = 0; k <= half; k++) {
+                        const dist = Math.abs(freq[k] - fHz[b]);
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            bestK = k;
+                        }
+                    }
+                    magBinned[b] = mag[bestK];
+                }
+            }
+            return { fHz, mag: magBinned };
+        }
+        // ---8<--- SPECTRUM-HELPERS-END
+
         // --- Deterministic per-floor furniture placement (spec B4) -- seeded
         // from (record name, floor index) so out/ regeneration never causes
         // spurious placement churn, and switching records/params reshuffles
