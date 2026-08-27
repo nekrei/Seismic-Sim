@@ -494,15 +494,21 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            outline: none;
-            transition: transform 150ms ease-out, border-color 200ms ease, background 200ms ease, color 200ms ease;
+            transition: transform 150ms ease-out, border-color 200ms ease, background 200ms ease, color 200ms ease, opacity 150ms ease-out;
         }
         #spectrumToggleBtn svg { display: block; }
         @media (hover: hover) and (pointer: fine) {
             #spectrumToggleBtn:hover { border-color: rgba(255,215,100,0.4); background: rgba(20,20,40,0.92); }
         }
         #spectrumToggleBtn:active { transform: scale(0.97); }
-        #spectrumToggleBtn.is-open { border-color: rgba(255,215,100,0.45); color: #ffd764; }
+        /* Once open, the drawer's own header (panel-header text +
+           drawer-close-btn) occupies this same top-right corner -- the
+           fixed toggle button would sit almost exactly on top of
+           drawer-close-btn (44px vs 30px box, few-pixel mismatch), letting
+           its corner peek out from underneath. Simplest fix: the toggle's
+           only job once open is redundant with drawer-close-btn anyway, so
+           hide it instead of trying to align two overlapping buttons. */
+        #spectrumToggleBtn.is-open { opacity: 0; pointer-events: none; }
 
         #spectrumDrawer {
             position: fixed;
