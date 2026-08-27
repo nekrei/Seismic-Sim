@@ -510,6 +510,136 @@
            hide it instead of trying to align two overlapping buttons. */
         #spectrumToggleBtn.is-open { opacity: 0; pointer-events: none; }
 
+        /* Epicenter cross-section map (spec 7, Part C) -- a small, always-
+           visible viewport overlay (independent of the Earthquake
+           Parameters section's collapsed state), positioned below
+           #spectrumToggleBtn so the two never overlap. z-index 9 (below
+           #spectrumDrawer's 10) so the drawer naturally covers it when
+           open, matching the toggle button's own z-index relationship. */
+        #epicenterMap {
+            position: fixed;
+            top: 76px;
+            right: 20px;
+            z-index: 9;
+            width: 168px;
+            background: rgba(11, 11, 26, 0.85);
+            backdrop-filter: blur(12px);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 8px 10px 10px;
+            color: rgba(255,255,255,0.7);
+            pointer-events: none;
+            user-select: none;
+        }
+        .epicenter-map-title {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-weight: 600;
+            color: rgba(255, 224, 178, 0.55);
+            margin-bottom: 6px;
+        }
+        /* Radial (plan-view) frame: a circle with the building fixed dead
+           center, since that's the one point in this picture whose
+           position never depends on a slider. Epicenter distance maps to
+           the dot's *radius* from center (0..MAP_MAX_DISTANCE_KM ->
+           0..EPICENTER_MAX_RADIUS_PCT, see updateEpicenterMap() -- kept
+           well under 50% so the dot's own box never crosses the visual
+           circle at max distance). The fixed 145deg placement angle is
+           illustrative only -- the physics model has no azimuth/bearing
+           input, only scalar distance. Depth has no spatial room left on
+           this 2D plan view, so it gets its own vertical gauge
+           (.epicenter-depth-gauge) alongside the circle instead of being
+           folded into the dot -- three sliders, three separate, clearly
+           visible channels (radius, gauge marker, pulse). */
+        .epicenter-map-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        .epicenter-map-frame {
+            position: relative;
+            width: 130px;
+            height: 130px;
+            flex: none;
+            border-radius: 50%;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: radial-gradient(circle at center, rgba(127,212,255,0.10), rgba(0,0,0,0.28) 100%);
+        }
+        .epicenter-ring {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            border: 1px dashed rgba(255,255,255,0.14);
+            border-radius: 50%;
+        }
+        .epicenter-building-mark {
+            position: absolute;
+            left: 50%; top: 50%;
+            width: 8px; height: 8px;
+            margin-left: -4px; margin-top: -4px;
+            background: rgba(127,212,255,0.9);
+            border-radius: 2px;
+            box-shadow: 0 0 6px rgba(127,212,255,0.6);
+            z-index: 2;
+        }
+        .epicenter-dot {
+            position: absolute;
+            width: 10px; height: 10px;
+            margin-left: -5px; margin-top: -5px;
+            border-radius: 50%;
+            background: #ffd764;
+            box-shadow: 0 0 6px rgba(255,215,100,0.8);
+            transition: left 200ms ease-out, top 200ms ease-out;
+        }
+        .epicenter-pulse-ring {
+            position: absolute;
+            inset: -3px;
+            border-radius: 50%;
+            border: 1px solid #ffd764;
+            animation: epicenterPulse var(--pulse-duration, 1.5s) ease-out infinite;
+        }
+        @keyframes epicenterPulse {
+            0% { transform: scale(1); opacity: 0.8; }
+            100% { transform: scale(var(--pulse-scale, 2.5)); opacity: 0; }
+        }
+        /* Depth gauge: ground surface at top, MAP_MAX_DEPTH_KM at bottom --
+           a dedicated vertical channel so depth reads clearly on its own,
+           independent of the circular map's distance/radius encoding. */
+        .epicenter-depth-gauge {
+            position: relative;
+            width: 12px;
+            height: 130px;
+            flex: none;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: linear-gradient(to bottom, rgba(127,212,255,0.14), rgba(255,120,80,0.22));
+        }
+        .epicenter-depth-marker {
+            position: absolute;
+            left: 50%;
+            width: 22px;
+            height: 6px;
+            margin-left: -11px;
+            margin-top: -3px;
+            border-radius: 3px;
+            background: #ffd764;
+            box-shadow: 0 0 6px rgba(255,215,100,0.8);
+            transition: top 200ms ease-out;
+        }
+        .epicenter-map-axes {
+            margin-top: 6px;
+            font-size: 10px;
+            font-family: ui-monospace, "SF Mono", monospace;
+            color: rgba(255,255,255,0.55);
+            text-align: center;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .epicenter-pulse-ring { animation-duration: 1ms; }
+        }
+
         #spectrumDrawer {
             position: fixed;
             top: 0;
@@ -662,6 +792,11 @@
             }
             #spectrumDrawer.is-open { transform: translateY(0); }
             .spectrum-canvas-wrap { min-height: 240px; }
+
+            #epicenterMap { width: 128px; }
+            .epicenter-map-frame { width: 90px; height: 90px; }
+            .epicenter-depth-gauge { width: 10px; height: 90px; }
+            .epicenter-map-title { font-size: 9px; }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -836,6 +971,26 @@
     <div id="info">🏗️ <span>seismic response</span> · drag to orbit · scroll to zoom</div>
     <div id="progress">⏳ loading data…</div>
 
+    <!-- Epicenter cross-section map (spec 7, Part C) -->
+    <div id="epicenterMap" aria-hidden="true">
+        <div class="epicenter-map-title">Epicenter map</div>
+        <div class="epicenter-map-row">
+            <div class="epicenter-map-frame">
+                <div class="epicenter-ring" style="width:33%; height:33%;"></div>
+                <div class="epicenter-ring" style="width:66%; height:66%;"></div>
+                <div class="epicenter-ring" style="width:100%; height:100%;"></div>
+                <div class="epicenter-building-mark"></div>
+                <div class="epicenter-dot" id="epicenterDot"><div class="epicenter-pulse-ring"></div></div>
+            </div>
+            <div class="epicenter-depth-gauge">
+                <div class="epicenter-depth-marker" id="epicenterDepthMarker"></div>
+            </div>
+        </div>
+        <div class="epicenter-map-axes">
+            <span id="epicenterDistReadout">20 km</span> · <span id="epicenterDepthReadout">10 km</span>
+        </div>
+    </div>
+
     <!-- Frequency-domain drawer (spec 6) -- co-equal view onto the same
          record data, not a control. Toggled independently of #controls; the
          3D scene keeps rendering behind it while open. See CSS block above
@@ -901,6 +1056,13 @@
         const epicenterDepthLabel = document.getElementById('epicenterDepthLabel');
         const richterSlider = document.getElementById('richterSlider');
         const richterLabel = document.getElementById('richterLabel');
+        const epicenterDot = document.getElementById('epicenterDot');
+        const epicenterDepthMarker = document.getElementById('epicenterDepthMarker');
+        const epicenterDistReadout = document.getElementById('epicenterDistReadout');
+        const epicenterDepthReadout = document.getElementById('epicenterDepthReadout');
+        const MAP_MAX_DISTANCE_KM = 200; // matches epicenterDistanceSlider's max
+        const MAP_MAX_DEPTH_KM = 100; // matches epicenterDepthSlider's max
+        const EPICENTER_MAX_RADIUS_PCT = 42; // keeps the (fixed-size) dot's own box inside the circle at max distance
         const seekSlider = document.getElementById('seekSlider');
         const timeDisplay = document.getElementById('timeDisplay');
         const progressEl = document.getElementById('progress');
@@ -956,9 +1118,48 @@
         const DEFAULT_EPICENTER_DISTANCE_KM = 20.0;
         const DEFAULT_EPICENTER_DEPTH_KM = 10.0;
 
-        // Placeholder -- Task 6 replaces this with the real epicenter
-        // cross-section map (#epicenterMap) update logic.
-        function updateEpicenterMap() {}
+        // Epicenter map (spec 7, Part C) -- a circular plan view with the
+        // building fixed at center; distance maps to the dot's radius
+        // (fixed illustrative angle -- the model has no azimuth input), and
+        // depth gets its own vertical gauge alongside the circle since a 2D
+        // plan view has no spatial room left for a second distance-like
+        // axis. Pulse speed/size are CSS (@keyframes epicenterPulse),
+        // driven purely by two custom properties set here -- decorative,
+        // not physics.
+        function updateEpicenterMap() {
+            const distance = parseFloat(epicenterDistanceSlider.value);
+            const depth = parseFloat(epicenterDepthSlider.value);
+            const magnitude = parseFloat(richterSlider.value);
+
+            // Radius from the center (building) scales with distance --
+            // EPICENTER_MAX_RADIUS_PCT keeps the dot's own (fixed-size) box
+            // inside the drawn circle at distance == MAP_MAX_DISTANCE_KM.
+            const distFrac = Math.min(1, distance / MAP_MAX_DISTANCE_KM);
+            const angle = 145 * Math.PI / 180;
+            const r = distFrac * EPICENTER_MAX_RADIUS_PCT;
+            const xPct = 50 + r * Math.sin(angle);
+            const yPct = 50 - r * Math.cos(angle);
+            epicenterDot.style.left = xPct.toFixed(2) + '%';
+            epicenterDot.style.top = yPct.toFixed(2) + '%';
+
+            // Depth gauge: ground surface at top (0%) to MAP_MAX_DEPTH_KM
+            // at the bottom (100%) -- its own dedicated channel, kept
+            // separate from the circle's distance encoding so it's always
+            // clearly visible on its own.
+            const depthFrac = Math.min(1, depth / MAP_MAX_DEPTH_KM);
+            epicenterDepthMarker.style.top = (depthFrac * 100).toFixed(1) + '%';
+
+            // Magnitude 3-9 -> pulse period 2.2s down to 0.6s, ring grows
+            // 1.8x-3.2x -- a bigger/faster pulse reads as a bigger quake.
+            const t = (magnitude - 3.0) / 6.0;
+            const period = 2.2 - t * 1.6;
+            const scale = 1.8 + t * 1.4;
+            epicenterDot.style.setProperty('--pulse-duration', period.toFixed(2) + 's');
+            epicenterDot.style.setProperty('--pulse-scale', scale.toFixed(2));
+
+            epicenterDistReadout.textContent = distance.toFixed(0) + ' km';
+            epicenterDepthReadout.textContent = depth.toFixed(0) + ' km';
+        }
 
         // --- Live-compute backend base URL ---------------------------------
         // Locally (conda run python server.py), Flask serves the frontend
@@ -1944,6 +2145,32 @@
             return logBinSpectrum(rel, dt);
         }
 
+        // Live Input trace under non-default Earthquake Parameters (spec 7,
+        // Part B4). groundXData/groundYData hold ground *displacement*
+        // (AGENTS.md), but the transfer function's convention is ground
+        // *acceleration* A_g(jw) -- so this recovers the acceleration
+        // spectrum from the displacement signal via frequency-domain double
+        // differentiation (|FFT(accel)| = omega^2 * |FFT(disp)|), the same
+        // technique already used for furniture's absolute-acceleration
+        // input, applied here at logBinSpectrum's own bin-center
+        // frequencies (a deliberate, small approximation on top of its own
+        // log-binning). Only used when Earthquake Parameters are
+        // non-default (see redrawSpectrumPanels) -- at defaults the exact
+        // precomputed spectrum.json acceleration spectrum is used instead.
+        function computeInputSpectrum(axis) {
+            const dispArr = axis === 'Y' ? groundYData : groundXData;
+            if (!dispArr || !dispArr.length || timeData.length < 2) return null;
+            const dt = timeData[1] - timeData[0];
+            if (!dt) return null;
+            const { fHz, mag: dispMag } = logBinSpectrum(dispArr, dt);
+            const mag = new Float64Array(fHz.length);
+            for (let k = 0; k < fHz.length; k++) {
+                const omega = 2 * Math.PI * fHz[k];
+                mag[k] = omega * omega * dispMag[k];
+            }
+            return { fHz, mag, dt, nyquist_Hz: 1 / (2 * dt) };
+        }
+
         function freqToX(f, x0, w) {
             const lf = Math.log10(Math.min(Math.max(f, SPECTRUM_F_MIN), SPECTRUM_F_MAX));
             const t = (lf - Math.log10(SPECTRUM_F_MIN)) / (Math.log10(SPECTRUM_F_MAX) - Math.log10(SPECTRUM_F_MIN));
@@ -2075,18 +2302,36 @@
             ctx.clearRect(0, 0, cssW, cssH);
 
             const axis = spectrumAxis;
-            const disabledBase = !modalData || !groundSpectrum || spectrumFloorIndex == null || !timeData.length;
-            const gMag = disabledBase ? null : (axis === 'Y' ? groundSpectrum.Y_mag : groundSpectrum.X_mag);
-            const tf = disabledBase || !gMag ? null : transferFunctionForFloor(modalData, axis, spectrumFloorIndex, groundSpectrum.f_Hz);
+            const atEqDefault = earthquakeParamsAtDefault();
+            const liveInput = atEqDefault ? null : computeInputSpectrum(axis);
+            const disabledBase = !modalData || spectrumFloorIndex == null || !timeData.length
+                || (atEqDefault ? !groundSpectrum : !liveInput);
+            // gSpec: a unified { fHz, mag, dt, nyquist_Hz } regardless of
+            // source -- the exact cached spectrum.json at Earthquake
+            // Parameter defaults (unchanged behavior), or the live
+            // approximation from computeInputSpectrum() otherwise (spec 7,
+            // Part B4). Both grids use the same fMin=0.1/nBins=400 log-bin
+            // rule (spec 6), so they're interchangeable as
+            // transferFunctionForFloor()'s fHz argument.
+            const gSpec = disabledBase ? null : (atEqDefault
+                ? {
+                    fHz: groundSpectrum.f_Hz,
+                    mag: axis === 'Y' ? groundSpectrum.Y_mag : groundSpectrum.X_mag,
+                    dt: groundSpectrum.dt,
+                    nyquist_Hz: groundSpectrum.nyquist_Hz,
+                }
+                : liveInput);
+            const gMag = gSpec ? gSpec.mag : null;
+            const tf = disabledBase || !gMag ? null : transferFunctionForFloor(modalData, axis, spectrumFloorIndex, gSpec.fHz);
             const outSpec = disabledBase || !gMag || !tf ? null : computeOutputSpectrum(axis, spectrumFloorIndex);
 
             const disabled = disabledBase || !gMag || !tf || !outSpec;
-            spectrumSamplingNote.textContent = (disabled || !groundSpectrum) ? ''
-                : `fs = ${(1 / groundSpectrum.dt).toFixed(0)} Hz · Nyquist ${groundSpectrum.nyquist_Hz.toFixed(0)} Hz`;
+            spectrumSamplingNote.textContent = (disabled || !gSpec) ? ''
+                : `fs = ${(1 / gSpec.dt).toFixed(0)} Hz · Nyquist ${gSpec.nyquist_Hz.toFixed(0)} Hz`;
             spectrumDisabledNote.style.display = disabled ? 'block' : 'none';
             spectrumCanvas.style.display = disabled ? 'none' : 'block';
             if (disabled) {
-                spectrumDisabledNote.textContent = (!modalData || !groundSpectrum)
+                spectrumDisabledNote.textContent = (!modalData || !gSpec)
                     ? "Frequency-domain data isn't available for this record yet."
                     : `No ${axis} data for this record.`;
                 return;
@@ -2099,21 +2344,21 @@
 
             drawSpectrumSubplot(ctx, plotX, topM, plotW, panelH,
                 `Input |A_g(f)| · ${axis}`,
-                [{ f: groundSpectrum.f_Hz, mag: gMag, color: '#7fd4ff' }],
-                groundSpectrum.nyquist_Hz);
+                [{ f: gSpec.fHz, mag: gMag, color: '#7fd4ff' }],
+                gSpec.nyquist_Hz);
 
             drawSpectrumSubplot(ctx, plotX, topM + panelH + gap, plotW, panelH,
                 `Transfer |T(jω)| · ${floorLabel}`,
                 [
-                    ...tf.perMode.map(m => ({ f: groundSpectrum.f_Hz, mag: m, color: 'rgba(255,215,100,0.5)', width: 1 })),
-                    { f: groundSpectrum.f_Hz, mag: tf.total, color: '#ffd764', width: 2 },
+                    ...tf.perMode.map(m => ({ f: gSpec.fHz, mag: m, color: 'rgba(255,215,100,0.5)', width: 1 })),
+                    { f: gSpec.fHz, mag: tf.total, color: '#ffd764', width: 2 },
                 ],
-                groundSpectrum.nyquist_Hz);
+                gSpec.nyquist_Hz);
 
             drawSpectrumSubplot(ctx, plotX, topM + 2 * (panelH + gap), plotW, panelH,
                 `Output |U_rel(f)| · ${floorLabel}`,
                 [{ f: outSpec.fHz, mag: outSpec.mag, color: '#7fffb0' }],
-                groundSpectrum.nyquist_Hz);
+                gSpec.nyquist_Hz);
         }
 
         // Brief blur/opacity dip on the canvas during a floor/axis-driven
