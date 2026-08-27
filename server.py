@@ -22,6 +22,8 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from mdof_response import (
     MDOF_ShearBuilding, FURNITURE_CLASSES, BEAM_WIDTH,
     PLAN_SPAN_X, PLAN_SPAN_Y,
+    apply_synthetic_earthquake_scaling,
+    DEFAULT_EPICENTER_DISTANCE_KM, DEFAULT_EPICENTER_DEPTH_KM,
 )
 
 # Frame-geometry defaults -- MUST match mdof_response.py's __main__
@@ -57,20 +59,25 @@ def _load_ground(record):
     return data
 
 
-def _validate_params(body):
+def _validate_params(body, reference_magnitude=6.0):
     """Clamp incoming slider values to sane bounds -- protects against
     pathological compute times or degenerate models, not against malice.
     T1_factor is gone (spec 5): period is now an output of the frame
     dimensions, not an input -- see specs/05-structural-frame-furniture.md
     Part C1. Column/beam depths are clamped strictly positive so K can
-    never go singular."""
+    never go singular. Epicenter distance/depth are clamped strictly
+    positive so hypocentral distance R can never be zero (spec 7)."""
     num_stories = max(1, min(30, int(body.get("num_stories", 7))))
     mass_per_floor = max(1e3, min(1e8, float(body.get("mass_per_floor", 1000e3))))
     zeta = max(0.005, min(0.5, float(body.get("zeta", 0.05))))
     column_depth_x = max(0.15, min(2.0, float(body.get("column_depth_x", DEFAULT_COLUMN_DEPTH_X))))
     column_depth_y = max(0.15, min(2.0, float(body.get("column_depth_y", DEFAULT_COLUMN_DEPTH_Y))))
     beam_depth = max(0.10, min(3.0, float(body.get("beam_depth", DEFAULT_BEAM_DEPTH))))
-    return num_stories, mass_per_floor, zeta, column_depth_x, column_depth_y, beam_depth
+    epicenter_distance_km = max(1.0, min(200.0, float(body.get("epicenter_distance_km", DEFAULT_EPICENTER_DISTANCE_KM))))
+    epicenter_depth_km = max(1.0, min(100.0, float(body.get("epicenter_depth_km", DEFAULT_EPICENTER_DEPTH_KM))))
+    richter_magnitude = max(3.0, min(9.0, float(body.get("richter_magnitude", reference_magnitude))))
+    return (num_stories, mass_per_floor, zeta, column_depth_x, column_depth_y,
+            beam_depth, epicenter_distance_km, epicenter_depth_km, richter_magnitude)
 
 
 @app.route("/compute", methods=["POST"])
@@ -85,8 +92,10 @@ def compute():
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 404
 
-    (num_stories, mass_per_floor, zeta,
-     column_depth_x, column_depth_y, beam_depth) = _validate_params(body)
+    reference_magnitude = ground.get("reference_magnitude", 6.0)
+    (num_stories, mass_per_floor, zeta, column_depth_x, column_depth_y,
+     beam_depth, epicenter_distance_km, epicenter_depth_km,
+     richter_magnitude) = _validate_params(body, reference_magnitude)
     dt = ground["dt"]
 
     # X and Y each need their own instance -- independent condensed K per
@@ -103,15 +112,38 @@ def compute():
         beam_depth=beam_depth, axis="Y",
     )
 
-    accel_x = np.array(ground["X"])
-    disp_x = np.array(ground["X_disp"])
+    # Reshape the real record's ground motion into the requested synthetic
+    # earthquake (spec 7). At the default Earthquake Parameters this is an
+    # identity transform (check 1), but ground_accel.json's cached X_disp/
+    # Y_disp is sometimes the *actually recorded* DT2 displacement rather
+    # than accel's double integral (parse_peer_displacement_file, see
+    # mdof_response.py's __main__) -- re-integrating unconditionally would
+    # silently swap that real displacement for a numerically-derived one
+    # even when nothing was reshaped, breaking parity with out/. Only
+    # re-derive displacement when the earthquake parameters actually
+    # deviate from identity.
+    is_default_quake = (
+        richter_magnitude == reference_magnitude
+        and epicenter_distance_km == DEFAULT_EPICENTER_DISTANCE_KM
+        and epicenter_depth_km == DEFAULT_EPICENTER_DEPTH_KM
+    )
+    accel_x = apply_synthetic_earthquake_scaling(
+        np.array(ground["X"]), dt, magnitude=richter_magnitude,
+        distance_km=epicenter_distance_km, depth_km=epicenter_depth_km,
+        reference_magnitude=reference_magnitude,
+    )
+    disp_x = np.array(ground["X_disp"]) if is_default_quake else building_x._integrate_accel(accel_x, dt)
     time_arr, gdisp_x, _, abs_x = building_x.compute_response(accel_x, disp_x, dt)
     furn_x, npts_dec_x, q_x, rate_x = building_x.get_decimated_furniture()
 
     has_y = ground.get("Y") is not None
     if has_y:
-        accel_y = np.array(ground["Y"])
-        disp_y = np.array(ground["Y_disp"])
+        accel_y = apply_synthetic_earthquake_scaling(
+            np.array(ground["Y"]), dt, magnitude=richter_magnitude,
+            distance_km=epicenter_distance_km, depth_km=epicenter_depth_km,
+            reference_magnitude=reference_magnitude,
+        )
+        disp_y = np.array(ground["Y_disp"]) if is_default_quake else building_y._integrate_accel(accel_y, dt)
         _, gdisp_y, _, abs_y = building_y.compute_response(accel_y, disp_y, dt)
         furn_y, npts_dec_y, q_y, rate_y = building_y.get_decimated_furniture()
         npts_dec = min(npts_dec_x, npts_dec_y)
@@ -135,6 +167,10 @@ def compute():
         "story_height": building_x.h,
         "npts": len(time_arr),
         "has_y": has_y,
+        "reference_magnitude": reference_magnitude,
+        "richter_magnitude": richter_magnitude,
+        "epicenter_distance_km": epicenter_distance_km,
+        "epicenter_depth_km": epicenter_depth_km,
 
         "elastic_modulus_Pa": building_x.E,
         "column_depth_x": column_depth_x,
