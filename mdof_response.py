@@ -739,6 +739,167 @@ class MDOF_ShearBuilding:
         print(f"Saved response to {filename}")
 
 
+# --- Ground-motion frequency-domain spectrum (spec 6, Part A) -------------
+
+def log_bin_edges(nyquist_hz, f_min=0.1, n_bins=400):
+    """
+    Geometrically-spaced bin edges for the frequency-domain panel's
+    log-frequency axis (spec 6). Length n_bins+1. np.geomspace, not
+    np.linspace -- a seismic magnitude spectrum is conventionally read on
+    a log-frequency axis, and a linear grid would crowd all the
+    interesting low-frequency structure into a few pixels.
+    """
+    return np.geomspace(f_min, nyquist_hz, n_bins + 1)
+
+
+def log_bin_spectrum(signal, dt, n_bins=400):
+    """
+    Zero-padded FFT magnitude spectrum of `signal`, averaged into
+    log-spaced frequency bins (spec 6 Part A). Returns (f_Hz, mag), each
+    length n_bins.
+
+    THE CONTRACT: index.html's frequency-domain panel re-implements this
+    exact algorithm in JavaScript, and the two must agree bit-for-bit.
+    The panel's Input trace comes from the artifact this produces (the
+    browser never receives raw acceleration); its Output trace is an
+    INDEPENDENT in-browser FFT of the selected floor's relative
+    displacement. Both have to land on the same log-frequency grid, or
+    the identity |Output| == |Transfer| x |Input| stops reading as
+    vertical alignment across the stacked panels.
+
+    NOTE FOR ANYONE TOUCHING THE PANEL: the Output trace must NEVER be
+    derived as Input x Transfer. That would make the identity true by
+    construction -- a tautology that demonstrates nothing -- when the
+    entire point of the figure is that two independently-computed things
+    agree. See specs/06-frequency-domain-panel.md Part A2.
+
+    A verification check (claude_scripts/verify_spectrum.py) compares this
+    against a from-scratch recomputation to 1e-12 relative -- don't change
+    this function's math without keeping that mirror in mind.
+
+        NFFT = next power of two >= len(signal)      (zero-padded)
+        F = rfft(signal, NFFT)
+        mag[k] = |F[k]| * dt                 for k = 0 .. NFFT//2 (incl.)
+        freq[k] = k / (NFFT * dt)  (== np.fft.rfftfreq(NFFT, dt))
+
+    The `* dt` scaling approximates the continuous Fourier transform (a
+    Riemann-sum discretization of the CFT integral), so the panel's
+    absolute magnitude values are physically meaningful (units of
+    accel-seconds). It exactly cancels in the Output/Input transfer-
+    function ratio the panel also plots, so it only matters for reading
+    the Input panel alone, not for the ratio.
+
+        nyquist = 1 / (2*dt)
+        edges = geomspace(f_min, nyquist, n_bins+1)
+        f_Hz[b] = sqrt(edges[b] * edges[b+1])      (geometric-mean centre)
+        value[b] = mean of mag[k] for all k with edges[b] <= freq[k] < edges[b+1]
+                   (last bin closed on the right too, so freq == nyquist
+                   is captured)
+
+    An empty bin (common at the low end, where the log grid is narrower
+    than the FFT's uniform bin spacing df = 1/(NFFT*dt)) falls back to the
+    single mag[k] whose freq[k] is nearest f_Hz[b] -- not interpolation,
+    not zero, not NaN.
+    """
+    n = len(signal)
+    nfft = 1 << (n - 1).bit_length()  # next power of two >= n
+    F = np.fft.rfft(signal, nfft)
+    mag = np.abs(F) * dt
+    freq = np.fft.rfftfreq(nfft, dt)
+
+    nyquist = 1.0 / (2 * dt)
+    edges = log_bin_edges(nyquist, n_bins=n_bins)
+    f_centers = np.sqrt(edges[:-1] * edges[1:])
+
+    values = np.empty(n_bins)
+    for b in range(n_bins):
+        lo, hi = edges[b], edges[b + 1]
+        if b == n_bins - 1:
+            in_bin = (freq >= lo) & (freq <= hi)
+        else:
+            in_bin = (freq >= lo) & (freq < hi)
+        if np.any(in_bin):
+            values[b] = mag[in_bin].mean()
+        else:
+            nearest = np.argmin(np.abs(freq - f_centers[b]))
+            values[b] = mag[nearest]
+
+    return f_centers, values
+
+
+def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx):
+    """
+    Analytic transfer function from ground acceleration to floor
+    `floor_idx`'s displacement RELATIVE to ground (spec 6 Part A2) --
+    the middle panel's solid curve.
+
+    Mirrors compute_response()'s per-mode frequency-domain solve exactly
+    (there: ``H = -Gamma_i / (wn**2 - omega**2 + 1j*2*z*wn*omega)``,
+    ``q_i = phi[:, i] * H * A_fft``, ``floor_disp_rel = phi @ q``), just
+    evaluated analytically at arbitrary frequencies instead of via
+    FFT/ifft on a padded time grid:
+
+        H_j(jw) = 1 / (omega_j^2 - w^2 + 2j*zeta*omega_j*w)
+        T_i(jw) = -sum_j phi[floor_idx, j] * Gamma[j] * H_j(jw)
+
+    This is the "input x transfer = output" identity the frequency-domain
+    panel draws -- claude_scripts/verify_spectrum.py's check_identity()
+    confirms it against compute_response()'s own FFT-based solution.
+    index.html re-implements this same formula in JavaScript for the
+    Transfer panel; keep the two in sync if this changes.
+
+    `phi` must be mass-normalized (phi^T M phi = I), as produced by
+    _modal_analysis() -- do not renormalize it here.
+
+    Returns (T_i, mode_terms):
+        T_i: complex ndarray, shape (len(f_hz),) -- the solid curve,
+            T_i = -mode_terms.sum(axis=0).
+        mode_terms: complex ndarray, shape (n_modes, len(f_hz)) --
+            phi[floor_idx, j] * Gamma[j] * H_j(jw) per mode j, drawn
+            faintly underneath T_i so the modal decomposition stays
+            visible (spec 6 Part A2, requirement 2).
+    """
+    omega = 2 * np.pi * np.asarray(f_hz, dtype=float)
+    n_modes = phi.shape[1]
+    mode_terms = np.empty((n_modes, len(omega)), dtype=complex)
+    for j in range(n_modes):
+        wn = omega_n[j]
+        denom = (wn**2 - omega**2 + 1j * 2 * zeta * wn * omega)
+        H_j = 1.0 / denom
+        mode_terms[j] = phi[floor_idx, j] * Gamma[j] * H_j
+    T_i = -mode_terms.sum(axis=0)
+    return T_i, mode_terms
+
+
+def save_ground_spectrum(filename, accel_x, accel_y, dt, n_bins=400):
+    """
+    Writes out/<record>/spectrum.json -- the ground-acceleration magnitude
+    spectrum index.html's frequency-domain panel (spec 6) plots as its
+    Input trace. Precomputed here, not in the browser: the browser only
+    ever holds ground *displacement* (ground_accel.json's X_disp/Y_disp,
+    used to drive live /compute recomputation), never acceleration, and
+    this panel is parameter-independent (Building Parameter sliders change
+    the building's transfer function, never the record) -- so there's no
+    reason to ship raw acceleration to the client just to FFT it there.
+    """
+    nyquist = 1.0 / (2 * dt)
+    f_hz, x_mag = log_bin_spectrum(accel_x, dt, n_bins=n_bins)
+    y_mag = None
+    if accel_y is not None:
+        _, y_mag = log_bin_spectrum(accel_y, dt, n_bins=n_bins)
+
+    data = {
+        "dt": dt,
+        "npts": len(accel_x),
+        "nyquist_Hz": nyquist,
+        "f_Hz": f_hz.tolist(),
+        "X_mag": x_mag.tolist(),
+        "Y_mag": y_mag.tolist() if y_mag is not None else None,
+    }
+    with open(filename, 'w') as f:
+        json.dump(data, f)
+
+
 def save_building_data(filename, building_x, building_y, furniture_meta=None):
     """
     Module-level replacement for the old per-instance save_to_json --
@@ -979,6 +1140,13 @@ if __name__ == "__main__":
         with open(os.path.join(out_folder, "ground_accel.json"), 'w') as f:
             json.dump(ground_accel_data, f)
         print(f"Saved ground acceleration cache to {os.path.join(out_folder, 'ground_accel.json')}")
+
+        # Precomputed ground-acceleration magnitude spectrum for the
+        # frequency-domain panel (spec 6, Part A) -- see save_ground_spectrum
+        # for why this can't just be computed client-side from ground_accel.json.
+        spectrum_path = os.path.join(out_folder, "spectrum.json")
+        save_ground_spectrum(spectrum_path, accel_x, accel_y, dt)
+        print(f"Saved ground spectrum to {spectrum_path}")
 
     # After processing all folders, create a manifest file in out/
     manifest_path = os.path.join(out_dir, "folders.json")
