@@ -759,13 +759,23 @@ def log_bin_spectrum(signal, dt, n_bins=400):
     length n_bins.
 
     THE CONTRACT: index.html's frequency-domain panel re-implements this
-    exact algorithm in JavaScript (it never receives raw acceleration --
-    only the precomputed out/<record>/spectrum.json this produces --  but
-    it re-derives the Output trace client-side from Input x Transfer, and
-    that has to land on the same log-frequency grid). A verification check
-    (claude_scripts/verify_spectrum.py) compares this against a
-    from-scratch recomputation to 1e-12 relative -- don't change this
-    function's math without keeping that mirror in mind.
+    exact algorithm in JavaScript, and the two must agree bit-for-bit.
+    The panel's Input trace comes from the artifact this produces (the
+    browser never receives raw acceleration); its Output trace is an
+    INDEPENDENT in-browser FFT of the selected floor's relative
+    displacement. Both have to land on the same log-frequency grid, or
+    the identity |Output| == |Transfer| x |Input| stops reading as
+    vertical alignment across the stacked panels.
+
+    NOTE FOR ANYONE TOUCHING THE PANEL: the Output trace must NEVER be
+    derived as Input x Transfer. That would make the identity true by
+    construction -- a tautology that demonstrates nothing -- when the
+    entire point of the figure is that two independently-computed things
+    agree. See specs/06-frequency-domain-panel.md Part A2.
+
+    A verification check (claude_scripts/verify_spectrum.py) compares this
+    against a from-scratch recomputation to 1e-12 relative -- don't change
+    this function's math without keeping that mirror in mind.
 
         NFFT = next power of two >= len(signal)      (zero-padded)
         F = rfft(signal, NFFT)
