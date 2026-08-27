@@ -1948,10 +1948,17 @@
                 ctx.globalAlpha = 1;
             }
 
+            // Label last, over a solid backing plate -- the curves run
+            // right through the top-left corner (the Transfer panel's own
+            // resonance peak in particular), and plain text on top of them
+            // is unreadable.
             ctx.textAlign = 'left';
-            ctx.fillStyle = 'rgba(255,255,255,0.6)';
             ctx.font = '10px ui-monospace, "SF Mono", "Cascadia Code", monospace';
-            ctx.fillText(label, x + 4, y + 11);
+            const labelW = ctx.measureText(label).width;
+            ctx.fillStyle = 'rgba(11,11,26,0.82)';
+            ctx.fillRect(x + 1, y + 1, labelW + 8, 15);
+            ctx.fillStyle = 'rgba(255,255,255,0.72)';
+            ctx.fillText(label, x + 5, y + 12);
         }
 
         // Rebuilds the drawer's floor <select> whenever the building is
