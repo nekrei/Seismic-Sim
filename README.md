@@ -61,7 +61,11 @@ The math PDF explains all of these properly, with pictures.
 | **Spectrum** | The output of an FFT, drawn as a picture: frequency along the bottom, "how much of the signal is at that frequency" up the side. A tall spike at 1 Hz means the signal contains a lot of once-per-second wobble. |
 | **Transfer function** | A building's "answer sheet" for every possible frequency of shaking: for each one, how much does the roof move? It peaks at the building's natural sway frequencies (that's resonance) and is small everywhere else. It depends only on the building, never on the earthquake. |
 | **Furniture sway** | Each piece of furniture is modeled as its own tiny mass-on-a-spring riding on its floor, with the floor's own computed motion as the "ground motion" it reacts to — the exact same kind of equation as the building itself, solved the same way (FFT), just applied recursively to a lighter, independent system. Furniture mass never feeds back into the building's own physics — it's a one-way, decorative-but-honestly-computed effect. |
-| **Amplify** | A slider in the visualization that exaggerates the motion so tiny, real sway (anywhere from a fraction of a millimeter to tens of centimeters, depending on the earthquake) is visible on screen. Its default is auto-computed per record, and its range is logarithmic — it never affects the underlying numbers, only the picture. Switching records recomputes this default; adjusting a Building Parameter slider never does — those are independent knobs. |
+| **Amplify** | An internal, auto-computed scale factor that exaggerates the motion on screen so tiny, real sway (anywhere from a fraction of a millimeter to tens of centimeters, depending on the earthquake) is visible. There's no manual slider for it any more — it recomputes itself from the *actual* peak floor displacement every time you switch records, drag a Building Parameter slider, or reshape the earthquake via the Earthquake Parameters below, so the picture always stays legible whether the underlying physics moved a millimeter or a few hundred meters. |
+| **Richter magnitude** | The earthquake's overall size on the (literal, historical) Richter scale, where each whole unit is a 10x jump in shaking amplitude — not "10x stronger" in some vague sense, but exactly a 10x multiplier on the ground motion's own FFT spectrum. |
+| **Epicenter distance / depth** | Two synthetic "what if this quake had happened somewhere else" knobs. Combined via the Pythagorean theorem into a single **hypocentral distance** (straight-line distance from the point underground where the rupture started to the building), which is what actually drives how the shaking changes — not distance and depth separately. |
+| **Geometric spreading** | The purely-geometric reason shaking gets weaker with distance even with no other physics involved: the same seismic energy is spread across an ever-larger sphere as it travels outward, so amplitude falls off as 1/R (R = hypocentral distance). |
+| **Anelastic attenuation** | A *second*, separate reason distant shaking is weaker: real rock isn't a perfect elastic spring, so it quietly absorbs energy as a wave passes through — and it eats high frequencies faster than low ones, which is why distant earthquakes don't just feel weaker, they feel duller/lower-pitched. Modeled here as a genuine per-frequency-bin filter, not a single number. |
 
 ## How the pieces connect
 
@@ -202,9 +206,13 @@ results. It:
   lean/shear between floors as each floor sways by a different amount, and
   furniture sways with a motion of its own, distinct from (but riding on
   top of) its floor's rigid motion.
-- Gives you controls: play/pause, playback speed, a scrubber to jump to
-  any moment, and the **amplify** slider from the glossary above — plus two
-  new camera modes (below) and a redesigned, mobile-friendly panel.
+- Gives you controls: play/pause, playback speed, and a scrubber to jump to
+  any moment — plus two new camera modes (below) and a redesigned,
+  mobile-friendly panel. There's no manual Amplify slider any more (see the
+  glossary entry above) — it's fully automatic now, which matters because
+  Earthquake Parameters (below) can legitimately push peak floor
+  displacement from millimeters to hundreds of meters, a range no single
+  manual slider position could stay legible across.
 - Has a **Building Parameters** panel (stories, mass per floor, damping,
   column depth X, column depth Y, beam depth, plus a read-only period
   readout) — moving any of the sliders sends your values to `server.py`,
@@ -219,6 +227,25 @@ results. It:
   more: once stiffness comes from real column/beam dimensions, the sway
   period is an *output* of the model, not something you dial in directly —
   the read-only `T₁ (X/Y)` readout shows what it comes out to.
+- Has an **Earthquake Parameters** panel — Epicenter Distance, Epicenter
+  Depth, and Richter Magnitude sliders that reshape the *selected record's*
+  own ground motion into a synthetic "what if this quake had happened
+  closer/farther/stronger" version, rather than picking from a fixed set of
+  canned earthquakes. Magnitude applies the literal historical Richter
+  definition (each whole unit = exactly 10x the ground motion's own FFT
+  spectrum, not an approximation); distance/depth combine into a single
+  hypocentral distance that drives two physically distinct effects —
+  geometric spreading (uniform 1/R amplitude falloff) and anelastic
+  attenuation (a genuine per-frequency filter that eats high frequencies
+  faster than low ones as the "quake" gets farther away, the same reason
+  real distant earthquakes sound duller, not just quieter). These sliders
+  never touch the building's own stiffness/mass/damping — only reshape the
+  input ground motion — so the `T₁ (X/Y)` readout stays fixed while you
+  drag them; only Building Parameters change it. A small always-visible
+  **epicenter map** in the top-right corner gives a rough plan-view sense
+  of where the synthetic hypocenter sits (dot position + a separate depth
+  gauge) and pulses faster/larger as magnitude increases — illustrative,
+  not to scale, since the model has no azimuth/direction input.
 - Has a **View** section with a floor selector: pick a floor to smoothly
   reframe the camera in close on it (playback and every animation keeps
   running throughout — this only changes what the camera is looking at),
@@ -244,8 +271,10 @@ results. It:
   what `mdof_response.py` computes internally. The peaks in the Transfer panel
   are the building's resonances, and wherever one lines up with energy in the
   Input panel, the Output panel shows a peak too. A floor selector and an X/Y
-  toggle drive the bottom two panels; the Input panel never changes, because
-  the earthquake doesn't care what you built. Everything here is recomputed
+  toggle drive the bottom two panels. The Input panel doesn't react to
+  Building Parameters — the earthquake doesn't care what you built — but it
+  *does* redraw live when you drag an Earthquake Parameters slider, since
+  that's reshaping the ground motion itself. Transfer/Output are recomputed
   live when you move a Building Parameter slider — stiffen the columns and you
   can watch the resonance peak slide to the right. The Output panel is measured
   from the actual computed floor motion, *not* derived by multiplying the other
@@ -437,6 +466,24 @@ explains why it exists and what it contains.
   and faded it to black — especially noticeable on tall buildings. Fog
   near/far are now recomputed every animation frame from the camera's
   actual current distance, not a value cached from the last framing event.
+- An Earthquake Parameters panel (spec 7) lets you reshape any selected
+  record's own ground motion into a synthetic "what if" version via
+  Epicenter Distance/Depth and Richter Magnitude sliders, instead of only
+  ever replaying the 10 recordings exactly as recorded. This replaced the
+  old manual Amplify slider entirely — with earthquake magnitude now
+  user-adjustable, peak floor displacement can legitimately span
+  millimeters to hundreds of meters, a range no fixed manual amplify
+  position could stay legible across, so amplify is now purely automatic.
+  A small always-visible epicenter map gives a rough plan-view sense of
+  where the synthetic hypocenter sits. One bug was found and fixed during
+  this work: at a hypocenter *closer* than the reference recording's own
+  geometry, the anelastic-attenuation term used to flip from removing
+  high-frequency energy to amplifying it without bound (the recorded
+  trace's noise floor blew up to kilometers of "displacement") — fixed by
+  clamping the effect so a closer-than-reference hypocenter means no
+  attenuation adjustment, never amplification, matching what's physically
+  possible (distance can only remove energy a real recording still has,
+  never add energy that was never there).
 
 Keep this file — and the math PDF — updated as the project evolves. That's
 the whole point of having them.

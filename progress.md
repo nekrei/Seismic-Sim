@@ -213,3 +213,134 @@ strong" corner -- there could be a third issue lurking in a corner not
 yet tried (e.g. very large R relative to R0, where `spreading_scale =
 R0/R` gets very small -- check it doesn't collapse to zero/NaN at
 `distance_km=200, depth_km=100`).
+
+## Task 7: Systematic real-browser verification pass
+
+Ran `claude_scripts/verify_synthetic_earthquake.py` fresh first (per the
+checkpoint's step 1) -- all 4 checks still PASS post-bugfix commits.
+
+Deliberately tested 2-3 extreme corners beyond the one already found buggy
+(per checkpoint step 2), all in a real browser (Claude in Chrome) against
+this worktree's `server.py`:
+- Max distance (200km) alone: T1 unchanged (1.06s/0.95s), epicenter dot
+  moved outward, zero console errors.
+- Max depth (100km) alone: same, plus depth gauge (separate channel from
+  the circular distance dot) moved to its own max independently.
+- Max distance + max depth + max magnitude (9.0M) together: stable, no
+  NaN/blowup, T1 unchanged -- confirms the far corner opposite the
+  previously-fixed R<R0 amplification bug is also safe (large R relative
+  to R0 doesn't collapse `spreading_scale` to zero/NaN).
+- Magnitude alone at max (9.0M), distance/depth held at exact defaults
+  (20km/10km, reloaded page to confirm): T1 unchanged, epicenter dot
+  position unchanged (only the pulse animation reacts), zero console
+  errors -- confirms the three sliders are genuinely independent.
+- Re-tested the original bug corner (dist=1km, depth=1km, mag=9.0, close
+  to the exact combo that produced both prior bugs): building renders
+  centered and bounded (epicenter map correctly reads "1 km - 1 km"),
+  peak floor displacement 284,659mm (~285m) -- matches the magnitude-scale
+  math almost exactly against the previously-documented ~226m at M=8.9
+  (226 * 10^(9.0-8.9) = 284.5m predicted vs 284.66m measured), an
+  independent confirmation of check 2's exact-10x-per-magnitude-unit rule
+  using a real end-to-end browser render, not just the offline script.
+
+Worked through verification doc sections 6-8 systematically:
+
+**Section 6** (live sliders): each of the 3 sliders tested individually
+(above) -- no console errors, T1 fixed. Amplify slider/label confirmed
+absent from Playback in every panel screenshot this session. Sway stays
+visible (not off-screen/invisible) at the extreme close/large combo.
+Dragged Column X (a Building Parameter) while the extreme earthquake combo
+was still active: building stayed centered, no sudden sway rescale, T1
+correctly shifted to 1.01s/0.93s reflecting the stiffer column, zero
+console errors -- confirms auto-scale re-trigger stays correctly scoped to
+Earthquake Parameter changes only, not Building Parameters (no regression
+of existing spec 2/4 behavior).
+
+**Section 7** (epicenter map): confirmed always visible (verified via
+`getBoundingClientRect()`) with the Earthquake Parameters section
+collapsed. Distance/depth drag independently (already covered above --
+dot moves horizontally, a separate depth gauge moves vertically, matching
+the spec's "own channel" design). Richter slider's pulse animation
+measured programmatically via computed `--pulse-duration`/`--pulse-scale`
+custom properties, not just eyeballed: 2.20s/1.80 at M=3.0 (min) vs.
+0.60s/3.20 at M=9.0 (max) -- both get faster and larger with magnitude, as
+designed. Mobile breakpoint (`@media (max-width: 600px)`) rule confirmed
+via stylesheet inspection (`#epicenterMap { width: 128px }` vs. 168px
+default) and simulated by injecting it directly, since Claude in Chrome
+can't resize the window (same limitation/workaround spec 6 already
+documented) -- map is `position: fixed` anchored top-right, the mobile
+bottom sheet is anchored to the viewport bottom, so overlap is
+structurally impossible regardless of exact sheet height.
+
+**Section 8** (frequency-domain drawer under synthetic scaling): opened
+the drawer with the extreme combo active (dist=1km, depth=1km, mag=9.0).
+Input trace visibly differed in shape from the default-record trace
+(confirms it's recomputed live per Part B4, not stale `spectrum.json`).
+Wrote a throwaway script,
+`claude_scripts/verify_synth_spectrum_identity.py` (reuses
+`verify_spectrum.py`'s `check_identity()` math, swapping in
+`apply_synthetic_earthquake_scaling()`-reshaped accel/disp at this same
+extreme combo) to numerically re-run goal 6's own identity check
+(`|FFT(u_rel)| == |T(jw)| * |A_g(jw)|`) against reshaped ground motion
+instead of the static default. **Result: max rel err 2.9e-15 on the
+padded/exact grid** -- the only grid `verify_spectrum.py` itself gates on
+(threshold 1e-9) -- matching goal 6's own precision at defaults. Confirms
+the identity isn't accidentally broken by synthetic reshaping; the two
+code paths (Input's frequency-domain double-differentiation of reshaped
+ground displacement, and the *unchanged* transfer function) still combine
+correctly.
+
+Final network/console check across the whole session: all 9 `/compute`
+POSTs returned 200, zero console errors captured in the full 216-message
+buffer (all LOG-level, none ERROR/NaN/Infinity).
+
+**Ruling**: `verify_synth_spectrum_identity.py`'s grid (b) (trimmed,
+measured-only per `verify_spectrum.py`'s own documented precedent) showed
+a higher max rel err (7.3%) than an arbitrary 5% threshold I first tried --
+not a real problem, just this project's own established precedent that
+grid (b) is loose due to FFT leakage from the truncated free-vibration
+tail and was never meant to be hard-gated (only grid (a) is, at 1e-9).
+Rewrote the check to report grid (b) and gate only on grid (a), matching
+`verify_spectrum.py`'s own structure exactly rather than inventing a new
+threshold.
+
+Task 7 complete -- all of sections 6-8 pass. Next: Task 8 (docs/tooling
+checklist).
+
+## Task 8: docs/tooling checklist
+
+- README.md updated (glossary entries for Richter magnitude/epicenter
+  distance-depth/geometric spreading/anelastic attenuation; the Amplify
+  glossary entry rewritten to reflect there being no manual slider;
+  index.html section documents the new Earthquake Parameters panel and
+  the Frequency Domain drawer's live reaction to it; a Current State
+  changelog entry covers the panel, the epicenter map, and the R<=R0
+  attenuation-clamp bug fix).
+- Math PDF source notes written at
+  `claude_scripts/math-pdf-sections-goal7.md` (Part E, sections E1-E6),
+  matching the beginner-friendly style of `math-pdf-sections-goal5.md`:
+  the frequency-domain framing, the literal Richter amplitude-ratio
+  definition, geometric spreading, anelastic attenuation as a genuine
+  per-frequency filter (and why the R<=R0 clamp is a physical necessity,
+  not a numerical safety valve), and a section explaining why the
+  on-screen sway still looks calm at most instants even at extreme
+  parameters (real earthquakes are inherently peaky; both scale factors
+  are frequency-uniform so they cannot change that peakiness; the
+  auto-scale normalizes to the single global peak) -- not a bug, a
+  documented property of the existing spec 2 auto-scale design.
+- `AGENTS.md`'s own spec 7 status line intentionally NOT touched here --
+  per this project's convention it only gets marked done in the main
+  checkout after the user actually merges (see the goal skill's
+  checkpoint note); still says "not yet implemented" in this worktree's
+  copy, which is expected.
+- `graphify update .` run -- 104 nodes, 131 edges, 8 communities, clean.
+- No new dependency was added by this spec, so `requirements.txt` needs no
+  change.
+- `seismic-sim-backend` mirror is still owed once merged (server.py's
+  `/compute` gained the epicenter/magnitude params in Task 3, and
+  mdof_response.py gained `apply_synthetic_earthquake_scaling()` in Task
+  1) -- to be called out in the final report, not done here.
+
+Task 8 complete. Next: final whole-branch review pass against the spec
+and verification doc, then checkpoint stage `verify`, then the finish
+menu.
