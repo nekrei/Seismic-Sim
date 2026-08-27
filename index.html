@@ -217,7 +217,11 @@
             transition: background 0.2s;
             min-height: 40px;
             min-width: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
+        .transport-row button svg { display: block; }
         .transport-row button:hover { background: rgba(255,215,100,0.25); }
         .transport-row .speed { flex: 1; display: flex; align-items: center; gap: 8px; }
 
@@ -312,7 +316,11 @@
                 min-height: 40px;
                 font-size: 16px;
                 flex: none;
+                display: flex;
+                align-items: center;
+                justify-content: center;
             }
+            .sheet-collapsed-strip button svg { display: block; }
             .sheet-expand-handle {
                 width: 36px;
                 height: 4px;
@@ -483,8 +491,12 @@
             font-size: 18px;
             line-height: 1;
             cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             transition: transform 150ms ease-out, border-color 200ms ease, background 200ms ease, color 200ms ease;
         }
+        #spectrumToggleBtn svg { display: block; }
         @media (hover: hover) and (pointer: fine) {
             #spectrumToggleBtn:hover { border-color: rgba(255,215,100,0.4); background: rgba(20,20,40,0.92); }
         }
@@ -551,6 +563,24 @@
             min-height: 0;
         }
         #spectrumDrawer .ctrl-row { display: flex; align-items: center; gap: 12px; }
+
+        /* Matches #controls select exactly -- this drawer's Floor <select>
+           had no rule of its own before and fell back to the browser's
+           native (white) dropdown chrome. */
+        #spectrumDrawer select {
+            background: rgba(11, 11, 26, 0.9);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px;
+            color: #fff;
+            padding: 7px 8px;
+            font-size: 13px;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s;
+            width: 100%;
+        }
+        #spectrumDrawer select option { background: #1a1a2e; color: #fff; }
+        #spectrumDrawer select:hover, #spectrumDrawer select:focus { border-color: rgba(255,215,100,0.4); }
 
         .axis-toggle { display: flex; gap: 6px; flex: 1; }
         .axis-toggle button {
@@ -654,7 +684,7 @@
              expanding the full sheet. -->
         <div class="sheet-collapsed-strip" id="sheetStrip">
             <span class="record-name" id="stripRecordName">—</span>
-            <button id="stripPlayBtn">⏸</button>
+            <button id="stripPlayBtn"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg></button>
         </div>
         <div class="sheet-expand-handle"></div>
 
@@ -674,7 +704,7 @@
             </summary>
             <div class="details-body">
                 <div class="transport-row">
-                    <button id="playBtn">⏸</button>
+                    <button id="playBtn"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg></button>
                     <div class="speed">
                         <input type="range" id="speedSlider" min="0.1" max="5" step="0.1" value="1" />
                         <span class="panel-value" id="speedLabel">1.0×</span>
@@ -779,7 +809,9 @@
          record data, not a control. Toggled independently of #controls; the
          3D scene keeps rendering behind it while open. See CSS block above
          for the full rationale. -->
-    <button id="spectrumToggleBtn" aria-label="Toggle frequency-domain panel" aria-expanded="false" title="Frequency domain">📶</button>
+    <button id="spectrumToggleBtn" aria-label="Toggle frequency-domain panel" aria-expanded="false" title="Frequency domain">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-7 4 14 3-9 2 5h4"/></svg>
+    </button>
     <div id="spectrumDrawer" aria-hidden="true">
         <div class="drawer-header">
             <div>
@@ -2802,11 +2834,13 @@
         // mobile bottom-sheet's collapsed-strip button (spec 4, Part E) --
         // one piece of state, two buttons kept in sync, instead of
         // duplicating the toggle logic.
+        const ICON_PAUSE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>';
+        const ICON_PLAY = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M7 5v14l12-7z"/></svg>';
         function togglePlayback() {
             isPlaying = !isPlaying;
-            const icon = isPlaying ? '⏸' : '▶️';
-            playBtn.textContent = icon;
-            stripPlayBtn.textContent = icon;
+            const icon = isPlaying ? ICON_PAUSE : ICON_PLAY;
+            playBtn.innerHTML = icon;
+            stripPlayBtn.innerHTML = icon;
         }
         playBtn.addEventListener('click', togglePlayback);
         stripPlayBtn.addEventListener('click', togglePlayback);
