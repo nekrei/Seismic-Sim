@@ -827,6 +827,50 @@ def log_bin_spectrum(signal, dt, n_bins=400):
     return f_centers, values
 
 
+def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx):
+    """
+    Analytic transfer function from ground acceleration to floor
+    `floor_idx`'s displacement RELATIVE to ground (spec 6 Part A2) --
+    the middle panel's solid curve.
+
+    Mirrors compute_response()'s per-mode frequency-domain solve exactly
+    (there: ``H = -Gamma_i / (wn**2 - omega**2 + 1j*2*z*wn*omega)``,
+    ``q_i = phi[:, i] * H * A_fft``, ``floor_disp_rel = phi @ q``), just
+    evaluated analytically at arbitrary frequencies instead of via
+    FFT/ifft on a padded time grid:
+
+        H_j(jw) = 1 / (omega_j^2 - w^2 + 2j*zeta*omega_j*w)
+        T_i(jw) = -sum_j phi[floor_idx, j] * Gamma[j] * H_j(jw)
+
+    This is the "input x transfer = output" identity the frequency-domain
+    panel draws -- claude_scripts/verify_spectrum.py's check_identity()
+    confirms it against compute_response()'s own FFT-based solution.
+    index.html re-implements this same formula in JavaScript for the
+    Transfer panel; keep the two in sync if this changes.
+
+    `phi` must be mass-normalized (phi^T M phi = I), as produced by
+    _modal_analysis() -- do not renormalize it here.
+
+    Returns (T_i, mode_terms):
+        T_i: complex ndarray, shape (len(f_hz),) -- the solid curve,
+            T_i = -mode_terms.sum(axis=0).
+        mode_terms: complex ndarray, shape (n_modes, len(f_hz)) --
+            phi[floor_idx, j] * Gamma[j] * H_j(jw) per mode j, drawn
+            faintly underneath T_i so the modal decomposition stays
+            visible (spec 6 Part A2, requirement 2).
+    """
+    omega = 2 * np.pi * np.asarray(f_hz, dtype=float)
+    n_modes = phi.shape[1]
+    mode_terms = np.empty((n_modes, len(omega)), dtype=complex)
+    for j in range(n_modes):
+        wn = omega_n[j]
+        denom = (wn**2 - omega**2 + 1j * 2 * zeta * wn * omega)
+        H_j = 1.0 / denom
+        mode_terms[j] = phi[floor_idx, j] * Gamma[j] * H_j
+    T_i = -mode_terms.sum(axis=0)
+    return T_i, mode_terms
+
+
 def save_ground_spectrum(filename, accel_x, accel_y, dt, n_bins=400):
     """
     Writes out/<record>/spectrum.json -- the ground-acceleration magnitude
