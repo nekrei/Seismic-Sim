@@ -587,6 +587,18 @@
         }
         #spectrumCanvas.is-updating { opacity: 0.5; filter: blur(1.5px); }
 
+        /* Per-record sampling annotation (spec 6 Part B4). The greyed
+           over-Nyquist band is zero-width for every record in this dataset
+           (dt 0.005/0.01 -> Nyquist 100/50 Hz, both >= the 50 Hz axis cap),
+           so this line is what actually makes the sampling rate visible. */
+        .spectrum-sampling-note {
+            font-size: 10px;
+            font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+            color: rgba(255,224,178,0.55);
+            text-align: right;
+            padding: 4px 2px 0;
+        }
+
         .spectrum-disabled-note {
             font-size: 12px;
             color: rgba(255,255,255,0.45);
@@ -791,6 +803,7 @@
             <div class="spectrum-canvas-wrap">
                 <canvas id="spectrumCanvas"></canvas>
             </div>
+            <div class="spectrum-sampling-note" id="spectrumSamplingNote"></div>
             <div class="spectrum-disabled-note" id="spectrumDisabledNote">
                 Frequency-domain data isn't available for this record/axis yet.
             </div>
@@ -854,6 +867,7 @@
         const spectrumAxisToggle = document.getElementById('spectrumAxisToggle');
         const spectrumCanvas = document.getElementById('spectrumCanvas');
         const spectrumDisabledNote = document.getElementById('spectrumDisabledNote');
+        const spectrumSamplingNote = document.getElementById('spectrumSamplingNote');
 
         // Frame-geometry defaults -- MUST match mdof_response.py's __main__
         // COLUMN_DEPTH_X/Y/BEAM_DEPTH and server.py's DEFAULT_COLUMN_DEPTH_X/Y/
@@ -1990,6 +2004,8 @@
             const outSpec = disabledBase || !gMag || !tf ? null : computeOutputSpectrum(axis, spectrumFloorIndex);
 
             const disabled = disabledBase || !gMag || !tf || !outSpec;
+            spectrumSamplingNote.textContent = (disabled || !groundSpectrum) ? ''
+                : `fs = ${(1 / groundSpectrum.dt).toFixed(0)} Hz · Nyquist ${groundSpectrum.nyquist_Hz.toFixed(0)} Hz`;
             spectrumDisabledNote.style.display = disabled ? 'block' : 'none';
             spectrumCanvas.style.display = disabled ? 'none' : 'block';
             if (disabled) {
