@@ -1358,7 +1358,19 @@
         // record) -- amplify is auto-computed per record/recompute (see
         // applyLoadedData) so on-screen sway stays legible without a manual
         // control.
-        const AMPLIFY_MIN = 1;
+        //
+        // AMPLIFY_MIN must stay far below 1: for real recorded earthquakes
+        // peakAbsDisp is always mm-cm scale, so the auto-scale formula
+        // below naturally computes amplify >> 1 and this floor never binds.
+        // But spec 7's synthetic-earthquake reshaping (magnitude scale x
+        // geometric spreading) can legitimately push peakAbsDisp into the
+        // tens/hundreds of meters at extreme Epicenter Dist./Magnitude
+        // combos, where the *correct* amplify to keep sway legible is well
+        // below 1. A floor of 1 there silently reimposes ~100-1000x more
+        // amplification than intended and sends the building swinging far
+        // off-center -- found via real-browser testing at distance=1km/
+        // depth=1km/magnitude=8.9.
+        const AMPLIFY_MIN = 1e-6;
         const AMPLIFY_MAX = 3000;
         // Target: at the auto-computed default, the tallest sway on screen
         // should be about this fraction of one story's height.
