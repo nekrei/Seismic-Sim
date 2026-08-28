@@ -344,3 +344,37 @@ checklist).
 Task 8 complete. Next: final whole-branch review pass against the spec
 and verification doc, then checkpoint stage `verify`, then the finish
 menu.
+
+## Final whole-branch review (stage: verify)
+
+- Reviewed the full `main..HEAD` diff against `specs/07-synthetic-earthquake.md`
+  Parts A-D and `verification/07-synthetic-earthquake.md` checks 1-8, all
+  pass (checks 1-4 via `claude_scripts/verify_synthetic_earthquake.py`,
+  check 5 confirmed by re-inspecting commit d83f476's diff -- only the new
+  `reference_magnitude` field was added to `out/`, no other bytes changed --
+  checks 6-8 via the Task 7 real-browser pass, already in this file above).
+- Confirmed `mdof_response.py`'s `apply_synthetic_earthquake_scaling()`
+  matches spec Parts A2-A4 exactly: literal Richter definition, R<=R0
+  attenuation clamp, one function called by both `__main__` (always
+  identity params) and `server.py`'s `/compute` (live slider values) --
+  no forked implementation.
+- Confirmed the three-site DEFAULT_EPICENTER_DISTANCE_KM/DEFAULT_EPICENTER_DEPTH_KM
+  agreement this project is strict about: `mdof_response.py` defines them,
+  `server.py` imports them directly (not a duplicate copy), `index.html`
+  mirrors them with a cross-referencing comment -- matches the existing
+  COLUMN_DEPTH_X/Y pattern`AGENTS.md` already documents.
+- Filled in the two remaining doc-checklist items not yet done going into
+  this pass: `specs/COURSE-CONCEPTS.md`'s Filtering row now covers the
+  attenuation filter (and why it's hand-derived, not library-sourced --
+  a physical model, not a digital-filter-design problem); `specs/README.md`'s
+  goal-7 status row updated from "Not started" to done-and-verified
+  (noting the branch is not yet merged). Both files are gitignored and
+  junctioned into this worktree, so these edits land directly in the main
+  checkout, not just this branch.
+- `AGENTS.md`'s own status line update stays deferred to the main checkout
+  post-merge, per the goal skill's own checkpoint note (AGENTS.md is
+  copied, not junctioned, into this worktree).
+- Working tree is clean; no uncommitted changes remain in the branch itself.
+
+Stage: verify complete. Next: present the finish menu (merge locally /
+keep as-is).
