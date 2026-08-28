@@ -1016,3 +1016,38 @@ default T1 readout (`1.06s/0.95s`) matching a fresh record load.
 Committed as `b15a3b2`. Re-ran `verify_floor_area.py` once more after
 this fix -- still all 14 sub-checks pass (pure-Python script, unaffected
 by the JS-only fix, but confirmed anyway).
+
+### Docs completion (specs/README.md, AGENTS.md)
+
+`specs/README.md`'s goal-8 row updated from "Not started" to
+"Implemented and verified ... not yet merged" (junctioned into this
+worktree, so this edit lands directly in the main checkout, same as
+`knowledge/*.md`). `AGENTS.md`'s spec-8 status paragraph ("not yet
+implemented") deliberately left untouched here -- `AGENTS.md` is a
+**copy**, not a junction, in this worktree (only `CLAUDE.md`/`AGENTS.md`
+get copied rather than junctioned, per the goal skill's own worktree
+setup), so an edit here would only affect this worktree's disposable
+copy and never reach the main checkout. Matches spec 7's own precedent
+(see that section of this file above) -- deferred to the main checkout,
+post-merge.
+
+### Final whole-branch review (stage: verify)
+
+Reviewed the full branch diff (`main..HEAD`, commits `8cfec23` through
+`b15a3b2`) against `specs/08-floor-area.md` and
+`verification/08-floor-area.md` as a whole, not just task-by-task:
+- `plan_dims_from_area()`/`frame_span()`/`MDOF_ShearBuilding`'s new
+  kwargs are single-sourced in `mdof_response.py`, imported by both
+  `server.py` and (implicitly, via the unchanged default kwargs)
+  `__main__` -- no forked implementation, matching this project's
+  standing "one implementation, two callers" rule.
+- `DEFAULT_AREA_SQFT` is consistent bit-for-bit across all three sites
+  (`mdof_response.py` derives it, `server.py` imports it directly,
+  `index.html` hardcodes the same literal `542.501085`) -- confirmed by
+  re-reading all three, not just trusting the original plan.
+- No `out/` regeneration surprises (Task 5, zero diff) and no leftover
+  debug/placeholder code from the `step="any"` fix.
+- Working tree is clean; no uncommitted changes remain in the branch.
+
+Stage: verify complete. Next: present the finish menu (merge locally /
+keep as-is).
