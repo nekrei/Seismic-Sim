@@ -904,3 +904,53 @@ glue, no branching logic) -- covered by the real-browser pass after all
 tasks land, per the plan.
 
 Committed as `59fdfc2` (`index.html` only).
+
+### Task 4 -- docs & tooling checklist
+
+**README.md**: added "floor area" to the Building Parameters slider list
+and a short paragraph on the Area slider (200-2000 sq ft, aspect-ratio-
+preserving derivation, a real physics effect via the same static-
+condensation math the other sliders already drive).
+
+**Math PDF**: new Part B2.4.1 ("The Area (sq ft) slider: deriving the
+plan footprint from a target area (spec 8)") inserted into
+`claude_scripts/generate_math_pdf.py`'s `build_story()`, right after
+B2.4's final paragraph and before B2.5 starts -- two new equations
+(`planaspect`: alpha = Lx/Ly; `plandims`: the area->dims solve) added via
+a new `EQUATIONS.update({...})` block, following spec 7's Part E append
+pattern exactly. Regenerated via the conda env -- 25 pages (up from 24).
+Verified: text-extracted the new page (10) and confirmed "B2.4.1",
+"footprint", "plan_dims_from_area", "Area (sq ft)" all present; visually
+inspected both new equation-image assets directly
+(`claude_scripts/pdf_assets/eq_planaspect.png`,
+`eq_plandims.png`) -- clean, no baseline-clipping (the documented failure
+mode for this pipeline); confirmed no leftover TODO/placeholder text and
+that B2.5/Modal analysis and Parts A/D/E are all still present after the
+append.
+
+**AGENTS.md**: extended the "three sites must agree on the default
+column/beam dimensions" bullet to also cover `DEFAULT_AREA_SQFT` as a
+fourth constant in the same three-file sync pattern. (AGENTS.md is
+gitignored project-wide, not committed here.)
+
+**knowledge/mdof_response.md, knowledge/server.md,
+knowledge/index_html.md**: updated with `plan_dims_from_area()`,
+`frame_span()`'s new signature, the `plan_span_x/y` constructor kwargs,
+`area_sqft` in `_validate_params`/`compute()`, and `areaSlider`/
+`DEFAULT_AREA_SQFT` in the constant/function maps -- including re-deriving
+every line number the edits touched or shifted (checked against the
+actual worktree source via grep, not estimated) rather than leaving them
+stale. Also gitignored, not committed here.
+
+Ruling: `AGENTS.md`'s "Active development plan" status paragraph for
+spec 8 (currently reading "not yet implemented") and `specs/README.md`'s
+goal-8 row are both deliberately left unchanged for now, per the plan --
+they get marked done last, right before the finish menu, once Task 5's
+`out/` regeneration and final verification are actually green, not
+prematurely here.
+
+`graphify update .` re-run after all the above (126 nodes, 154 edges).
+
+Committed as `ccc8d84` (`README.md`, `Seismic-Sim Math.pdf` -- the
+gitignored doc files above aren't tracked by this worktree's git, by
+design).
