@@ -26,6 +26,19 @@ BEAM_WIDTH = 0.5  # m
 # constant-calibration section.
 PLAN_SPAN_X = 8.4  # m
 PLAN_SPAN_Y = 6.0  # m
+# Exact ISO foot -> metre conversion (1 ft = 0.3048 m exactly), used only
+# by the Area (sq ft) slider (spec 8) to convert its UI units to the
+# metres plan_dims_from_area() works in.
+SQM_PER_SQFT = 0.09290304
+# Default Area slider value: the exact current footprint
+# (PLAN_SPAN_X * PLAN_SPAN_Y) expressed in sq ft, so the slider's default
+# position reproduces out/'s existing dimensions bit-for-bit (spec 8
+# Part A2). Rounded to 6 decimals -- see the plan's ruling on why this is
+# 542.501085, not the spec's rounded prose figure of 542.53. MUST match
+# server.py's imported value and index.html's DEFAULT_AREA_SQFT literal
+# exactly (comment at each of the other two sites, same convention as
+# DEFAULT_COLUMN_DEPTH_X/Y).
+DEFAULT_AREA_SQFT = round((PLAN_SPAN_X * PLAN_SPAN_Y) / SQM_PER_SQFT, 6)
 # Each axis's condensed stiffness is built from ONE planar frame (2 corner
 # columns + 1 beam) and then scaled by this factor to account for the
 # second, identical parallel frame on the far side of the building's other
@@ -93,18 +106,33 @@ def beam_inertia(depth, width=BEAM_WIDTH):
     return width * depth ** 3 / 12.0
 
 
-def frame_span(axis):
+def frame_span(axis, plan_span_x, plan_span_y):
     """
     Beam span for the planar frame resisting sway in `axis`. The beam
     connecting the two columns of that frame runs parallel to the sway
     direction, so its span is the plan dimension in that same direction.
     """
     if axis == "X":
-        return PLAN_SPAN_X
+        return plan_span_x
     elif axis == "Y":
-        return PLAN_SPAN_Y
+        return plan_span_y
     else:
         raise ValueError(f"axis must be 'X' or 'Y', got {axis!r}")
+
+
+def plan_dims_from_area(area_sqm):
+    """
+    Aspect-ratio-preserving plan dimensions for a target footprint area
+    (spec 8, Part A2). The current footprint's aspect ratio
+    (PLAN_SPAN_X / PLAN_SPAN_Y = 1.4) is held fixed -- a single area
+    slider can't specify two independent dimensions -- so:
+        plan_span_y = sqrt(area_sqm / aspect)
+        plan_span_x = aspect * plan_span_y
+    """
+    aspect = PLAN_SPAN_X / PLAN_SPAN_Y
+    plan_span_y = np.sqrt(area_sqm / aspect)
+    plan_span_x = aspect * plan_span_y
+    return plan_span_x, plan_span_y
 
 
 def apply_synthetic_earthquake_scaling(accel, dt, magnitude, distance_km,
@@ -515,7 +543,8 @@ class MDOF_ShearBuilding:
 
     def __init__(self, num_stories, mass_per_floor=1000e3, zeta=0.05,
                  story_height=3.5, column_depth_x=1.10, column_depth_y=1.10,
-                 beam_depth=1.50, axis="X", E=E_CONCRETE):
+                 beam_depth=1.50, axis="X", E=E_CONCRETE,
+                 plan_span_x=PLAN_SPAN_X, plan_span_y=PLAN_SPAN_Y):
         self.N = num_stories
         self.m = mass_per_floor
         self.zeta = zeta
@@ -525,6 +554,8 @@ class MDOF_ShearBuilding:
         self.beam_depth = beam_depth
         self.axis = axis
         self.E = E
+        self.plan_span_x = plan_span_x
+        self.plan_span_y = plan_span_y
         self._build_matrices()
         self._modal_analysis()
 
@@ -533,7 +564,7 @@ class MDOF_ShearBuilding:
 
         self.I_c = column_inertia(self.column_depth_x, self.column_depth_y, self.axis)
         self.I_b = beam_inertia(self.beam_depth, BEAM_WIDTH)
-        self.L = frame_span(self.axis)
+        self.L = frame_span(self.axis, self.plan_span_x, self.plan_span_y)
         self.K = build_condensed_K(self.N, self.E, self.I_c, self.I_b, self.h, self.L)
 
         # Base-story (floor 1) condensed lateral stiffness -- useful
