@@ -845,3 +845,34 @@ place for those edits to land regardless of which worktree is active.
 Committed as `8cfec23` (`.gitignore`, `mdof_response.py` only --
 `claude_scripts/` changes aren't tracked by this worktree's git, by
 design, since that dir is gitignored project-wide).
+
+### Task 2 -- server.py: /compute accepts area_sqft
+
+Import list swapped `PLAN_SPAN_X, PLAN_SPAN_Y` for
+`plan_dims_from_area, DEFAULT_AREA_SQFT, SQM_PER_SQFT` (nothing in
+server.py reads the raw constants anymore once the header switched to
+computed values). `_validate_params` gained
+`area_sqft = max(200.0, min(2000.0, float(body.get("area_sqft",
+DEFAULT_AREA_SQFT))))`, appended to the returned tuple; docstring
+extended with the same "sane bounds" reasoning as the column/beam depths.
+`compute()` unpacks the widened tuple, computes
+`plan_span_x, plan_span_y = plan_dims_from_area(area_sqft *
+SQM_PER_SQFT)` right after `dt = ground["dt"]`, and passes
+`plan_span_x=plan_span_x, plan_span_y=plan_span_y` into both the
+`building_x` and `building_y` constructor calls. The header dict's
+`"plan_span_x"/"plan_span_y"` fields now carry the computed locals
+instead of the old hardcoded constants -- no wire-format change,
+`index.html`'s `normalizeFrame()` already reads them generically.
+
+`claude_scripts/verify_floor_area.py` extended with **check 4**
+(`/compute` parity at the default area, same pattern as
+`verify_frame_furniture.py`'s check 6): POST `{"record": "ANZA1_CIDLA"}`
+with `area_sqft` omitted so the server default applies, parse the binary
+response, confirm the header's `plan_span_x/y` match `(PLAN_SPAN_X,
+PLAN_SPAN_Y)` to floating-point tolerance (small residual expected --
+`DEFAULT_AREA_SQFT` is rounded to 6 decimals, so the round-trip isn't
+bit-exact, just ~1e-11 off, well inside the check's `rtol=1e-9`), and
+compare `time`/`abs_x` against `out/ANZA1_CIDLA/response_X.csv` to
+float32 tolerance. All 14 sub-checks (1-4) pass.
+
+Committed as `b83ed81` (`server.py` only).
