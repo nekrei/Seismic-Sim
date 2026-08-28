@@ -876,3 +876,31 @@ compare `time`/`abs_x` against `out/ANZA1_CIDLA/response_X.csv` to
 float32 tolerance. All 14 sub-checks (1-4) pass.
 
 Committed as `b83ed81` (`server.py` only).
+
+### Task 3 -- index.html: Area slider UI + live wiring
+
+New `DEFAULT_AREA_SQFT = 542.501085` JS constant next to the other
+`DEFAULT_*` constants. New `areaSlider`/`areaLabel` `<div
+class="ctrl-row">` in the Building Parameters `<details>` markup
+(`min="200" max="2000" step="10" value="542.501085"`, initial label
+"543 sq ft"), placed right after the Beam row, same `.ctrl-row`/
+`.panel-label`/`.panel-value` classes every other slider row uses.
+Element refs grabbed alongside the other Building Parameters slider
+refs. `area_sqft: parseFloat(areaSlider.value)` added to
+`liveRecompute()`'s POST body; `&& parseFloat(areaSlider.value) ===
+DEFAULT_AREA_SQFT` added to `buildingParamsAtDefault()`'s equality
+chain. New `areaSlider.addEventListener('input', ...)` handler next to
+the Column X/Y/Beam listeners -- updates the label to
+`Math.round(parseFloat(e.target.value)) + ' sq ft'`, then calls
+`scheduleLiveRecompute()` with no `autoScaleAmplify` arg (same as the
+other dimension sliders). No rendering-code changes:
+`createBuilding()`/`normalizeFrame()` already read `plan_span_x/y`
+generically off whatever `/compute` or `building_data.json` returns
+(spec 5), so the new slider's values flow through existing wiring with
+no new code on that side.
+
+No standalone numeric check for this task (pure markup + event-wiring
+glue, no branching logic) -- covered by the real-browser pass after all
+tasks land, per the plan.
+
+Committed as `59fdfc2` (`index.html` only).
