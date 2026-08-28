@@ -21,7 +21,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 
 from mdof_response import (
     MDOF_ShearBuilding, FURNITURE_CLASSES, BEAM_WIDTH,
-    PLAN_SPAN_X, PLAN_SPAN_Y,
+    plan_dims_from_area, DEFAULT_AREA_SQFT, SQM_PER_SQFT,
     apply_synthetic_earthquake_scaling,
     DEFAULT_EPICENTER_DISTANCE_KM, DEFAULT_EPICENTER_DEPTH_KM,
 )
@@ -66,7 +66,10 @@ def _validate_params(body, reference_magnitude=6.0):
     dimensions, not an input -- see specs/05-structural-frame-furniture.md
     Part C1. Column/beam depths are clamped strictly positive so K can
     never go singular. Epicenter distance/depth are clamped strictly
-    positive so hypocentral distance R can never be zero (spec 7)."""
+    positive so hypocentral distance R can never be zero (spec 7).
+    area_sqft (spec 8) is clamped to 200-2000, the same "sane bounds"
+    reasoning as the column/beam depths -- it drives plan_span_x/y via
+    plan_dims_from_area(), which in turn is the beam span L fed into K."""
     num_stories = max(1, min(30, int(body.get("num_stories", 7))))
     mass_per_floor = max(1e3, min(1e8, float(body.get("mass_per_floor", 1000e3))))
     zeta = max(0.005, min(0.5, float(body.get("zeta", 0.05))))
@@ -76,8 +79,10 @@ def _validate_params(body, reference_magnitude=6.0):
     epicenter_distance_km = max(1.0, min(200.0, float(body.get("epicenter_distance_km", DEFAULT_EPICENTER_DISTANCE_KM))))
     epicenter_depth_km = max(1.0, min(100.0, float(body.get("epicenter_depth_km", DEFAULT_EPICENTER_DEPTH_KM))))
     richter_magnitude = max(3.0, min(9.0, float(body.get("richter_magnitude", reference_magnitude))))
+    area_sqft = max(200.0, min(2000.0, float(body.get("area_sqft", DEFAULT_AREA_SQFT))))
     return (num_stories, mass_per_floor, zeta, column_depth_x, column_depth_y,
-            beam_depth, epicenter_distance_km, epicenter_depth_km, richter_magnitude)
+            beam_depth, epicenter_distance_km, epicenter_depth_km, richter_magnitude,
+            area_sqft)
 
 
 @app.route("/compute", methods=["POST"])
@@ -95,8 +100,10 @@ def compute():
     reference_magnitude = ground.get("reference_magnitude", 6.0)
     (num_stories, mass_per_floor, zeta, column_depth_x, column_depth_y,
      beam_depth, epicenter_distance_km, epicenter_depth_km,
-     richter_magnitude) = _validate_params(body, reference_magnitude)
+     richter_magnitude, area_sqft) = _validate_params(body, reference_magnitude)
     dt = ground["dt"]
+
+    plan_span_x, plan_span_y = plan_dims_from_area(area_sqft * SQM_PER_SQFT)
 
     # X and Y each need their own instance -- independent condensed K per
     # axis (spec A1's anisotropy), exactly like the offline __main__
@@ -105,11 +112,13 @@ def compute():
         num_stories, mass_per_floor=mass_per_floor, zeta=zeta,
         column_depth_x=column_depth_x, column_depth_y=column_depth_y,
         beam_depth=beam_depth, axis="X",
+        plan_span_x=plan_span_x, plan_span_y=plan_span_y,
     )
     building_y = MDOF_ShearBuilding(
         num_stories, mass_per_floor=mass_per_floor, zeta=zeta,
         column_depth_x=column_depth_x, column_depth_y=column_depth_y,
         beam_depth=beam_depth, axis="Y",
+        plan_span_x=plan_span_x, plan_span_y=plan_span_y,
     )
 
     # Reshape the real record's ground motion into the requested synthetic
@@ -185,8 +194,8 @@ def compute():
         "column_depth_y": column_depth_y,
         "beam_depth": beam_depth,
         "beam_width": BEAM_WIDTH,
-        "plan_span_x": PLAN_SPAN_X,
-        "plan_span_y": PLAN_SPAN_Y,
+        "plan_span_x": plan_span_x,
+        "plan_span_y": plan_span_y,
 
         "natural_frequencies_Hz_X": (building_x.omega_n / (2 * np.pi)).tolist(),
         "mode_shapes_X": building_x.phi.tolist(),
