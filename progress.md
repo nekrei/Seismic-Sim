@@ -967,3 +967,52 @@ slider at its default (`542.501085` sq ft, never touched by
 default `plan_span_x`/`plan_span_y` kwargs) reproduces the exact
 pre-spec-8 footprint bit-for-bit across all 10 records' CSVs, PNGs,
 JSON, and furniture binaries. No commit needed (nothing changed).
+
+### Final verification
+
+Re-ran `claude_scripts/verify_floor_area.py` standalone against the
+final code -- all 4 checks / 14 sub-checks PASS.
+
+Real-browser pass via **Claude in Chrome**: started `server.py` from
+inside the worktree. First attempt hit a stale `server.py` process
+(leftover from an earlier, unrelated session, started ~2 hours prior)
+that was already bound to `127.0.0.1:8000` and silently absorbing
+requests instead of my freshly-started one -- `curl`ing `/index.html`
+and grepping for `areaSlider` came back with 0 matches, which is what
+caught it. Diagnosed via `netstat`/`Get-CimInstance Win32_Process`/
+`Get-Process ... | Select StartTime` (both PIDs were `python server.py`,
+indistinguishable by command line alone, but 2 hours apart in start
+time), killed both, restarted clean, re-confirmed via curl that the
+served page now contains `areaSlider` before touching the browser again.
+
+With the correct server up: no console errors at any point. Dragged the
+Area slider through its full range (200 -> 543 (default) -> 1580 -> 2000
+-> 200 sq ft) -- footprint/frame visibly widens and narrows in the 3D
+view (confirmed via zoomed screenshots), furniture stays within the
+resized floor plates at every step, and T1 (X/Y) is strictly monotonic
+increasing with area across the whole sweep: 200 sq ft -> 0.90s/0.81s,
+543 (default) -> 1.06s/0.95s, 1865 sq ft -> 1.33s/1.18s, 2000 sq ft ->
+1.35s/1.19s.
+
+**One real bug caught by this pass, not by the numeric checks**: setting
+`areaSlider.value = '542.501085'` via JS (simulating "drag back to
+exact default") read back as `'540'` -- `step="10"` from `min="200"`
+means the browser's native `<input type="range">` step-validation
+silently coerces any value to the nearest `min + n*step` point, and it
+does this **even from the initial HTML `value=` attribute at page
+load**, before any user interaction. So `buildingParamsAtDefault()`'s
+`parseFloat(areaSlider.value) === DEFAULT_AREA_SQFT` check was false
+even on a completely untouched fresh page load -- the static/live
+fast-path for Area could never actually engage, and any live recompute
+triggered by another slider would silently send `area_sqft=540` instead
+of the documented/verified `542.501085`. Fixed by changing `step="10"`
+to `step="any"` (disables step-snapping entirely -- a real, intended use
+of that attribute value, not a workaround), re-verified: fresh page load
+now holds `542.501085` exactly, dragging still works smoothly
+(continuous now rather than 10-sq-ft increments, values still round to
+whole sq ft for display via the existing `Math.round()`), and setting
+the value back to the exact default now correctly reproduces the
+default T1 readout (`1.06s/0.95s`) matching a fresh record load.
+Committed as `b15a3b2`. Re-ran `verify_floor_area.py` once more after
+this fix -- still all 14 sub-checks pass (pure-Python script, unaffected
+by the JS-only fix, but confirmed anyway).
