@@ -938,7 +938,14 @@
                 </div>
                 <div class="ctrl-row">
                     <span class="panel-label">Magnitude</span>
-                    <input type="range" id="richterSlider" min="3.0" max="9.0" step="0.1" value="6.0" />
+                    <!-- step 0.01, not 0.1: real record magnitudes carry two
+                         decimals (KOCAELI is 7.51, ANZA 4.92) and the slider
+                         has to be able to sit exactly on them, or the
+                         "default" position is 0.01 M off the value out/ was
+                         built at -- a 2.3% amplitude step between the static
+                         and /compute paths at supposedly identical settings.
+                         The label still reads to one decimal. -->
+                    <input type="range" id="richterSlider" min="3.0" max="9.0" step="0.01" value="6.0" />
                     <span class="panel-value" id="richterLabel">6.0 M</span>
                 </div>
                 <!-- The epicenter cross-section map (#epicenterMap, Part C)
@@ -1322,6 +1329,20 @@
         // would overshoot the render clamp and scale the whole waveform
         // down proportionally instead of flattening individual samples.
         let currentPeakDisp = 1e-9;
+        // Furniture's own display gain, the exact analogue of `amplify` for
+        // the secondary system: frozen at record-load so Earthquake
+        // Parameter changes still visibly shove the furniture harder, then
+        // compressed at render time by the same factor as the building.
+        // Needed separately because furniture sway is driven by floor
+        // ACCELERATION while `amplify` is calibrated against floor
+        // DISPLACEMENT -- the two differ by orders of magnitude, and by a
+        // record-dependent amount.
+        let furnitureAmplify = 1.0;
+        // On-screen sway peak, in scene units, that `amplify` was calibrated
+        // to produce at record-load. swayDisplayGain() compresses everything
+        // above this and leaves everything below it alone, so the default
+        // view is bit-for-bit what it always was.
+        let swayBaseline = 0;
 
         // Per-floor camera view state (spec 4, Part B). null = whole-building
         // view. currentTotalHeight/currentStoryHeight are set inside
@@ -1377,7 +1398,7 @@
         // magnitude/distance-scaled one, so it doesn't need to swing as low
         // as an earlier version of this comment assumed. The actual guard
         // against Earthquake Parameters' much wider (~1e6x) dynamic range
-        // is BUILDING_RENDER_SWAY_CLAMP below, applied at render time
+        // is swayDisplayGain() below, applied at render time
         // instead of by shrinking amplify itself.
         const AMPLIFY_MIN = 1e-6;
         const AMPLIFY_MAX = 3000;
@@ -1931,35 +1952,67 @@
             }
         }
 
-        // Caps the whole building's (floors + ground slab) rendered sway
-        // offset, as a fraction of the building's own total height --
-        // rendering-only, does not touch amplify or the physics at all.
-        // Needed because amplify is now fixed at record-load time (see
-        // applyLoadedData's comment) instead of being re-derived on every
-        // Earthquake Parameter drag, specifically so a bigger/closer
-        // synthetic quake keeps visibly swaying more than a smaller one.
-        // But that means the ~1e6x dynamic range Magnitude/Distance/Depth
-        // can produce (10^-3.3 to 10^3 in magnitude_scale alone, times
-        // spreading_scale on top) flows straight through to the render
-        // instead of being auto-corrected away -- unclamped, an extreme
-        // corner (e.g. distance=1km/depth=1km/magnitude=9.0) would send the
-        // building far outside the camera's frame. 0.6x total height is
-        // generous enough to show a dramatically larger lean for a bigger
-        // quake while still keeping the building on screen at the combo
-        // that used to blow up (see AMPLIFY_MIN's old comment, now
-        // superseded by this) -- ponytail: a hard clamp, not a soft
-        // (e.g. tanh) saturation, so relative differences below the clamp
-        // stay linear and only truly extreme combos visibly flatten out.
-        const BUILDING_RENDER_SWAY_CLAMP_FRACTION = 0.6;
+        // --- Render-time sway gain (see swayDisplayGain()) -------------------
+        // `amplify` is frozen at record-load time (see applyLoadedData's
+        // comment) so a bigger/closer synthetic quake keeps visibly swaying
+        // more than a smaller one. But the physical dynamic range the
+        // Earthquake Parameters can produce is ~1e6x (10^-3.3..10^3 in
+        // magnitude_scale alone, times spreading_scale), and the Richter
+        // scale is logarithmic: ONE step of the Magnitude slider is a
+        // literal 10x in ground amplitude. Passing that through linearly
+        // means +1 M already throws the building ~10 building-widths off
+        // centre, which is what the user sees as "it moves away from the
+        // centre and stays there."
+        //
+        // So the render gain is compressed above the record-load baseline
+        // instead: on-screen peak = baseline * (physical/baseline)^EXPONENT,
+        // then hard-capped. Properties that matter:
+        //   - Exactly the identity at record-load (physical == baseline),
+        //     so nothing about the default view changes.
+        //   - Strictly monotonic, so a bigger quake ALWAYS reads as more
+        //     sway -- the whole point of the panel -- just at a legible
+        //     ~2.2x per Richter step instead of 10x.
+        //   - Uncompressed below the baseline: a smaller/further quake
+        //     correctly looks tiny, and can't go off-frame anyway.
+        //   - Applied as a per-frame GAIN, never per-sample: clamping
+        //     individual samples flattens every peak to the same pinned
+        //     value and destroys the waveform's shape (the earlier bug
+        //     fixed in f307bc1).
+        // Both numbers are calibration knobs -- tune them, don't redesign.
+        const SWAY_COMPRESSION_EXPONENT = 0.35;   // 10x physical -> 2.2x on screen
+        const SWAY_MAX_HEIGHT_FRACTION = 0.15;    // hard cap, as a fraction of total building height
 
-        // Caps the furniture's rendered relative-sway offset regardless of
-        // Amplify (spec B4 / verification 7's "not wildly divergent"
-        // guarantee) -- without this an untouched high Amplify value would
-        // fling furniture through walls that no longer exist once the open
-        // cutaway (C3) removed them.
-        const FURNITURE_RENDER_CLAMP = 0.35;
+        // Peak on-screen furniture offset targeted at record-load, in scene
+        // units (a table template is ~0.9 units across after FURNITURE_SCALE,
+        // so this reads as a clear shove without furniture leaving its own
+        // footprint). One shared gain across table/chair/fan so their
+        // RELATIVE responses -- the actual physics being demonstrated, a
+        // 0.8 Hz fan swings far more than an 8 Hz table -- survive intact.
+        const FURNITURE_TARGET_SWAY = 0.22;
+        // Safety net only; the compressed gain below should keep offsets
+        // well under this at every parameter combo.
+        const FURNITURE_RENDER_CLAMP = 0.5;
 
-        function updateFurnitureOffsets(tSeconds) {
+        // Maps this recompute's physical peak displacement to an on-screen
+        // peak, and returns the gain that achieves it. Shared by the
+        // building and the furniture so the two can never disagree about
+        // how hard the current quake is being shown -- they did before,
+        // which is why furniture looked either frozen or pinned.
+        function swayDisplayGain() {
+            const physicalPeak = currentPeakDisp * amplify;
+            const baseline = swayBaseline;
+            const maxPeak = currentTotalHeight > 0
+                ? currentTotalHeight * SWAY_MAX_HEIGHT_FRACTION
+                : Infinity;
+            let displayPeak = physicalPeak;
+            if (baseline > 0 && physicalPeak > baseline) {
+                displayPeak = baseline * Math.pow(physicalPeak / baseline, SWAY_COMPRESSION_EXPONENT);
+            }
+            displayPeak = Math.min(displayPeak, maxPeak);
+            return physicalPeak > 0 ? amplify * (displayPeak / physicalPeak) : amplify;
+        }
+
+        function updateFurnitureOffsets(tSeconds, gainRatio) {
             if (!furnitureItems.length || !furnitureData || furnitureRateHz <= 0) return;
             const fdt = 1 / furnitureRateHz;
             const fIdxFloat = Math.max(0, tSeconds) / fdt;
@@ -1980,8 +2033,17 @@
                     oz = seriesZ[Math.min(i0, n - 1)] * (1 - frac) + seriesZ[Math.min(i0 + 1, n - 1)] * frac;
                 }
 
-                ox = Math.max(-FURNITURE_RENDER_CLAMP, Math.min(FURNITURE_RENDER_CLAMP, ox * amplify));
-                oz = Math.max(-FURNITURE_RENDER_CLAMP, Math.min(FURNITURE_RENDER_CLAMP, oz * amplify));
+                // furnitureAmplify is derived from the furniture data's own
+                // peak (not from `amplify`, which is a DISPLACEMENT scale --
+                // furniture responds to floor ACCELERATION, so the ratio
+                // between the two swings wildly with a record's frequency
+                // content: on KOCAELI_ATK the old `ox * amplify` produced a
+                // 6 mm on-screen wobble, on a small far record it pinned
+                // against the clamp every frame). gainRatio is the building's
+                // own compression factor for this frame, so furniture and
+                // structure always shrink together.
+                ox = Math.max(-FURNITURE_RENDER_CLAMP, Math.min(FURNITURE_RENDER_CLAMP, ox * furnitureAmplify * gainRatio));
+                oz = Math.max(-FURNITURE_RENDER_CLAMP, Math.min(FURNITURE_RENDER_CLAMP, oz * furnitureAmplify * gainRatio));
 
                 item.mesh.position.x = item.baseX + ox;
                 item.mesh.position.z = item.baseZ + oz;
@@ -2721,7 +2783,7 @@
         // identical to a magnitude-3 one. Leaving amplify fixed at its
         // record-load baseline instead lets a bigger/closer synthetic quake
         // genuinely sway more on screen, which is the whole demonstration
-        // this panel exists for; see BUILDING_RENDER_SWAY_CLAMP below for
+        // this panel exists for; see swayDisplayGain() for
         // how the resulting wide dynamic range stays on-camera at extreme
         // combos without re-normalizing that difference away.
         //
@@ -2804,12 +2866,43 @@
                 // selected.
                 console.log(`📊 Peak floor displacement: ${(peakAbsDisp * 1000).toFixed(3)} mm`);
 
+                swayBaseline = TARGET_SWAY_FRACTION * storyHeight;
                 if (peakAbsDisp > 1e-9) {
-                    setAmplify((TARGET_SWAY_FRACTION * storyHeight) / peakAbsDisp);
+                    setAmplify(swayBaseline / peakAbsDisp);
                 } else {
                     setAmplify(AMPLIFY_MIN);
                 }
+
+                // Same idea for the furniture, from the furniture data's own
+                // peak across every class/floor/axis. ONE gain for all three
+                // classes, so the physics being demonstrated -- a low-
+                // frequency fan swings far more than a stiff table under the
+                // same floor motion -- stays visible instead of being
+                // normalised away per class.
+                let peakFurn = 0;
+                if (furniture) {
+                    for (const axis of ['X', 'Y']) {
+                        for (const cls of Object.keys(furniture[axis] || {})) {
+                            for (const series of furniture[axis][cls]) {
+                                for (let i = 0; i < series.length; i++) {
+                                    const av = Math.abs(series[i]);
+                                    if (av > peakFurn) peakFurn = av;
+                                }
+                            }
+                        }
+                    }
+                }
+                furnitureAmplify = peakFurn > 1e-9 ? FURNITURE_TARGET_SWAY / peakFurn : 0;
             }
+
+            // What the render will actually put on screen, in scene units --
+            // the number that matters for "did the building leave the frame",
+            // and the one thing the console couldn't previously tell you when
+            // it did. Building footprint is ~2.8 units wide for scale.
+            console.log(`📐 On-screen sway peak: ${(currentPeakDisp * swayDisplayGain()).toFixed(3)} units ` +
+                        `(uncompressed ${(currentPeakDisp * amplify).toFixed(3)}, cap ` +
+                        `${(currentTotalHeight * SWAY_MAX_HEIGHT_FRACTION).toFixed(2)}); ` +
+                        `furniture gain ${furnitureAmplify.toFixed(1)}`);
 
             seekSlider.min = 0;
             seekSlider.max = totalDuration;
@@ -2822,8 +2915,17 @@
             // reset the Richter default to this record's own magnitude and
             // the epicenter sliders back to their defaults (spec 7).
             if (recordName !== currentRecordName) {
-                currentReferenceMagnitude = referenceMagnitude ?? 6.0;
-                richterSlider.value = currentReferenceMagnitude;
+                richterSlider.value = referenceMagnitude ?? 6.0;
+                // Read back, don't assume: the slider's 0.1 step can't
+                // represent every record's real magnitude (KOCAELI is 7.51,
+                // the slider snaps to 7.5). Keeping the un-snapped value
+                // here made earthquakeParamsAtDefault() permanently false
+                // for those records, so every later slider touch left the
+                // static out/ fast path and recomputed the record at a
+                // slightly wrong magnitude. The snapped value IS what the
+                // panel shows and what /compute will be sent, so it's the
+                // one to compare against.
+                currentReferenceMagnitude = parseFloat(richterSlider.value);
                 richterLabel.textContent = currentReferenceMagnitude.toFixed(1) + ' M';
                 epicenterDistanceSlider.value = DEFAULT_EPICENTER_DISTANCE_KM;
                 epicenterDepthSlider.value = DEFAULT_EPICENTER_DEPTH_KM;
@@ -2868,8 +2970,17 @@
                 beam_depth: parseFloat(beamSlider.value),
                 epicenter_distance_km: parseFloat(epicenterDistanceSlider.value),
                 epicenter_depth_km: parseFloat(epicenterDepthSlider.value),
-                richter_magnitude: parseFloat(richterSlider.value),
             };
+            // Only send a magnitude once we know which record it belongs to.
+            // On a record switch currentReferenceMagnitude is null and the
+            // slider still holds the OUTGOING record's value -- sending that
+            // reshapes the incoming record to the wrong Richter magnitude
+            // (see folderSelect's handler). Omitting the field lets
+            // server.py fall back to this record's own reference_magnitude,
+            // which is exactly the identity transform we want.
+            if (currentReferenceMagnitude != null) {
+                params.richter_magnitude = parseFloat(richterSlider.value);
+            }
 
             // Loading overlay (spec 4, Part H) -- shown for the duration of
             // the in-flight request, hidden once applyLoadedData() has run
@@ -3079,30 +3190,19 @@
             }
 
             const idx = currentIndex;
-            // `amplify` is fixed at record-load time (see applyLoadedData's
-            // comment) so a bigger/closer synthetic quake still sways
-            // visibly more on screen. But that means `amplify * currentPeakDisp`
-            // can overshoot the render clamp by orders of magnitude for a
-            // large Earthquake Parameter change -- capping each SAMPLE at
-            // the clamp (the old behavior) would flatten every sample above
-            // a tiny threshold to the same pinned value, destroying the
-            // waveform's shape instead of merely bounding its size (this is
-            // the bug: the building visibly parks at one side and stays
-            // there rather than swaying). Capping the GAIN instead, once
-            // per frame, preserves the full relative shape -- the whole
-            // waveform scales down uniformly so its true peak lands exactly
-            // at the clamp, never past it.
-            const swayClamp = currentTotalHeight > 0
-                ? currentTotalHeight * BUILDING_RENDER_SWAY_CLAMP_FRACTION
-                : Infinity;
-            const scale = (currentPeakDisp * amplify > swayClamp)
-                ? swayClamp / currentPeakDisp
-                : amplify;
-            const clampSway = (v) => Math.max(-swayClamp, Math.min(swayClamp, v));
+            // One compressed gain per frame for the whole scene (see
+            // swayDisplayGain()) -- never a per-sample clamp, which would
+            // flatten every peak to the same pinned value and destroy the
+            // waveform's shape.
+            const scale = swayDisplayGain();
+            // How much swayDisplayGain() pulled the raw `amplify` in. The
+            // furniture reuses it so it compresses in lockstep with the
+            // structure it is standing on.
+            const gainRatio = amplify > 0 ? scale / amplify : 1;
 
             // Ground displacement (for the slab)
-            const gx = clampSway((groundXData[idx] || 0) * scale);
-            const gy = clampSway((groundYData[idx] || 0) * scale);
+            const gx = (groundXData[idx] || 0) * scale;
+            const gy = (groundYData[idx] || 0) * scale;
 
             // Move the foundation slab with the ground
             if (foundationSlab) {
@@ -3117,8 +3217,8 @@
             // to special-case here any more.
             for (let f = 0; f < buildingGroups.length; f++) {
                 const group = buildingGroups[f];
-                const fx = clampSway((floorXData[f]?.[idx] || 0) * scale);
-                const fy = clampSway((floorYData[f]?.[idx] || 0) * scale);
+                const fx = (floorXData[f]?.[idx] || 0) * scale;
+                const fy = (floorYData[f]?.[idx] || 0) * scale;
                 group.position.x = fx;
                 group.position.z = fy;
             }
@@ -3132,7 +3232,7 @@
             // Furniture's OWN relative-sway offset (spec B), on top of
             // whatever rigid motion it already inherits from its parent
             // floor group.
-            updateFurnitureOffsets(animTime);
+            updateFurnitureOffsets(animTime, gainRatio);
 
             // Blink roof light
             if (lightSphere) {
@@ -3216,6 +3316,25 @@
             const folder = e.target.value;
             if (!folder) return;
             stripRecordName.textContent = folder;
+
+            // A record switch always resets the Earthquake Parameters
+            // (applyLoadedData does it again at the end, once the new
+            // record's own reference magnitude is known). Doing it HERE,
+            // before choosing a load path, is what makes that choice
+            // honest: earthquakeParamsAtDefault() otherwise compares the
+            // magnitude slider -- still holding the OUTGOING record's
+            // value -- against the OUTGOING record's reference magnitude,
+            // so switching to a record with a different magnitude took the
+            // /compute path and reshaped the new record to the old
+            // record's Richter value. Measured: ANZA1_CIDLA (4.9 M) ->
+            // KOCAELI_ATK (7.5 M) rendered KOCAELI ~400x too small, while
+            // the panel went on to display "7.5 M". The reverse direction
+            // is the visible half of the same bug -- the building sways
+            // orders of magnitude too hard and parks off-centre.
+            epicenterDistanceSlider.value = DEFAULT_EPICENTER_DISTANCE_KM;
+            epicenterDepthSlider.value = DEFAULT_EPICENTER_DEPTH_KM;
+            currentReferenceMagnitude = null; // unknown until the new record's metadata lands
+
             if (buildingParamsAtDefault()) {
                 // Fast path: out/'s precomputed static files already match
                 // the current (default) Building Parameters exactly.
