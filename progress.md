@@ -697,3 +697,97 @@ range, and that the M=9.0 regression scenario is capped.
 `check_quake_continuity.py`, `verify_frame_furniture.py` (ALL CHECKS PASSED),
 `verify_spectrum.py` (OVERALL: PASS), `fft_check` -- all green.
 `graphify update .` clean.
+
+---
+
+## Merge, backend mirror, and math PDF (2026-08-28, post-merge on main)
+
+After the code-review pass above, the user asked to update all stale
+docs, merge to main, and mirror the backend. Full sequence:
+
+**Docs updated before merge**: `verification/07-synthetic-earthquake.md`
+got correction notes on checks 6 and 8 (both originally passed on
+narrower criteria than what real usage later exposed); `specs/README.md`'s
+spec 7 row updated to merged status with the four extra defects
+summarized; this branch's `README.md` got two more changelog bullets for
+the furniture-clamp and frequency-panel fixes that predated those docs.
+
+**Merge**: `git merge --no-ff goal/07-synthetic-earthquake` into `main`
+(commit `76a1b81`), clean, no conflicts. Worktree cleanup hit a snag: a
+stale `server.py` process (started earlier in the review pass, cwd
+pointed at the worktree) held a file lock that made `git worktree remove`
+silently leave junction/symlink remnants behind even though `git worktree
+list` no longer showed the entry. Killed the process, `rm -rf`'d the
+leftover directory, `git worktree prune`'d clean. Lesson: after `git
+worktree remove`, check the directory is actually gone on disk, not just
+absent from `git worktree list` -- Windows file locks can desync the two.
+Ran the full check suite again against the merged main checkout itself
+(not just the now-deleted worktree) to confirm the merge didn't silently
+drop anything -- all green. `AGENTS.md` (main checkout's own copy, not
+junctioned) rewritten for spec 7's final status, splitting spec 8 back out
+into its own bullet. `graphify update .` on main: 119 nodes, 145 edges.
+
+**Backend mirror** (`D:\seismic-sim-backend`, commit `39eb0ff`):
+`mdof_response.py` copied verbatim (gains `apply_synthetic_earthquake_
+scaling()` and the two `DEFAULT_EPICENTER_*` constants). `server.py`
+rebuilt from the local file programmatically (a small Python script did
+the 5 intentional substitutions -- docstring, CORS import/setup, dropped
+static-file routes, `$PORT`-aware `__main__` -- then was deleted; never
+hand-retyped 250 lines). All 10 `out/<record>/ground_accel.json` copied
+(each gained `reference_magnitude`). Verified with a byte-for-byte
+`/compute` parity check between the mirror (run locally on port 8001) and
+the main checkout (port 8000) across 7 cases spanning Building AND the
+new Earthquake Parameters (magnitude 9.0, extreme close epicenter,
+extreme far epicenter + low magnitude, a Building Parameter combo, two
+other records) -- all seven byte-identical. Committed, not pushed, per
+the user's explicit instruction ("I'll do the push manually").
+
+**Math PDF** (main checkout, commit `7ba91c6`): the user asked directly
+whether the epicenter/magnitude math was actually in the PDF. Checked by
+extracting the previous PDF's text and searching for Richter/epicenter/
+attenuation/hypocentral/spreading -- zero hits across all 20 pages, only
+6 unrelated "magnitude" hits (spectrum magnitude, not Richter). Confirmed
+the gap was real, not just undocumented.
+
+Root cause of the gap: `claude_scripts/math-pdf-sections-goal7.md` (spec
+7's own draft notes, written during that spec's implementation) opens
+with "there's no editable source file... regenerating the PDF is the
+user's manual step" -- copied forward from spec 5's equivalent notes file
+without checking. That claim was already false by the time it was
+written: `claude_scripts/generate_math_pdf.py`, a genuine ~1800-line
+reportlab pipeline (matplotlib-rendered equations/diagrams, laid out with
+Platypus), already existed and is how Parts A-D of the current PDF are
+actually produced. Nobody had extended it for spec 7.
+
+Added a new "Part E -- Reshaping the earthquake itself" (E1-E5) directly
+to the generator script, adapting the draft notes' content into the
+reader-facing prose style Part D already uses -- new equations
+(`escale`, `richterdef`, `magscale`, `Rhypo`, `R0hypo`, `spreadscale`,
+`attenuation`, `scaletotal`), one new diagram (`fig_attenuation_scale`),
+and 5 new rows in the symbol reference table. Two real corrections made
+along the way, not just a mechanical port:
+- The draft notes' §E6 cited "peakiness measured at roughly 20x" for why
+  the sway can look calm at most instants even at extreme parameters.
+  Checked against the actual 10 records rather than trusted: the
+  median-to-peak ratio ranges 13x to 97x, nothing close to a single
+  "roughly 20x" figure. Rewrote that sentence to cite the real range.
+- The first version of the new diagram plotted `scale(f)` on a raw linear
+  axis across three parameter combinations -- the identity and
+  magnitude-only curves sit at 1 and 10, dwarfing the attenuation curve's
+  roll-off (which decays from ~0.15 toward 0), so the one thing the
+  figure existed to show (a genuine per-frequency filter vs. two flat
+  multipliers) was nearly invisible. Fixed by normalizing each curve to
+  its own value at the lowest plotted frequency, so magnitude and
+  identity land exactly on top of each other at 1.0 (visually proving "no
+  shape change") while the far-hypocenter curve visibly bends.
+
+Verified: every new equation PNG and the new diagram read back and
+visually inspected directly (the documented failure mode for this
+pipeline, per its own docstring, is silent baseline-clipping that only
+shows up in the raster, not in text extraction) -- clean. A post-build
+check confirmed Part E and all five subsections are present, all three
+new formula terms appear, the symbol table gained its new rows, no
+leftover TODO/placeholder text, and Parts A-D are still intact (24 pages,
+up from 20). `math-pdf-sections-goal7.md`'s header rewritten to mark
+itself historical and flag the stale claim so it doesn't get copied
+forward into a future spec's notes file again.
