@@ -214,8 +214,9 @@ results. It:
   displacement from millimeters to hundreds of meters, a range no single
   manual slider position could stay legible across.
 - Has a **Building Parameters** panel (stories, mass per floor, damping,
-  column depth X, column depth Y, beam depth, plus a read-only period
-  readout) — moving any of the sliders sends your values to `server.py`,
+  column depth X, column depth Y, beam depth, floor area, plus a
+  read-only period readout) — moving any of the sliders sends your values
+  to `server.py`,
   which recomputes the *actual physics* for that building live (not a
   visual trick) and updates the animation, roughly 200-400ms after you stop
   moving the slider. While a live recompute is in flight, a full-viewport
@@ -226,7 +227,19 @@ results. It:
   see "Running it yourself" below. There's no Target Period slider any
   more: once stiffness comes from real column/beam dimensions, the sway
   period is an *output* of the model, not something you dial in directly —
-  the read-only `T₁ (X/Y)` readout shows what it comes out to.
+  the read-only `T₁ (X/Y)` readout shows what it comes out to. The
+  **Area (sq ft)** slider (200-2000, default ~543 sq ft — the building's
+  original fixed footprint) picks a target floor-plate area and derives
+  both plan dimensions from it, holding the footprint's aspect ratio
+  (1.4) fixed — a bigger floor plate means a longer beam span, which
+  makes the frame genuinely more flexible (a real physics effect, via the
+  same static-condensation math every other Building Parameters slider
+  already drives), not just a bigger-looking building. The 3D view
+  reflects it directly: the floor plates and beams grow and shrink with
+  the slider while the columns keep their own thickness (that's set by
+  the Column X/Y sliders — changing how much floor you have doesn't
+  change the size of the columns holding it up), and the furniture
+  spreads out across the larger plate.
 - Has an **Earthquake Parameters** panel — Epicenter Distance, Epicenter
   Depth, and Richter Magnitude sliders that reshape the *selected record's*
   own ground motion into a synthetic "what if this quake had happened

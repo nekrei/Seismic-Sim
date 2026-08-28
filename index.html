@@ -900,6 +900,11 @@
                     <input type="range" id="beamSlider" min="0.30" max="2.50" step="0.05" value="1.50" />
                     <span class="panel-value" id="beamLabel">1.50m</span>
                 </div>
+                <div class="ctrl-row">
+                    <span class="panel-label">Area</span>
+                    <input type="range" id="areaSlider" min="200" max="2000" step="any" value="542.501085" />
+                    <span class="panel-value" id="areaLabel">543 sq ft</span>
+                </div>
                 <!-- Target Period is gone (spec 5): once k comes from real
                      column/beam dimensions, period is an OUTPUT of the
                      model, not an input -- a slider here would either
@@ -1086,6 +1091,8 @@
         const columnYLabel = document.getElementById('columnYLabel');
         const beamSlider = document.getElementById('beamSlider');
         const beamLabel = document.getElementById('beamLabel');
+        const areaSlider = document.getElementById('areaSlider');
+        const areaLabel = document.getElementById('areaLabel');
         const periodReadout = document.getElementById('periodReadout');
         // spec 4, Part B (per-floor viewing) / Part E (redesigned panel) / Part H (recompute overlay)
         const floorSelect = document.getElementById('floorSelect');
@@ -1117,6 +1124,18 @@
         const BEAM_WIDTH = 0.5;
         const PLAN_SPAN_X = 8.4;
         const PLAN_SPAN_Y = 6.0;
+        // Default Area (sq ft) slider value -- MUST match mdof_response.py's
+        // and server.py's DEFAULT_AREA_SQFT exactly (spec 8; comment at each
+        // of the other two sites).
+        const DEFAULT_AREA_SQFT = 542.501085;
+        // Metres -> scene units, the single fixed conversion the whole 3D
+        // view is drawn at (spec 8). Pinned to the value that reproduces the
+        // original hardcoded 2.8 x 2.0 footprint at the default plan span:
+        // 2.8/8.4 == 2.0/6.0 == 1/3 exactly (both spans share the 1.4 aspect
+        // ratio), so the default building is bit-identical to what it always
+        // rendered as, while a larger/smaller Area now genuinely grows and
+        // shrinks the floor plate instead of only thinning the members.
+        const SCENE_UNITS_PER_METRE = 2.8 / PLAN_SPAN_X;
         const FURNITURE_CLASS_NAMES = ['table', 'chair', 'fan'];
 
         // Synthetic earthquake defaults (spec 7) -- MUST match
@@ -1356,6 +1375,14 @@
         let activeFloorIndex = null;
         let currentTotalHeight = 0;
         let currentStoryHeight = 0;
+        // Rendered plan footprint in scene units, set by createBuilding().
+        // Variable since spec 8 (the Area slider) -- previously these were
+        // the hardcoded 2.8 x 2.0 literals inside createBuilding(), which is
+        // exactly what made the Area slider look wrong (see
+        // SCENE_UNITS_PER_METRE above). frameCameraToBuilding() and
+        // updateFurnitureOffsets() both key off these.
+        let currentFootprintW = 2.8;
+        let currentFootprintD = 2.0;
 
         // Which record/reference-magnitude the Earthquake Parameters panel
         // is currently showing (spec 7) -- distinguishes a genuine record
@@ -1755,29 +1782,40 @@
             furnitureItems = [];
 
             const groups = [];
-            const width = 2.8,
-                depth = 2.0,
+            // The plan footprint is DERIVED from the real plan span at a
+            // FIXED metres-to-scene-units scale (spec 8). It used to be the
+            // other way round -- width/depth were hardcoded 2.8 x 2.0 and
+            // the scale was computed as width/planSpanX -- which pinned the
+            // on-screen floor plate to a constant size and made a larger
+            // plan span come out as *thinner columns on the same-size floor*
+            // instead of a bigger floor. That reads as the building getting
+            // flimsier rather than roomier, which is the opposite of what an
+            // "Area" slider means in real-estate terms (floor span), so the
+            // relationship is inverted here: scale fixed, footprint varies.
+            const width = frame.planSpanX * SCENE_UNITS_PER_METRE,
+                depth = frame.planSpanY * SCENE_UNITS_PER_METRE,
                 gap = 0.04,
                 floorH = floorHeight;
+            currentFootprintW = width;
+            currentFootprintD = depth;
             const colorBottom = new THREE.Color(0xc47a5a);
             const colorTop = new THREE.Color(0x7ab8d4);
 
             // Column/beam render thickness derives from the REAL physical
-            // dimensions via the same plan-to-scene ratio the footprint
-            // already uses (width/depth are fixed scene units representing
-            // PLAN_SPAN_X/Y at roughly 1:3), times a named cosmetic
-            // exaggeration constant -- spec C1 explicitly permits
+            // member dimensions at that same fixed scale, times a named
+            // cosmetic exaggeration constant -- spec C1 explicitly permits
             // stylized-for-visibility scaling, not true-to-scale (members
             // this thin at a literal 1:3 scale would be a couple of pixels
-            // wide and effectively invisible).
-            const sceneScaleX = width / frame.planSpanX;
-            const sceneScaleZ = depth / frame.planSpanY;
-            const memberScale = (sceneScaleX + sceneScaleZ) / 2;
+            // wide and effectively invisible). Because the scale is now a
+            // constant, a 1.10 m column renders the same thickness at every
+            // floor area -- correct, since changing the floor area does not
+            // change the column sections. Only the Column X/Y/Beam sliders
+            // move these, which is exactly what those sliders mean.
             const FRAME_RENDER_EXAGGERATION = 1.3;
-            const colThickX = frame.columnDepthX * sceneScaleX * FRAME_RENDER_EXAGGERATION;
-            const colThickZ = frame.columnDepthY * sceneScaleZ * FRAME_RENDER_EXAGGERATION;
-            const beamHeight = frame.beamDepth * memberScale * FRAME_RENDER_EXAGGERATION;
-            const beamThick = frame.beamWidth * memberScale * FRAME_RENDER_EXAGGERATION;
+            const colThickX = frame.columnDepthX * SCENE_UNITS_PER_METRE * FRAME_RENDER_EXAGGERATION;
+            const colThickZ = frame.columnDepthY * SCENE_UNITS_PER_METRE * FRAME_RENDER_EXAGGERATION;
+            const beamHeight = frame.beamDepth * SCENE_UNITS_PER_METRE * FRAME_RENDER_EXAGGERATION;
+            const beamThick = frame.beamWidth * SCENE_UNITS_PER_METRE * FRAME_RENDER_EXAGGERATION;
             const slabThickness = 0.10;
 
             const corners = [
@@ -1987,21 +2025,48 @@
         const SWAY_COMPRESSION_EXPONENT = 0.35;   // 10x physical -> 2.2x on screen
         const SWAY_MAX_HEIGHT_FRACTION = 0.15;    // hard cap, as a fraction of total building height
 
-        // Peak on-screen furniture offset targeted at record-load, in scene
-        // units (a table template is ~0.9 units across after FURNITURE_SCALE,
-        // so this reads as a clear shove without furniture leaving its own
-        // footprint). One shared gain across table/chair/fan so their
-        // RELATIVE responses -- the actual physics being demonstrated, a
-        // 0.8 Hz fan swings far more than an 8 Hz table -- survive intact.
-        const FURNITURE_TARGET_SWAY = 0.22;
-        // Hard ceiling on the rendered furniture offset, in scene units --
-        // furniture must not slide off its own floor plate (~2.0 units deep),
-        // and the open cutaway (spec 5 C3) removed the walls that used to
-        // hide an overshoot. Enforced by capping the GAIN in
+        // Peak on-screen furniture offset targeted at record-load, as a
+        // FRACTION of the floor plate's depth (a table template is ~0.9
+        // units across after FURNITURE_SCALE, so this reads as a clear
+        // shove without furniture leaving its own footprint). One shared
+        // gain across table/chair/fan so their RELATIVE responses -- the
+        // actual physics being demonstrated, a 0.8 Hz fan swings far more
+        // than an 8 Hz table -- survive intact.
+        //
+        // A fraction rather than an absolute scene-unit distance because
+        // since spec 8 the plate is no longer a fixed 2.0 units deep -- it
+        // tracks the Area slider (~1.2 units at 200 sq ft up to ~3.8 at
+        // 2000), so an absolute offset that reads as a clear shove on a
+        // large plate would walk furniture off the edge of a small one.
+        // 0.11 x 2.0 == the original 0.22, so the default building is
+        // unchanged.
+        const FURNITURE_TARGET_SWAY_FRAC = 0.11;
+        function furnitureTargetSway() {
+            return FURNITURE_TARGET_SWAY_FRAC * currentFootprintD;
+        }
+        // Hard ceiling on the rendered furniture offset, also as a fraction
+        // of plate depth (same reasoning as FURNITURE_TARGET_SWAY_FRAC
+        // above; 0.25 x 2.0 == the original 0.5, so the default building is
+        // unchanged). Furniture must not slide off its own floor plate, and
+        // the open cutaway (spec 5 C3) removed the walls that used to hide
+        // an overshoot. Enforced by capping the GAIN in
         // updateFurnitureOffsets(), not by clamping samples: it does bind at
         // extreme magnitudes (M=9.0 on KOCAELI_ATK wants 0.73 units), and a
         // per-sample clamp there would flatten every peak to this same value.
-        const FURNITURE_RENDER_CLAMP = 0.5;
+        //
+        // Known limit, unchanged in kind by spec 8: at the clamp AND worst-
+        // case placement (outermost grid cell, max outward jitter, worst
+        // rotation) a table's corner can overhang the plate edge -- ~0.17
+        // units at the default footprint, which is exactly what the
+        // pre-spec-8 fixed 0.5 clamp also did. Scaling with depth keeps that
+        // proportional (~8% of plate depth at default, ~11% at 2000 sq ft)
+        // rather than fixing it; it only shows at near-M9 peaks. Tightening
+        // it means loosening FURNITURE_MARGIN/GRID placement, never shrinking
+        // FURNITURE_SCALE (see AGENTS.md).
+        const FURNITURE_RENDER_CLAMP_FRAC = 0.25;
+        function furnitureRenderClamp() {
+            return FURNITURE_RENDER_CLAMP_FRAC * currentFootprintD;
+        }
 
         // Maps this recompute's physical peak displacement to an on-screen
         // peak, and returns the gain that achieves it. Shared by the
@@ -2029,7 +2094,7 @@
             // frozen at record-load and gainRatio compresses it in step with
             // the building, but the two headrooms differ: the building may
             // grow 6x over its baseline before hitting its cap, furniture
-            // only 2.3x (FURNITURE_TARGET_SWAY -> FURNITURE_RENDER_CLAMP).
+            // only 2.3x (furnitureTargetSway() -> furnitureRenderClamp()).
             // So at high magnitude furniture reached the clamp while the
             // building was still well inside its own -- measured at M=9.0 on
             // KOCAELI_ATK: peak 0.731 vs a 0.5 clamp, flattening 0.02% of
@@ -2039,8 +2104,9 @@
             // bounding its size. That is the same pathology f307bc1 fixed
             // for the building; this is the furniture half of it.
             const rawGain = furnitureAmplify * gainRatio;
-            const gain = (currentFurniturePeak * rawGain > FURNITURE_RENDER_CLAMP)
-                ? FURNITURE_RENDER_CLAMP / currentFurniturePeak
+            const renderClamp = furnitureRenderClamp();
+            const gain = (currentFurniturePeak * rawGain > renderClamp)
+                ? renderClamp / currentFurniturePeak
                 : rawGain;
 
             const fdt = 1 / furnitureRateHz;
@@ -2661,7 +2727,18 @@
         function frameCameraToBuilding(totalHeight) {
             const vFov = camera.fov * Math.PI / 180;
             const margin = 1.35; // headroom so the roof/antenna isn't grazing the frame edge
-            const footprint = 3.5; // half-diagonal of the building's plan (width/depth from createBuilding)
+            // Half-diagonal of the building's plan, tracking the actual
+            // rendered footprint (variable since spec 8's Area slider --
+            // this was hardcoded at 3.5, which a 2000 sq ft plan would very
+            // nearly outgrow). The pad factor reproduces the old hardcoded
+            // 3.5 at the default 2.8 x 2.0 footprint (whose bare
+            // half-diagonal is 1.7205), so default framing is unchanged to
+            // within 0.02%; it's deliberately generous padding, not a tight
+            // fit, which is why the original constant was ~2x the bare
+            // half-diagonal rather than equal to it.
+            const FOOTPRINT_FRAMING_PAD = 2.034;
+            const halfDiagonal = Math.hypot(currentFootprintW, currentFootprintD) / 2;
+            const footprint = halfDiagonal * FOOTPRINT_FRAMING_PAD;
 
             const distForHeight = (totalHeight / 2 + 1) / Math.tan(vFov / 2) * margin;
             const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
@@ -2950,7 +3027,11 @@
                 // and for the same reason (a bigger synthetic quake must
                 // still shove the furniture visibly harder). The peak it
                 // divides was computed above, unconditionally.
-                furnitureAmplify = peakFurn > 1e-9 ? FURNITURE_TARGET_SWAY / peakFurn : 0;
+                // furnitureTargetSway() reads currentFootprintD, which
+                // createBuilding() set at the top of this function -- so it
+                // already reflects THIS load's floor area, not the previous
+                // building's.
+                furnitureAmplify = peakFurn > 1e-9 ? furnitureTargetSway() / peakFurn : 0;
             }
 
             // What the render will actually put on screen, in scene units --
@@ -3026,6 +3107,7 @@
                 column_depth_x: parseFloat(columnXSlider.value),
                 column_depth_y: parseFloat(columnYSlider.value),
                 beam_depth: parseFloat(beamSlider.value),
+                area_sqft: parseFloat(areaSlider.value),
                 epicenter_distance_km: parseFloat(epicenterDistanceSlider.value),
                 epicenter_depth_km: parseFloat(epicenterDepthSlider.value),
             };
@@ -3367,6 +3449,7 @@
                 && parseFloat(columnXSlider.value) === DEFAULT_COLUMN_DEPTH_X
                 && parseFloat(columnYSlider.value) === DEFAULT_COLUMN_DEPTH_Y
                 && parseFloat(beamSlider.value) === DEFAULT_BEAM_DEPTH
+                && parseFloat(areaSlider.value) === DEFAULT_AREA_SQFT
                 && earthquakeParamsAtDefault();
         }
 
@@ -3523,6 +3606,10 @@
         });
         beamSlider.addEventListener('input', (e) => {
             beamLabel.textContent = parseFloat(e.target.value).toFixed(2) + 'm';
+            scheduleLiveRecompute();
+        });
+        areaSlider.addEventListener('input', (e) => {
+            areaLabel.textContent = Math.round(parseFloat(e.target.value)) + ' sq ft';
             scheduleLiveRecompute();
         });
 
