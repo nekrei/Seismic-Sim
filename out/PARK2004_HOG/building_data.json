@@ -2,6 +2,7 @@
   "num_stories": 7,
   "story_height": 3.5,
   "damping_ratio": 0.05,
+  "reference_magnitude": 6.0,
   "elastic_modulus_Pa": 25000000000.0,
   "column_depth_x": 1.1,
   "column_depth_y": 1.1,
