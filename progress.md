@@ -611,3 +611,89 @@ exactly, no drift. Zero console errors from the app.
 All four checks (`check_sway_gain.mjs`, `check_quake_continuity.py`,
 `verify_frame_furniture.py`, `fft_check`) still pass -- this was a
 visualization-only fix, no physics touched.
+
+---
+
+## Code review pass (2026-08-28)
+
+Full review of `f307bc1..a1ba992` -- diff read line by line, math re-derived
+independently, animations exercised in a real browser. One Important issue
+found and fixed; everything else confirmed correct.
+
+### Important (fixed in this pass)
+
+**Furniture still used a per-sample clamp -- the exact pathology `f307bc1`
+fixed for the building.** `updateFurnitureOffsets()` did
+`Math.max(-C, Math.min(C, offset))` on every sample. The building and the
+furniture are compressed by the same `gainRatio`, but their headrooms differ:
+the building may grow 6x over its baseline before hitting its cap
+(0.612 -> 3.67 units), furniture only 2.3x (`FURNITURE_TARGET_SWAY` 0.22 ->
+`FURNITURE_RENDER_CLAMP` 0.5). So furniture reached its ceiling while the
+building was still well inside its own.
+
+Measured on KOCAELI_ATK at M=9.0 (growth 30.9x, measured gainRatio 0.1075):
+rendered furniture peak 0.731 units against a 0.5 clamp -- **0.021% of
+samples flattened**. Small in count, but those are precisely the peak
+moments, and a per-sample clamp pins every one of them to the identical
+value: shape destroyed rather than size bounded.
+
+Fixed by mirroring `swayDisplayGain()`: added `currentFurniturePeak`
+(refreshed on EVERY load, like `currentPeakDisp`), and
+`updateFurnitureOffsets()` now caps the gain so the peak lands exactly on
+the clamp, scaling the whole waveform uniformly. New
+`claude_scripts/check_furniture_gain.mjs` extracts the shipped code out of
+`index.html` (never a copy) and asserts the per-sample clamp is gone,
+identity at baseline, monotonicity, boundedness over a 1e-3..1e4 growth
+range, and that the M=9.0 regression scenario is capped.
+
+### Verified correct (no change needed)
+
+- **Furniture SDOF math.** Checked `compute_furniture_response()` against a
+  piecewise-exact (Duhamel) recurrence -- a genuinely different method with
+  zero period elongation, itself validated to 1.65e-6 against the closed-form
+  steady state. Worst relative difference 4.7e-3 across 3 floors x 3 classes,
+  and the residual scales with frequency exactly as the recurrence's
+  piecewise-linear assumption predicts (table 4.7e-3 > chair 1.7e-3 > fan
+  6.8e-4). An initial Newmark-beta check appeared to FAIL at 12.8%; that was
+  the integrator's own period elongation accumulating over ~1000 cycles, not
+  a real discrepancy -- worth recording, since the naive check is misleading.
+- **`server.py`'s `scaled("X_disp")`.** All 10 records carry non-null
+  `X_disp`/`Y_disp`, and `Y_disp` is only reachable under the same `has_y`
+  guard the old code used. No None-deref regression.
+- **`swayBaseline` is never 0 in practice.** The initial load path
+  (`loadFolderData(folders[0])`) calls `applyLoadedData()` without the
+  `autoScaleAmplify` argument, so it defaults to `true` and the baseline is
+  always set before any render.
+- **`furnitureAmplify` frozen across Building Parameters is safe.** Swept
+  the full slider ranges via `/compute`: rendered furniture peak stays within
+  0.018..0.373 units against the 0.5 clamp (worst = zeta 0.01; smallest =
+  stories 20 + mass 5e6 + column 0.5). No pinning, no invisibility.
+- **`computeInputSpectrum()`'s bin-centre omega^2 approximation.** Compared
+  against the exact `spectrum.json` path: mean -0.21 dB, median -0.04 dB,
+  std 0.58 dB over the 367 bins actually drawn, worst +-3.3 dB confined to
+  44-56 Hz (at/above the 50 Hz display cap). **Panel label jump 0.0 dB**, so
+  crossing from the default to the live path causes no visible discontinuity.
+- **Zero console errors.** A fresh tab driven through a full stress sweep
+  (3 record switches, drawer open, M=9.0, epicenter 1km/1km, stories 20,
+  then epicenter 200km/100km + M=3.0) produced no errors. An error seen in
+  earlier tabs was a stray debug `javascript_exec` of mine, confirmed by its
+  absence here.
+
+### Minor (noted, not changed)
+
+- The dB label added in `a1ba992` is 242px at its worst case
+  (`Output |U_rel(f)| · floor 20 · -111.9 dB`). The drawer is `420px`
+  capped at `92vw`, so the tightest real device (320px) gives ~252px of plot
+  width -- it fits, but with only ~10px to spare. A narrower future
+  breakpoint would clip it.
+- The `📐 On-screen sway peak` line logs on every live recompute, so dragging
+  a slider produces a line per debounced settle. Consistent with the existing
+  `✅ Live recompute` line; left as-is since it is the readout that made both
+  render-gain bugs diagnosable.
+
+### Suite after the fix
+
+`check_sway_gain.mjs`, `check_furniture_gain.mjs` (new),
+`check_quake_continuity.py`, `verify_frame_furniture.py` (ALL CHECKS PASSED),
+`verify_spectrum.py` (OVERALL: PASS), `fft_check` -- all green.
+`graphify update .` clean.

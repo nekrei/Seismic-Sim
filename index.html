@@ -1338,6 +1338,11 @@
         // DISPLACEMENT -- the two differ by orders of magnitude, and by a
         // record-dependent amount.
         let furnitureAmplify = 1.0;
+        // This recompute's own peak furniture response -- the furniture
+        // analogue of currentPeakDisp, refreshed on EVERY load (not just
+        // record switches) so updateFurnitureOffsets() can cap its gain
+        // against a current peak rather than clamping individual samples.
+        let currentFurniturePeak = 1e-12;
         // On-screen sway peak, in scene units, that `amplify` was calibrated
         // to produce at record-load. swayDisplayGain() compresses everything
         // above this and leaves everything below it alone, so the default
@@ -1989,8 +1994,13 @@
         // RELATIVE responses -- the actual physics being demonstrated, a
         // 0.8 Hz fan swings far more than an 8 Hz table -- survive intact.
         const FURNITURE_TARGET_SWAY = 0.22;
-        // Safety net only; the compressed gain below should keep offsets
-        // well under this at every parameter combo.
+        // Hard ceiling on the rendered furniture offset, in scene units --
+        // furniture must not slide off its own floor plate (~2.0 units deep),
+        // and the open cutaway (spec 5 C3) removed the walls that used to
+        // hide an overshoot. Enforced by capping the GAIN in
+        // updateFurnitureOffsets(), not by clamping samples: it does bind at
+        // extreme magnitudes (M=9.0 on KOCAELI_ATK wants 0.73 units), and a
+        // per-sample clamp there would flatten every peak to this same value.
         const FURNITURE_RENDER_CLAMP = 0.5;
 
         // Maps this recompute's physical peak displacement to an on-screen
@@ -2014,6 +2024,25 @@
 
         function updateFurnitureOffsets(tSeconds, gainRatio) {
             if (!furnitureItems.length || !furnitureData || furnitureRateHz <= 0) return;
+
+            // Cap the GAIN, never the individual samples. furnitureAmplify is
+            // frozen at record-load and gainRatio compresses it in step with
+            // the building, but the two headrooms differ: the building may
+            // grow 6x over its baseline before hitting its cap, furniture
+            // only 2.3x (FURNITURE_TARGET_SWAY -> FURNITURE_RENDER_CLAMP).
+            // So at high magnitude furniture reached the clamp while the
+            // building was still well inside its own -- measured at M=9.0 on
+            // KOCAELI_ATK: peak 0.731 vs a 0.5 clamp, flattening 0.02% of
+            // samples. Small in count, but those are exactly the peak
+            // moments, and a per-sample clamp pins every one of them to the
+            // identical value -- destroying waveform shape rather than
+            // bounding its size. That is the same pathology f307bc1 fixed
+            // for the building; this is the furniture half of it.
+            const rawGain = furnitureAmplify * gainRatio;
+            const gain = (currentFurniturePeak * rawGain > FURNITURE_RENDER_CLAMP)
+                ? FURNITURE_RENDER_CLAMP / currentFurniturePeak
+                : rawGain;
+
             const fdt = 1 / furnitureRateHz;
             const fIdxFloat = Math.max(0, tSeconds) / fdt;
             const i0 = Math.floor(fIdxFloat);
@@ -2042,8 +2071,8 @@
                 // against the clamp every frame). gainRatio is the building's
                 // own compression factor for this frame, so furniture and
                 // structure always shrink together.
-                ox = Math.max(-FURNITURE_RENDER_CLAMP, Math.min(FURNITURE_RENDER_CLAMP, ox * furnitureAmplify * gainRatio));
-                oz = Math.max(-FURNITURE_RENDER_CLAMP, Math.min(FURNITURE_RENDER_CLAMP, oz * furnitureAmplify * gainRatio));
+                ox *= gain;
+                oz *= gain;
 
                 item.mesh.position.x = item.baseX + ox;
                 item.mesh.position.z = item.baseZ + oz;
@@ -2879,6 +2908,28 @@
             }
             currentPeakDisp = Math.max(peakAbsDisp, 1e-9);
 
+            // Furniture's equivalent, and for the same reason: computed on
+            // EVERY call so updateFurnitureOffsets() can cap the GAIN
+            // against this recompute's own peak instead of clamping each
+            // sample. ONE peak across every class/floor/axis -- the three
+            // classes deliberately share a gain so the physics on display
+            // (a 3 Hz fan swings far more than an 8 Hz table under the same
+            // floor motion) survives instead of being normalised away.
+            let peakFurn = 0;
+            if (furniture) {
+                for (const axis of ['X', 'Y']) {
+                    for (const cls of Object.keys(furniture[axis] || {})) {
+                        for (const series of furniture[axis][cls]) {
+                            for (let i = 0; i < series.length; i++) {
+                                const av = Math.abs(series[i]);
+                                if (av > peakFurn) peakFurn = av;
+                            }
+                        }
+                    }
+                }
+            }
+            currentFurniturePeak = Math.max(peakFurn, 1e-12);
+
             if (autoScaleAmplify) {
                 // Auto-scale the default amplify -- real sway varies ~500x
                 // across different real earthquake records, so a fixed
@@ -2895,25 +2946,10 @@
                     setAmplify(AMPLIFY_MIN);
                 }
 
-                // Same idea for the furniture, from the furniture data's own
-                // peak across every class/floor/axis. ONE gain for all three
-                // classes, so the physics being demonstrated -- a low-
-                // frequency fan swings far more than a stiff table under the
-                // same floor motion -- stays visible instead of being
-                // normalised away per class.
-                let peakFurn = 0;
-                if (furniture) {
-                    for (const axis of ['X', 'Y']) {
-                        for (const cls of Object.keys(furniture[axis] || {})) {
-                            for (const series of furniture[axis][cls]) {
-                                for (let i = 0; i < series.length; i++) {
-                                    const av = Math.abs(series[i]);
-                                    if (av > peakFurn) peakFurn = av;
-                                }
-                            }
-                        }
-                    }
-                }
+                // Furniture's baseline gain, frozen here alongside amplify
+                // and for the same reason (a bigger synthetic quake must
+                // still shove the furniture visibly harder). The peak it
+                // divides was computed above, unconditionally.
                 furnitureAmplify = peakFurn > 1e-9 ? FURNITURE_TARGET_SWAY / peakFurn : 0;
             }
 
