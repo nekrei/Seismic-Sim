@@ -561,3 +561,53 @@ statement became a misleading one out from under it, and no spec-7
 own docs checklist). Fixed in the worktree's local `AGENTS.md` (gitignored,
 not part of this commit) to state the actual invariant precisely and
 describe the Part B4 fallback that keeps it true.
+
+---
+
+## Real bug: frequency panel invisible to Magnitude changes (2026-08-28)
+
+User re-reported after the audit above: "I changed the sliders of
+earthquake parameters but the frequency domain panel didn't change." This
+time it was real -- my earlier canvas-byte-length spot check missed it
+because the diff was small but nonzero (attenuation had kicked in at the
+extreme corner I happened to test), and I concluded "the panel updates"
+without checking whether the update was actually *visible*.
+
+**Root cause**: `magnitude_scale = 10**(magnitude - reference_magnitude)`
+and `spreading_scale = R0/R` in `apply_synthetic_earthquake_scaling()` are
+both frequency-flat multipliers by construction (verified: a Richter bump
+at R==R0 changes every FFT bin by the identical ratio to 1e-14). The
+frequency-domain drawer's per-subplot dB axis auto-scales to that panel's
+OWN peak every redraw (`dbMax = max over this panel's curves`, `dbMin =
+dbMax - 70`, no persisted reference) and never printed a dB value
+anywhere -- so a flat gain shifts the axis by exactly the same amount as
+the curve, leaving the rendered SHAPE (and therefore every pixel except
+antialiasing noise) unchanged. Distance/depth changes large enough to
+clear the `R <= R0` attenuation clamp DO reshape the curve and were
+already visible; Magnitude -- the slider anyone reaches for first -- never
+was, at any value.
+
+**Fix**: `drawSpectrumSubplot()` now appends the panel's own peak level to
+its label (`Input |A_g(f)| · X · 4.0 dB` etc), computed from `dbMax`
+which the function already had. One line, no call-site changes, and
+doesn't touch the auto-scale itself -- shape-legibility (what makes the
+attenuation filter's real frequency-dependent effect visible) is
+preserved.
+
+Verified by intercepting `CanvasRenderingContext2D.prototype.fillText` and
+reading the actual printed strings (not just canvas byte-length, which is
+too easy to fool with antialiasing noise -- the mistake made during the
+earlier audit):
+```
+default:        Input 4.0 dB   Transfer -8.7 dB   Output -11.9 dB
+M=9.0 (R=R0):    Input 33.8 dB  Transfer -8.7 dB   Output  17.9 dB
+back to default: Input 4.0 dB   Transfer -8.7 dB   Output -11.9 dB
+```
++29.8 dB on both Input and Output matches `20*log10(10**(9.00-7.51))`
+exactly; Transfer is correctly unchanged (building-only, earthquake-
+independent); returning to default reproduces the original values
+exactly, no drift. Zero console errors from the app.
+
+All four checks (`check_sway_gain.mjs`, `check_quake_continuity.py`,
+`verify_frame_furniture.py`, `fft_check`) still pass -- this was a
+visualization-only fix, no physics touched.
