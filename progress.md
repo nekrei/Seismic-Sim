@@ -515,3 +515,49 @@ still holding port 8000 with the pre-fix module loaded in memory, which made
 the first round of browser measurements look like the fix had not landed.
 Static files are re-read per request, Python modules are not — check
 `Get-NetTCPConnection -LocalPort 8000` before trusting a `/compute` result.
+
+---
+
+## Frequency-domain panel audit: is it stale against Earthquake Parameters? (2026-08-28)
+
+User suspicion: the frequency-domain drawer (spec 6) predates Earthquake
+Parameters (spec 7) and might still show the original record's spectrum
+regardless of epicenter/magnitude reshaping -- "computes based on past
+computations when earthquake didn't have a specified epicentre."
+
+**Checked the code path, then verified behaviorally in the browser.**
+`redrawSpectrumPanels()` already gates on `earthquakeParamsAtDefault()`:
+at default parameters it uses the cached, parameter-independent
+`spectrum.json` (the recorded quake's own spectrum); away from default it
+calls `computeInputSpectrum()` (added by spec 7, Part B4), which recovers
+the acceleration spectrum from whichever ground *displacement* is
+currently loaded -- i.e. the already-reshaped synthetic quake -- via
+`|FFT(accel)| = omega^2 * |FFT(disp)|`. This was correctly wired up in
+spec 7's own implementation.
+
+Verified by comparing `spectrumCanvas.toDataURL()` before/after moving
+Earthquake Parameter sliders (a byte-for-byte proxy for "did the drawn
+content change"):
+- Default -> extreme corner (1 km / 1 km / 9.0 M): canvas changes
+  (46034 -> 46106 bytes), drawer stays enabled, no disabled-note.
+- Extreme corner -> back to default: canvas returns **byte-identical**
+  (46034 == 46034) -- confirms the cached `spectrum.json` path is used
+  again exactly, no drift/hysteresis from having gone through the live
+  path.
+- A single small nudge (distance 20km -> 5km -> 20km) also round-trips
+  byte-identical.
+- Zero console errors from the app itself across all of this (one
+  leftover console error in the tab was from an earlier broken debug
+  `javascript_exec` call of mine, unrelated to the app -- confirmed by a
+  fresh navigate producing the same cached message before any app code
+  ran).
+
+**Conclusion: the code was already correct.** What was actually stale was
+one documentation bullet in `AGENTS.md` ("`spectrum.json` is ...
+parameter-independent"), written for spec 6 and never revisited when spec
+7 added Earthquake Parameters that DO reshape the record -- an accurate
+statement became a misleading one out from under it, and no spec-7
+"Things to know" bullet was ever added to replace it (a gap in spec 7's
+own docs checklist). Fixed in the worktree's local `AGENTS.md` (gitignored,
+not part of this commit) to state the actual invariant precisely and
+describe the Part B4 fallback that keeps it true.
