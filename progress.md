@@ -954,3 +954,16 @@ prematurely here.
 Committed as `ccc8d84` (`README.md`, `Seismic-Sim Math.pdf` -- the
 gitignored doc files above aren't tracked by this worktree's git, by
 design).
+
+### Task 5 -- regenerate out/ and confirm zero diff
+
+Ran `mdof_response.py` then `plot_response.py` through the conda env, all
+10 records. `git status`/`git diff` in the worktree came back **empty**
+-- no tracked file changed. This confirms Task 1 check 1's round-trip
+claim end to end through the real pipeline, not just the isolated
+`plan_dims_from_area()`/`build_condensed_K()` math: leaving the Area
+slider at its default (`542.501085` sq ft, never touched by
+`mdof_response.py`'s `__main__` since it always uses the constructor's
+default `plan_span_x`/`plan_span_y` kwargs) reproduces the exact
+pre-spec-8 footprint bit-for-bit across all 10 records' CSVs, PNGs,
+JSON, and furniture binaries. No commit needed (nothing changed).
