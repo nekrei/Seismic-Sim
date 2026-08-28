@@ -37,6 +37,19 @@ N_PARALLEL_FRAMES = 2
 # just a size fudge.
 FURNITURE_TARGET_RATE_HZ = 50.0
 
+# --- Synthetic earthquake constants (spec 7, Part A) ----------------------
+# Reference epicenter geometry: the "no reshaping" point where
+# apply_synthetic_earthquake_scaling() must be the identity transform, so
+# regenerating out/ (which never calls it) stays exactly reproducible.
+# MUST match server.py's and index.html's DEFAULT_EPICENTER_DISTANCE_KM/
+# DEFAULT_EPICENTER_DEPTH_KM exactly (comment at each of the other sites).
+DEFAULT_EPICENTER_DISTANCE_KM = 20.0  # km
+DEFAULT_EPICENTER_DEPTH_KM = 10.0     # km
+# Anelastic (Q) attenuation constants -- typical crustal shear-wave Q and
+# velocity, fixed (not user-adjustable, same reasoning as E_CONCRETE above).
+ATTENUATION_Q = 200.0
+ATTENUATION_VELOCITY_MPS = 3500.0
+
 # Illustrative furniture-class parameters (spec Part B3) -- representative
 # constants, not derived from any real furniture-stiffness database (none
 # exists), freely adjustable for visual plausibility. Order matters: it
@@ -92,6 +105,55 @@ def frame_span(axis):
         return PLAN_SPAN_Y
     else:
         raise ValueError(f"axis must be 'X' or 'Y', got {axis!r}")
+
+
+def apply_synthetic_earthquake_scaling(accel, dt, magnitude, distance_km,
+                                        depth_km, reference_magnitude):
+    """
+    Reshape a real recorded ground acceleration trace into a synthetic
+    earthquake at a different Richter magnitude and epicenter geometry, by
+    multiplying its FFT spectrum by a real, non-negative, frequency-
+    dependent scale factor (spec 7, Part A) -- no phase change, matching
+    this project's existing zero-phase filtering convention.
+
+    Three effects, all identity at (magnitude=reference_magnitude,
+    distance_km=DEFAULT_EPICENTER_DISTANCE_KM,
+    depth_km=DEFAULT_EPICENTER_DEPTH_KM):
+
+    1. magnitude_scale = 10**(magnitude - reference_magnitude) -- the
+       literal historical Richter definition (M = log10(A) - log10(A0)),
+       applied directly rather than approximated.
+    2. spreading_scale = R0 / R -- geometric spreading amplitude decay,
+       where R = hypot(distance_km, depth_km) is hypocentral distance and
+       R0 is the same hypocentral distance at the reference geometry.
+    3. attenuation(f) = exp(-pi * f * max(R - R0, 0) * 1000 / (Q * v)) --
+       anelastic attenuation, a genuine per-frequency-bin filter (removes
+       high frequencies faster than low ones as R grows past R0), not a
+       uniform amplitude scale in disguise. (R - R0) converted km -> m to
+       match velocity in m/s. Clamped at R0 -- Q attenuation only ever
+       removes energy the recorded trace still has; when R < R0 the
+       un-clamped formula would run the exponential in reverse and
+       "restore" high-frequency energy the reference recording never had
+       in the first place, blowing up without bound as R -> 0. Physically
+       there's nothing to restore, so the correct value for R <= R0 is no
+       attenuation adjustment at all (factor 1), not amplification.
+    """
+    n = len(accel)
+    freqs = np.fft.rfftfreq(n, dt)
+
+    R0 = np.hypot(DEFAULT_EPICENTER_DISTANCE_KM, DEFAULT_EPICENTER_DEPTH_KM)
+    R = np.hypot(distance_km, depth_km)
+
+    magnitude_scale = 10.0 ** (magnitude - reference_magnitude)
+    spreading_scale = R0 / R
+    attenuation = np.exp(
+        -np.pi * freqs * max(R - R0, 0.0) * 1000.0
+        / (ATTENUATION_Q * ATTENUATION_VELOCITY_MPS)
+    )
+    scale = magnitude_scale * spreading_scale * attenuation
+
+    spectrum = np.fft.rfft(accel)
+    return np.fft.irfft(spectrum * scale, n=n)
 
 
 def assemble_frame_stiffness(N, E, I_c, I_b, h, L):
@@ -900,7 +962,8 @@ def save_ground_spectrum(filename, accel_x, accel_y, dt, n_bins=400):
         json.dump(data, f)
 
 
-def save_building_data(filename, building_x, building_y, furniture_meta=None):
+def save_building_data(filename, building_x, building_y, furniture_meta=None,
+                        reference_magnitude=6.0):
     """
     Module-level replacement for the old per-instance save_to_json --
     spec 5 needs BOTH axes' independent condensed-stiffness modal results
@@ -913,6 +976,10 @@ def save_building_data(filename, building_x, building_y, furniture_meta=None):
         "num_stories": int(building_x.N),
         "story_height": float(building_x.h),
         "damping_ratio": float(building_x.zeta),
+        # Richter magnitude this record corresponds to (data/richter
+        # readings.json), used as the Earthquake Parameters panel's
+        # per-record Richter slider default -- spec 7, Part A.
+        "reference_magnitude": float(reference_magnitude),
 
         # Frame geometry (spec A2) -- shared by both axes.
         "elastic_modulus_Pa": float(building_x.E),
@@ -974,6 +1041,21 @@ if __name__ == "__main__":
     COLUMN_DEPTH_Y = 1.10  # m
     BEAM_DEPTH = 1.50      # m
 
+    # Per-record Richter magnitude (spec 7, Part A) -- maps folder name to
+    # the record's real-world magnitude, used as the Earthquake Parameters
+    # panel's per-record slider default. This __main__ block only stores
+    # the value; apply_synthetic_earthquake_scaling() itself is only ever
+    # invoked by server.py's /compute, never here, so regenerating out/
+    # stays byte-identical except for this one new field.
+    richter_path = os.path.join(data_dir, "richter readings.json")
+    if os.path.isfile(richter_path):
+        with open(richter_path) as f:
+            RICHTER_READINGS = json.load(f)
+    else:
+        print(f"Warning: {richter_path} not found -- reference_magnitude "
+              f"will default to 6.0 for every record.")
+        RICHTER_READINGS = {}
+
     folders = [f for f in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, f))]
     if not folders:
         print("No subfolders found in data/. Please place earthquake folders inside data/.")
@@ -981,6 +1063,7 @@ if __name__ == "__main__":
 
     for folder in folders:
         folder_path = os.path.join(data_dir, folder)
+        reference_magnitude = RICHTER_READINGS.get(folder, 6.0)
         print(f"\nProcessing folder: {folder}")
 
         all_files = os.listdir(folder_path)
@@ -1121,7 +1204,8 @@ if __name__ == "__main__":
         # Save JSON metadata (both axes' modal results + frame geometry +
         # furniture metadata).
         save_building_data(os.path.join(out_folder, "building_data.json"),
-                            building_x, building_y, furniture_meta)
+                            building_x, building_y, furniture_meta,
+                            reference_magnitude=reference_magnitude)
 
         # Cache the raw ground acceleration and displacement (both already
         # unit-converted) so the live-recompute backend
@@ -1136,6 +1220,7 @@ if __name__ == "__main__":
             "Y": accel_y.tolist() if accel_y is not None else None,
             "X_disp": disp_x.tolist(),
             "Y_disp": disp_y.tolist() if accel_y is not None else None,
+            "reference_magnitude": reference_magnitude,
         }
         with open(os.path.join(out_folder, "ground_accel.json"), 'w') as f:
             json.dump(ground_accel_data, f)
