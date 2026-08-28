@@ -8,6 +8,7 @@ AGENTS.md
 specs/
 verification/
 graphify-out/
+knowledge/
 # Python
 __pycache__/
 *.pyc
