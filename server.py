@@ -114,36 +114,44 @@ def compute():
 
     # Reshape the real record's ground motion into the requested synthetic
     # earthquake (spec 7). At the default Earthquake Parameters this is an
-    # identity transform (check 1), but ground_accel.json's cached X_disp/
-    # Y_disp is sometimes the *actually recorded* DT2 displacement rather
-    # than accel's double integral (parse_peer_displacement_file, see
-    # mdof_response.py's __main__) -- re-integrating unconditionally would
-    # silently swap that real displacement for a numerically-derived one
-    # even when nothing was reshaped, breaking parity with out/. Only
-    # re-derive displacement when the earthquake parameters actually
-    # deviate from identity.
-    is_default_quake = (
-        richter_magnitude == reference_magnitude
-        and epicenter_distance_km == DEFAULT_EPICENTER_DISTANCE_KM
-        and epicenter_depth_km == DEFAULT_EPICENTER_DEPTH_KM
-    )
-    accel_x = apply_synthetic_earthquake_scaling(
-        np.array(ground["X"]), dt, magnitude=richter_magnitude,
-        distance_km=epicenter_distance_km, depth_km=epicenter_depth_km,
-        reference_magnitude=reference_magnitude,
-    )
-    disp_x = np.array(ground["X_disp"]) if is_default_quake else building_x._integrate_accel(accel_x, dt)
+    # identity transform (check 1), so out/ parity stays exact.
+    #
+    # The SAME filter is applied to the cached ground *displacement* rather
+    # than re-deriving displacement from the scaled acceleration. Two
+    # reasons, both load-bearing:
+    #   1. Consistency. apply_synthetic_earthquake_scaling() multiplies the
+    #      spectrum by a real, non-negative s(f), and the displacement and
+    #      acceleration spectra differ only by the factor -1/w^2 -- so
+    #      multiplying either by s(f) is the identical operation. The
+    #      scaled (accel, disp) pair stays exactly as self-consistent as
+    #      the recorded pair was, and stays linear in magnitude_scale.
+    #   2. Continuity (bug fix). ground_accel.json's X_disp/Y_disp is
+    #      usually the *actually recorded* DT2 displacement, not accel's
+    #      double integral, and the two differ substantially (~2.3x in
+    #      peak, 0.65 correlation on KOCAELI_ATK -- PEER's own baseline
+    #      correction is not reproducible by _integrate_accel's generic
+    #      high-pass). The old code re-integrated only when the parameters
+    #      left their defaults, so nudging any Earthquake Parameter by a
+    #      single step swapped the ground-displacement source underneath
+    #      the animation: the whole building jumped to a differently-shaped,
+    #      differently-scaled waveform. That was one of the two causes of
+    #      "the building visibly moves away from the center."
+    def scaled(key):
+        return apply_synthetic_earthquake_scaling(
+            np.array(ground[key]), dt, magnitude=richter_magnitude,
+            distance_km=epicenter_distance_km, depth_km=epicenter_depth_km,
+            reference_magnitude=reference_magnitude,
+        )
+
+    accel_x = scaled("X")
+    disp_x = scaled("X_disp")
     time_arr, gdisp_x, _, abs_x = building_x.compute_response(accel_x, disp_x, dt)
     furn_x, npts_dec_x, q_x, rate_x = building_x.get_decimated_furniture()
 
     has_y = ground.get("Y") is not None
     if has_y:
-        accel_y = apply_synthetic_earthquake_scaling(
-            np.array(ground["Y"]), dt, magnitude=richter_magnitude,
-            distance_km=epicenter_distance_km, depth_km=epicenter_depth_km,
-            reference_magnitude=reference_magnitude,
-        )
-        disp_y = np.array(ground["Y_disp"]) if is_default_quake else building_y._integrate_accel(accel_y, dt)
+        accel_y = scaled("Y")
+        disp_y = scaled("Y_disp")
         _, gdisp_y, _, abs_y = building_y.compute_response(accel_y, disp_y, dt)
         furn_y, npts_dec_y, q_y, rate_y = building_y.get_decimated_furniture()
         npts_dec = min(npts_dec_x, npts_dec_y)

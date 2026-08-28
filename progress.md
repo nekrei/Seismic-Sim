@@ -378,3 +378,140 @@ menu.
 
 Stage: verify complete. Next: present the finish menu (merge locally /
 keep as-is).
+
+---
+
+## Post-f307bc1: three off-centre / furniture bugs (2026-08-28)
+
+User report: "if you tweak the parameters sometimes the building visibly
+moves away from the center" (screenshot: a single chair on its slab, far
+off the grid origin) and "the shaking is really odd for the furniture."
+
+Three independent root causes, all found by measurement, all fixed.
+
+### 1. Record switch applied the OUTGOING record's magnitude (`index.html`)
+
+`earthquakeParamsAtDefault()` compares `richterSlider.value` against
+`currentReferenceMagnitude`. On a record switch the slider still holds the
+record you are leaving, and `currentReferenceMagnitude` is still that same
+record's — so the check said "not at default" whenever the two records had
+different magnitudes, dropping out of the static `out/` fast path into
+`/compute` **with the wrong magnitude**.
+
+Measured, ANZA1_CIDLA (4.92 M) -> KOCAELI_ATK (7.51 M): furniture peak came
+out at 0.087 mm against the bin's true 35.47 mm — 407x too small, i.e.
+`10^(4.92-7.51)`. The panel then displayed "7.5 M". The reverse direction
+(big record -> small record) overdrives by the same factor and is the
+visible half: the building sways orders of magnitude too hard and parks
+off-centre.
+
+Fix: reset the epicenter sliders and null `currentReferenceMagnitude`
+in the `folderSelect` handler *before* the load-path branch, and omit
+`richter_magnitude` from `/compute`'s body while it is null — `server.py`
+already falls back to that record's own `reference_magnitude`.
+
+Verified: all 10 records, switched in both directions (20 transitions),
+now take the static path (`compute=0`) and match their `furniture_response.bin`
+peak to **relative error 0.0**, with the magnitude slider showing the right
+record's value every time.
+
+Related, same class: the slider's `step` was 0.1 but real magnitudes carry
+two decimals (7.51, 4.92, 6.6), so the "default" slider position was 0.01 M
+off what `out/` was built at — a permanent 2.3% amplitude step between the
+static and `/compute` paths at nominally identical settings. `step` is now
+0.01 (label still reads one decimal), and `currentReferenceMagnitude` is
+read back off the slider after assignment so the invariant holds regardless.
+
+### 2. Any earthquake-slider nudge swapped the ground-displacement source (`server.py`)
+
+`disp_x` was `ground["X_disp"]` (the recorded PEER `.DT2` trace) at default
+parameters but `_integrate_accel(accel_x)` at any other parameters. Those
+two differ by **2.3x in peak and correlate only 0.65** on KOCAELI_ATK —
+PEER's own baseline correction is not reproducible from a generic
+Butterworth high-pass. One slider step therefore jumped the whole building
+to a differently-shaped, differently-scaled waveform.
+
+Fix: apply `apply_synthetic_earthquake_scaling()` to the cached displacement
+directly. This is exact, not an approximation: the filter multiplies the
+spectrum by a real, non-negative `s(f)`, and displacement/acceleration
+spectra differ only by `-1/w^2`, so the same `s(f)` applies unchanged to
+both. Identity at defaults is preserved bit-for-bit, and the
+`is_default_quake` special case disappears entirely.
+
+`claude_scripts/check_quake_continuity.py` (new): identity to 4.3e-16;
+a 1 km distance nudge now moves the ground-displacement peak **3.92%**
+(old path: 58.9%); `s(f)` measured bin-by-bin off the acceleration and the
+displacement agrees to <1e-9 relative at three parameter corners.
+
+### 3. On-screen sway grew linearly with a logarithmic scale (`index.html`)
+
+`amplify` is frozen at record-load by design (so a bigger synthetic quake
+genuinely sways more). But one Richter step is a literal 10x, passed
+straight through to the render — `+1 M` already threw the building several
+building-widths sideways, and `f307bc1`'s clamp only caught it at
+`0.6 * totalHeight` = **14.7 scene units** for the default 7-story building,
+against a ~2.8-unit footprint. That is the screenshot.
+
+Fix: `swayDisplayGain()` compresses everything above the record-load
+baseline (`displayPeak = baseline * (physical/baseline)^0.35`) and caps at
+`0.15 * totalHeight`. Exactly the identity at the baseline, linear below it,
+strictly monotonic, bounded above.
+
+`claude_scripts/check_sway_gain.mjs` (new) extracts the function out of
+`index.html` at runtime (never a copy — same rule as `fft_check.mjs`) and
+asserts all five properties:
+`baseline=0.612u  cap=3.67u  +1M=2.24x  extreme(489x)=3.68u (was 14.7u)`.
+
+Furniture was scaled by `amplify` — a **displacement**-calibrated number,
+while furniture responds to floor **acceleration**. The ratio between the
+two swings by ~130x across the dataset (measured furniture auto-gain now
+ranges 4.3 to 562.6 across the 10 records), which is why furniture looked
+frozen on some records and pinned against its clamp on others. It now has
+its own record-load auto-scale targeting a 0.22-unit peak, shared across
+all three classes so the actual physics on display — a 3 Hz fan swings far
+more than an 8 Hz table under the same floor motion — is preserved, and it
+rides the building's own compression ratio so the two never disagree.
+
+### Furniture *math* reviewed, deliberately unchanged
+
+`compute_furniture_response()` and `furniture_frf()` were re-checked against
+the governing equation and the verification suite: `H(0) = 1/wf^2`, peak at
+`wf*sqrt(1-2*zeta^2)`, `u = -H*Xb''` sign correct, absolute floor
+acceleration obtained by `-w^2 * Q(jw)` in the frequency domain (not a
+time-domain re-differentiation). All correct. The "odd shaking" was
+entirely the render gain above.
+
+Two candidate physics changes were measured and rejected:
+- Raising `zeta` from 0.02 on the theory that furniture rings on after the
+  quake: measured post-shaking residual is only 1.5-2.3% of peak. No
+  visible ringing to remove.
+- Re-deriving the fan as a real pendulum (`f = sqrt(g/L)/2pi`, ~0.85 Hz for
+  a 0.35 m rod): physically appealing, but it produces 464 mm of relative
+  displacement on KOCAELI_ATK — roughly 60 degrees of swing on that rod,
+  far outside the small-angle regime the linear SDOF model assumes. Kept
+  the stiff-mount interpretation the docstring already describes.
+
+`FURNITURE_CLASSES` is therefore untouched, so **no `out/` regeneration and
+no `mdof_response.py` change** — the backend mirror obligation is limited to
+`server.py`'s `/compute` (still due on merge, alongside spec 6's).
+
+### Verification run
+
+- `claude_scripts/verify_frame_furniture.py` — ALL CHECKS PASSED (incl.
+  check 6, `/compute` parity against `out/`).
+- `claude_scripts/verify_spectrum.py` — OVERALL: PASS.
+- `claude_scripts/fft_check.mjs` + `fft_check_scipy.py` — ALL CHECKS PASS
+  (rel_err 3.4e-14).
+- `claude_scripts/check_quake_continuity.py` — new, passes.
+- `claude_scripts/check_sway_gain.mjs` — new, passes.
+- Real browser (`http://127.0.0.1:8000/`): 20 record transitions clean,
+  magnitude sweep 3->9 M monotonic and bounded, extreme corner
+  (1 km / 1 km / 9.0 M) capped at 3.72 units, return-to-default exact,
+  zero console errors.
+- `graphify update .` — 106 nodes, 132 edges, 8 communities.
+
+Note for the next session: a `server.py` process from an earlier session was
+still holding port 8000 with the pre-fix module loaded in memory, which made
+the first round of browser measurements look like the fix had not landed.
+Static files are re-read per request, Python modules are not — check
+`Get-NetTCPConnection -LocalPort 8000` before trusting a `/compute` result.
