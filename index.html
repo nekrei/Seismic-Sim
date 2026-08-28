@@ -2291,6 +2291,23 @@
         // ends up on top) and all share one dB scale per panel, auto-scaled
         // to that panel's own peak (Part B4) -- an Input/Output pair with a
         // 40dB gap would otherwise flatten one of them into a flat line.
+        //
+        // That auto-scaling has a bug-shaped consequence, found from a user
+        // report ("I moved the Earthquake Parameter sliders and the panel
+        // didn't change"): magnitude_scale and spreading_scale in
+        // apply_synthetic_earthquake_scaling() are both frequency-flat
+        // multipliers (verified: a Richter bump at R==R0 changes every FFT
+        // bin by the identical ratio to 1e-14). A flat gain shifts dbMax
+        // and dbMin by the same amount, so the curve's SHAPE on this
+        // self-normalized axis is unchanged -- and since no dB value was
+        // ever printed anywhere on the panel, that shift was completely
+        // invisible. Distance/depth changes large enough to clear the R0
+        // clamp DO reshape the curve (anelastic attenuation is genuinely
+        // frequency-dependent), so those were visible; Magnitude -- the
+        // slider anyone reaches for first -- never was. Printing the
+        // actual peak level fixes this without weakening the shape-legible
+        // auto-scale that makes the attenuation filter's real effect
+        // readable in the first place.
         function drawSpectrumSubplot(ctx, x, y, w, h, label, curves, nyquistHz) {
             ctx.fillStyle = 'rgba(255,255,255,0.02)';
             ctx.fillRect(x, y, w, h);
@@ -2307,6 +2324,11 @@
             }
             if (!isFinite(dbMax)) dbMax = 0;
             const dbMin = dbMax - 70; // fixed 70dB dynamic range below this panel's own peak
+            // This panel's peak, printed into the label (see the bug this
+            // fixes below) -- computed here, right where dbMax already is,
+            // so there's exactly one place that can drift out of sync with
+            // what's actually drawn.
+            label = `${label} · ${dbMax.toFixed(1)} dB`;
 
             // Grey out the region above this record's own Nyquist frequency
             // (Part B4) -- always zero-width for this dataset's 100/200Hz
