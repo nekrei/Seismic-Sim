@@ -234,7 +234,12 @@ results. It:
   (1.4) fixed — a bigger floor plate means a longer beam span, which
   makes the frame genuinely more flexible (a real physics effect, via the
   same static-condensation math every other Building Parameters slider
-  already drives), not just a bigger-looking building.
+  already drives), not just a bigger-looking building. The 3D view
+  reflects it directly: the floor plates and beams grow and shrink with
+  the slider while the columns keep their own thickness (that's set by
+  the Column X/Y sliders — changing how much floor you have doesn't
+  change the size of the columns holding it up), and the furniture
+  spreads out across the larger plate.
 - Has an **Earthquake Parameters** panel — Epicenter Distance, Epicenter
   Depth, and Richter Magnitude sliders that reshape the *selected record's*
   own ground motion into a synthetic "what if this quake had happened

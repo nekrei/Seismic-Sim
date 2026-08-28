@@ -1379,7 +1379,7 @@
         // Variable since spec 8 (the Area slider) -- previously these were
         // the hardcoded 2.8 x 2.0 literals inside createBuilding(), which is
         // exactly what made the Area slider look wrong (see
-        // SCENE_UNITS_PER_METRE below). frameCameraToBuilding() and
+        // SCENE_UNITS_PER_METRE above). frameCameraToBuilding() and
         // updateFurnitureOffsets() both key off these.
         let currentFootprintW = 2.8;
         let currentFootprintD = 2.0;
@@ -2025,33 +2025,44 @@
         const SWAY_COMPRESSION_EXPONENT = 0.35;   // 10x physical -> 2.2x on screen
         const SWAY_MAX_HEIGHT_FRACTION = 0.15;    // hard cap, as a fraction of total building height
 
-        // Peak on-screen furniture offset targeted at record-load, in scene
-        // units (a table template is ~0.9 units across after FURNITURE_SCALE,
-        // so this reads as a clear shove without furniture leaving its own
-        // footprint). One shared gain across table/chair/fan so their
-        // RELATIVE responses -- the actual physics being demonstrated, a
-        // 0.8 Hz fan swings far more than an 8 Hz table -- survive intact.
-        // Expressed as a FRACTION of the floor plate's depth, not an absolute
-        // scene-unit distance: since spec 8 the plate is no longer a fixed
-        // 2.0 units deep (it tracks the Area slider, ~1.2 units at 200 sq ft
-        // up to ~3.8 at 2000), so an absolute offset that reads as a clear
-        // shove on a large plate would walk furniture off the edge of a
-        // small one. 0.11 x 2.0 == the original 0.22, so the default
-        // building is unchanged.
+        // Peak on-screen furniture offset targeted at record-load, as a
+        // FRACTION of the floor plate's depth (a table template is ~0.9
+        // units across after FURNITURE_SCALE, so this reads as a clear
+        // shove without furniture leaving its own footprint). One shared
+        // gain across table/chair/fan so their RELATIVE responses -- the
+        // actual physics being demonstrated, a 0.8 Hz fan swings far more
+        // than an 8 Hz table -- survive intact.
+        //
+        // A fraction rather than an absolute scene-unit distance because
+        // since spec 8 the plate is no longer a fixed 2.0 units deep -- it
+        // tracks the Area slider (~1.2 units at 200 sq ft up to ~3.8 at
+        // 2000), so an absolute offset that reads as a clear shove on a
+        // large plate would walk furniture off the edge of a small one.
+        // 0.11 x 2.0 == the original 0.22, so the default building is
+        // unchanged.
         const FURNITURE_TARGET_SWAY_FRAC = 0.11;
         function furnitureTargetSway() {
             return FURNITURE_TARGET_SWAY_FRAC * currentFootprintD;
         }
-        // Hard ceiling on the rendered furniture offset, in scene units --
-        // furniture must not slide off its own floor plate (~2.0 units deep),
-        // and the open cutaway (spec 5 C3) removed the walls that used to
-        // hide an overshoot. Enforced by capping the GAIN in
+        // Hard ceiling on the rendered furniture offset, also as a fraction
+        // of plate depth (same reasoning as FURNITURE_TARGET_SWAY_FRAC
+        // above; 0.25 x 2.0 == the original 0.5, so the default building is
+        // unchanged). Furniture must not slide off its own floor plate, and
+        // the open cutaway (spec 5 C3) removed the walls that used to hide
+        // an overshoot. Enforced by capping the GAIN in
         // updateFurnitureOffsets(), not by clamping samples: it does bind at
         // extreme magnitudes (M=9.0 on KOCAELI_ATK wants 0.73 units), and a
         // per-sample clamp there would flatten every peak to this same value.
-        // Also a fraction of plate depth, same reasoning as
-        // FURNITURE_TARGET_SWAY_FRAC above. 0.25 x 2.0 == the original 0.5,
-        // so the default building is unchanged.
+        //
+        // Known limit, unchanged in kind by spec 8: at the clamp AND worst-
+        // case placement (outermost grid cell, max outward jitter, worst
+        // rotation) a table's corner can overhang the plate edge -- ~0.17
+        // units at the default footprint, which is exactly what the
+        // pre-spec-8 fixed 0.5 clamp also did. Scaling with depth keeps that
+        // proportional (~8% of plate depth at default, ~11% at 2000 sq ft)
+        // rather than fixing it; it only shows at near-M9 peaks. Tightening
+        // it means loosening FURNITURE_MARGIN/GRID placement, never shrinking
+        // FURNITURE_SCALE (see AGENTS.md).
         const FURNITURE_RENDER_CLAMP_FRAC = 0.25;
         function furnitureRenderClamp() {
             return FURNITURE_RENDER_CLAMP_FRAC * currentFootprintD;
