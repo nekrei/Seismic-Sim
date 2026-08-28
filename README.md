@@ -522,6 +522,19 @@ explains why it exists and what it contains.
      depending on which record was loaded. The physics is untouched: only
      the render gain changed, and the relative sway between a stiff table,
      a chair, and a low-frequency ceiling fan is preserved exactly.
+- Two more bugs, found after the three above: **the frequency-domain
+  drawer showed no visible change when the Magnitude slider moved.** The
+  Richter magnitude and geometric-spreading terms are both flat multipliers
+  across every frequency — a real amplitude change, but the drawer's dB
+  axis auto-scales to each panel's own peak with no level ever printed, so
+  a flat gain shifts the axis by exactly the same amount as the curve and
+  renders pixel-identical. Fixed by printing each panel's actual peak
+  level (e.g. "Input · 4.0 dB") into its label — confirmed a +1.49 M bump
+  now reads as the expected +29.8 dB. And **furniture could still pin at
+  its render clamp** the same way the building used to (bug 3 above) —
+  a follow-up code-review pass found the per-sample clamp on furniture's
+  own render code was never converted to a gain cap when the building's
+  was. Fixed the same way: cap the gain once per frame, not each sample.
 
 Keep this file — and the math PDF — updated as the project evolves. That's
 the whole point of having them.
