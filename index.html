@@ -58,6 +58,23 @@
             border-color: rgba(255,215,100,0.18);
             box-shadow: 0 0 24px rgba(255,215,100,0.06);
         }
+        #controls {
+            scrollbar-width: thin;
+            scrollbar-color: #ffd764 transparent;
+        }
+        #controls::-webkit-scrollbar { width: 8px; }
+        #controls::-webkit-scrollbar-track { background: transparent; }
+        #controls::-webkit-scrollbar-thumb {
+            background: #ffd764;
+            border-radius: 8px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        #controls::-webkit-scrollbar-thumb:hover {
+            background: #ffe28a;
+            box-shadow: 0 0 6px rgba(255,215,100,0.6);
+            background-clip: padding-box;
+        }
 
         /* Record block -- ungrouped, sits above the accordion */
         .record-block {
