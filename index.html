@@ -476,7 +476,7 @@
            dimming scrim, unlike .recompute-overlay, since this is a view
            the user compares against the live building, not a blocking
            wait state. */
-        #spectrumToggleBtn {
+        #analysisToggleBtn {
             position: fixed;
             top: 20px;
             right: 20px;
@@ -496,11 +496,11 @@
             justify-content: center;
             transition: transform 150ms ease-out, border-color 200ms ease, background 200ms ease, color 200ms ease, opacity 150ms ease-out;
         }
-        #spectrumToggleBtn svg { display: block; }
+        #analysisToggleBtn svg { display: block; }
         @media (hover: hover) and (pointer: fine) {
-            #spectrumToggleBtn:hover { border-color: rgba(255,215,100,0.4); background: rgba(20,20,40,0.92); }
+            #analysisToggleBtn:hover { border-color: rgba(255,215,100,0.4); background: rgba(20,20,40,0.92); }
         }
-        #spectrumToggleBtn:active { transform: scale(0.97); }
+        #analysisToggleBtn:active { transform: scale(0.97); }
         /* Once open, the drawer's own header (panel-header text +
            drawer-close-btn) occupies this same top-right corner -- the
            fixed toggle button would sit almost exactly on top of
@@ -508,13 +508,13 @@
            its corner peek out from underneath. Simplest fix: the toggle's
            only job once open is redundant with drawer-close-btn anyway, so
            hide it instead of trying to align two overlapping buttons. */
-        #spectrumToggleBtn.is-open { opacity: 0; pointer-events: none; }
+        #analysisToggleBtn.is-open { opacity: 0; pointer-events: none; }
 
         /* Epicenter cross-section map (spec 7, Part C) -- a small, always-
            visible viewport overlay (independent of the Earthquake
            Parameters section's collapsed state), positioned below
-           #spectrumToggleBtn so the two never overlap. z-index 9 (below
-           #spectrumDrawer's 10) so the drawer naturally covers it when
+           #analysisToggleBtn so the two never overlap. z-index 9 (below
+           #analysisDrawer's 10) so the drawer naturally covers it when
            open, matching the toggle button's own z-index relationship. */
         #epicenterMap {
             position: fixed;
@@ -640,7 +640,7 @@
             .epicenter-pulse-ring { animation-duration: 1ms; }
         }
 
-        #spectrumDrawer {
+        #analysisDrawer {
             position: fixed;
             top: 0;
             right: 0;
@@ -657,9 +657,9 @@
             transform: translateX(100%);
             transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
         }
-        #spectrumDrawer.is-open { transform: translateX(0); }
+        #analysisDrawer.is-open { transform: translateX(0); }
 
-        #spectrumDrawer .drawer-header {
+        #analysisDrawer .drawer-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -667,13 +667,13 @@
             border-bottom: 1px solid rgba(255,255,255,0.06);
             flex-shrink: 0;
         }
-        #spectrumDrawer .drawer-header .panel-header { letter-spacing: 0.02em; }
-        #spectrumDrawer .drawer-subtitle {
+        #analysisDrawer .drawer-header .panel-header { letter-spacing: 0.02em; }
+        #analysisDrawer .drawer-subtitle {
             font-size: 11px;
             color: rgba(255,255,255,0.4);
             margin-top: 2px;
         }
-        #spectrumDrawer .drawer-close-btn {
+        #analysisDrawer .drawer-close-btn {
             background: rgba(255,255,255,0.06);
             border: 1px solid rgba(255,255,255,0.1);
             color: rgba(255,255,255,0.7);
@@ -686,11 +686,11 @@
             transition: background 150ms ease, transform 150ms ease-out;
         }
         @media (hover: hover) and (pointer: fine) {
-            #spectrumDrawer .drawer-close-btn:hover { background: rgba(255,255,255,0.12); }
+            #analysisDrawer .drawer-close-btn:hover { background: rgba(255,255,255,0.12); }
         }
-        #spectrumDrawer .drawer-close-btn:active { transform: scale(0.94); }
+        #analysisDrawer .drawer-close-btn:active { transform: scale(0.94); }
 
-        #spectrumDrawer .drawer-body {
+        #analysisDrawer .drawer-body {
             padding: 14px 18px 20px;
             overflow-y: auto;
             display: flex;
@@ -699,12 +699,12 @@
             flex: 1;
             min-height: 0;
         }
-        #spectrumDrawer .ctrl-row { display: flex; align-items: center; gap: 12px; }
+        #analysisDrawer .ctrl-row { display: flex; align-items: center; gap: 12px; }
 
         /* Matches #controls select exactly -- this drawer's Floor <select>
            had no rule of its own before and fell back to the browser's
            native (white) dropdown chrome. */
-        #spectrumDrawer select {
+        #analysisDrawer select {
             background: rgba(11, 11, 26, 0.9);
             border: 1px solid rgba(255,255,255,0.1);
             border-radius: 6px;
@@ -716,8 +716,8 @@
             transition: border-color 0.2s;
             width: 100%;
         }
-        #spectrumDrawer select option { background: #1a1a2e; color: #fff; }
-        #spectrumDrawer select:hover, #spectrumDrawer select:focus { border-color: rgba(255,215,100,0.4); }
+        #analysisDrawer select option { background: #1a1a2e; color: #fff; }
+        #analysisDrawer select:hover, #analysisDrawer select:focus { border-color: rgba(255,215,100,0.4); }
 
         .axis-toggle { display: flex; gap: 6px; flex: 1; }
         .axis-toggle button {
@@ -745,7 +745,7 @@
             flex: 1;
             min-height: 340px;
         }
-        #spectrumCanvas {
+        #spectrumCanvas, #timeCanvas {
             width: 100%;
             height: 100%;
             display: block;
@@ -775,8 +775,78 @@
             display: none;
         }
 
+        /* Tab strip (spec 9). Deliberately the same segmented-control
+           language as .axis-toggle just below it -- two segmented controls
+           stacked 40px apart that looked different would read as unrelated
+           widgets. Slightly taller and full-weight type so it still reads as
+           the drawer's primary navigation, not a third parameter. */
+        .tab-strip {
+            display: flex;
+            gap: 6px;
+            padding: 4px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 10px;
+            flex-shrink: 0;
+        }
+        .tab-strip button {
+            flex: 1;
+            background: transparent;
+            border: 1px solid transparent;
+            color: rgba(255,255,255,0.55);
+            border-radius: 7px;
+            padding: 7px 0;
+            font-size: 12.5px;
+            font-weight: 600;
+            font-family: inherit;
+            letter-spacing: 0.02em;
+            cursor: pointer;
+            transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
+        }
+        @media (hover: hover) and (pointer: fine) {
+            .tab-strip button:not(.active):hover { color: rgba(255,255,255,0.8); background: rgba(255,255,255,0.05); }
+        }
+        .tab-strip button:active { transform: scale(0.97); }
+        .tab-strip button.active {
+            background: rgba(255,215,100,0.15);
+            border-color: rgba(255,215,100,0.35);
+            color: #ffd764;
+        }
+
+        /* Both panes stay mounted and absolutely stacked: a display:none pane
+           has no measurable size, and both canvases size themselves from
+           their wrapper's clientWidth/Height. Keeping them laid out means a
+           resize or a record load while the other tab is showing still
+           produces correct dimensions, and it is what makes the crossfade a
+           transition (interruptible, retargetable) rather than a keyframe. */
+        .tab-panes { position: relative; flex: 1; min-height: 340px; }
+        .tab-pane {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            /* Absolutely-positioned descendants still contribute to an
+               ancestor scroll container's scrollable overflow -- without this
+               the inactive pane gave .drawer-body a spurious vertical scroll
+               (measured in-browser: scrollHeight 927 vs clientHeight 717). */
+            overflow: hidden;
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(4px);
+            transition: opacity 160ms cubic-bezier(0.23, 1, 0.32, 1),
+                        transform 160ms cubic-bezier(0.23, 1, 0.32, 1),
+                        visibility 0s linear 160ms;
+        }
+        .tab-pane.is-active {
+            opacity: 1;
+            visibility: visible;
+            transform: none;
+            transition-delay: 0s;
+        }
+
         @media (max-width: 600px) {
-            #spectrumDrawer {
+            #analysisDrawer {
                 top: 0;
                 left: 0;
                 right: 0;
@@ -790,8 +860,9 @@
                 transform: translateY(-100%);
                 transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
             }
-            #spectrumDrawer.is-open { transform: translateY(0); }
+            #analysisDrawer.is-open { transform: translateY(0); }
             .spectrum-canvas-wrap { min-height: 240px; }
+            .tab-panes { min-height: 240px; }
 
             #epicenterMap { width: 128px; }
             .epicenter-map-frame { width: 90px; height: 90px; }
@@ -800,7 +871,9 @@
         }
 
         @media (prefers-reduced-motion: reduce) {
-            #spectrumDrawer, #spectrumToggleBtn, #spectrumCanvas { transition-duration: 1ms; }
+            #analysisDrawer, #analysisToggleBtn, #spectrumCanvas, #timeCanvas,
+            .tab-pane, .tab-strip button { transition-duration: 1ms; }
+            .tab-pane { transform: none; }
         }
     </style>
 </head>
@@ -1003,22 +1076,30 @@
         </div>
     </div>
 
-    <!-- Frequency-domain drawer (spec 6) -- co-equal view onto the same
-         record data, not a control. Toggled independently of #controls; the
-         3D scene keeps rendering behind it while open. See CSS block above
-         for the full rationale. -->
-    <button id="spectrumToggleBtn" aria-label="Toggle frequency-domain panel" aria-expanded="false" title="Frequency domain">
+    <!-- Signals drawer (spec 6, extended to two tabs by spec 9) -- co-equal
+         view onto the same record data, not a control. Toggled independently
+         of #controls; the 3D scene keeps rendering behind it while open. See
+         CSS block above for the full rationale. -->
+    <button id="analysisToggleBtn" aria-label="Toggle signals panel" aria-expanded="false" title="Signals">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-7 4 14 3-9 2 5h4"/></svg>
     </button>
-    <div id="spectrumDrawer" aria-hidden="true">
+    <div id="analysisDrawer" aria-hidden="true">
         <div class="drawer-header">
             <div>
-                <div class="panel-header">Frequency Domain</div>
-                <div class="drawer-subtitle">input × transfer = output</div>
+                <div class="panel-header">Signals</div>
+                <div class="drawer-subtitle" id="analysisSubtitle">ground motion in, floor motion out</div>
             </div>
-            <button class="drawer-close-btn" id="spectrumCloseBtn" aria-label="Close frequency-domain panel">✕</button>
+            <button class="drawer-close-btn" id="analysisCloseBtn" aria-label="Close signals panel">✕</button>
         </div>
         <div class="drawer-body">
+            <!-- Tab strip, then the SHARED Floor/Axis selectors: both tabs
+                 look at the same floor and the same axis, so the selectors
+                 live above the panes rather than being duplicated inside
+                 each one (spec 9 Part B4). -->
+            <div class="tab-strip" id="analysisTabStrip" role="tablist">
+                <button type="button" role="tab" data-tab="time" class="active" aria-selected="true">Time</button>
+                <button type="button" role="tab" data-tab="frequency" aria-selected="false">Frequency</button>
+            </div>
             <div class="ctrl-row">
                 <span class="panel-label">Floor</span>
                 <select id="spectrumFloorSelect" style="flex:1;"></select>
@@ -1030,12 +1111,25 @@
                     <button type="button" data-axis="Y">Y</button>
                 </div>
             </div>
-            <div class="spectrum-canvas-wrap">
-                <canvas id="spectrumCanvas"></canvas>
-            </div>
-            <div class="spectrum-sampling-note" id="spectrumSamplingNote"></div>
-            <div class="spectrum-disabled-note" id="spectrumDisabledNote">
-                Frequency-domain data isn't available for this record/axis yet.
+            <div class="tab-panes">
+                <div class="tab-pane is-active" id="timePane" role="tabpanel">
+                    <div class="spectrum-canvas-wrap">
+                        <canvas id="timeCanvas"></canvas>
+                    </div>
+                    <div class="spectrum-sampling-note" id="timeSamplingNote"></div>
+                    <div class="spectrum-disabled-note" id="timeDisabledNote">
+                        Ground acceleration isn't available for this record yet.
+                    </div>
+                </div>
+                <div class="tab-pane" id="frequencyPane" role="tabpanel">
+                    <div class="spectrum-canvas-wrap">
+                        <canvas id="spectrumCanvas"></canvas>
+                    </div>
+                    <div class="spectrum-sampling-note" id="spectrumSamplingNote"></div>
+                    <div class="spectrum-disabled-note" id="spectrumDisabledNote">
+                        Frequency-domain data isn't available for this record/axis yet.
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -1103,12 +1197,18 @@
         const stripRecordName = document.getElementById('stripRecordName');
         const controlsPanel = document.getElementById('controls');
         // spec 6 (frequency-domain drawer)
-        const spectrumToggleBtn = document.getElementById('spectrumToggleBtn');
-        const spectrumDrawer = document.getElementById('spectrumDrawer');
-        const spectrumCloseBtn = document.getElementById('spectrumCloseBtn');
+        const analysisToggleBtn = document.getElementById('analysisToggleBtn');
+        const analysisDrawer = document.getElementById('analysisDrawer');
+        const analysisCloseBtn = document.getElementById('analysisCloseBtn');
         const spectrumFloorSelect = document.getElementById('spectrumFloorSelect');
         const spectrumAxisToggle = document.getElementById('spectrumAxisToggle');
         const spectrumCanvas = document.getElementById('spectrumCanvas');
+        const analysisTabStrip = document.getElementById('analysisTabStrip');
+        const timePane = document.getElementById('timePane');
+        const frequencyPane = document.getElementById('frequencyPane');
+        const timeCanvas = document.getElementById('timeCanvas');
+        const timeSamplingNote = document.getElementById('timeSamplingNote');
+        const timeDisabledNote = document.getElementById('timeDisabledNote');
         const spectrumDisabledNote = document.getElementById('spectrumDisabledNote');
         const spectrumSamplingNote = document.getElementById('spectrumSamplingNote');
 
@@ -1410,9 +1510,34 @@
         // recompute for that same record, never refetched on a drag.
         let groundSpectrum = null;
         let groundSpectrumRecord = null; // which record groundSpectrum belongs to, for the cache check above
+        // groundAccelData: { X: number[], Y: number[]|null } -- the ground
+        // ACCELERATION driving the animation, for spec 9's time-domain panel.
+        // Both load paths converge here, but they are NOT interchangeable:
+        // the static path fetches out/<record>/ground_accel.json, while the
+        // live path must use /compute's appended tail block, because spec 7's
+        // apply_synthetic_earthquake_scaling() reshapes the ground motion the
+        // moment Magnitude/Distance/Depth leaves default -- at which point the
+        // static file no longer describes the motion on screen. Never derive
+        // this by differentiating ground displacement in the browser.
+        let groundAccelData = null;
+        // Static-path fetch cache only (parameter-independent, like
+        // groundSpectrum): the raw JSON for one record, reused across every
+        // same-record live recompute rather than refetched on a drag.
+        let groundAccelFile = null;
+        let groundAccelFileRecord = null;
         let spectrumFloorIndex = null;   // null until first populateSpectrumFloorSelect() -- independent of View section's activeFloorIndex on purpose (see Part B4)
         let spectrumAxis = 'X';
-        let spectrumDrawerOpen = false;
+        let analysisDrawerOpen = false;
+        // Which drawer tab is showing (spec 9). Time is the default: it is
+        // the view that corresponds directly to the animation playing behind
+        // the drawer. Floor/axis are SHARED across both tabs, so this is the
+        // only per-tab state there is.
+        let analysisTab = 'time';
+        // Reduced per-pixel-column envelopes for the Time tab (spec 9), plus
+        // each signal's whole-record peak. Rebuilt on data load, floor/axis
+        // change and resize -- NEVER per frame: the reduction is O(npts),
+        // the per-frame draw that consumes it is O(canvas width).
+        let timeEnvelopes = null;
 
         // --- Amplify: auto-computed sway scaling (spec 7 removed the manual slider) ---
         // Real sway magnitude varies ~500x across real earthquake records
@@ -1673,6 +1798,68 @@
             return { fHz, mag: magBinned };
         }
         // ---8<--- SPECTRUM-HELPERS-END
+
+        // ---8<--- TIMEDOMAIN-HELPERS-BEGIN (extracted verbatim by claude_scripts/check_time_domain.mjs)
+        //
+        // Spec 9. A DELIBERATELY SEPARATE sentinel block from the SPECTRUM
+        // one above -- fft_check.mjs extracts that block by its own
+        // sentinels and would break *silently* (find nothing, still exit 0)
+        // if it were widened or reflowed to hold these too.
+        //
+        // Why an envelope at all: a record is ~40k samples and the panel is
+        // ~400 CSS pixels wide, redrawn every animation frame next to a live
+        // three.js scene. Reducing each signal ONCE per data load to a
+        // per-pixel-column min/max pair makes the per-frame cost O(canvas
+        // width) and record-length independent. It is not a lossy
+        // approximation for this purpose: a waveform plot at width W can
+        // only ever show each column's extremes, and this stores exactly
+        // those -- a selection, not an interpolation (verification check 1
+        // asserts deviation is exactly 0).
+
+        // Column c covers samples [floor(c*n/nCols), floor((c+1)*n/nCols)).
+        // That is a partition of [0, n): consecutive columns share a
+        // boundary exactly, and the last column ends at n, so the final
+        // sample is always included. nCols is clamped to <= n so no column
+        // is ever empty (an empty column would leave Infinity/-Infinity in
+        // the arrays and blow up the autoscale).
+        function buildEnvelope(signal, nCols) {
+            const n = signal.length;
+            const cols = Math.max(1, Math.min(Math.floor(nCols) || 1, n));
+            // Float64, not Float32: the envelope must be an exact SELECTION
+            // of real samples (verification check 1 asserts deviation 0).
+            // Float32Array would round every stored extreme, which also
+            // lets the true final sample fall marginally outside the last
+            // column's stored range. 400 columns x 2 arrays is ~6 KB.
+            const mn = new Float64Array(cols);
+            const mx = new Float64Array(cols);
+            for (let c = 0; c < cols; c++) {
+                const lo = Math.floor(c * n / cols);
+                const hi = Math.floor((c + 1) * n / cols);
+                let vmin = Infinity, vmax = -Infinity;
+                for (let i = lo; i < hi; i++) {
+                    const v = signal[i];
+                    if (v < vmin) vmin = v;
+                    if (v > vmax) vmax = v;
+                }
+                mn[c] = vmin;
+                mx[c] = vmax;
+            }
+            return { min: mn, max: mx, nCols: cols };
+        }
+
+        // Which column the pen has reached. Clamped at both ends: overshoot
+        // (animTime slightly past totalDuration, or a zero/NaN duration)
+        // must land on the last column rather than index past the envelope,
+        // and t = totalDuration must reach nCols-1 rather than leaving the
+        // final column permanently undrawn.
+        function playheadColumn(animTime, totalDuration, nCols) {
+            const cols = Math.max(1, Math.floor(nCols) || 1);
+            if (!(totalDuration > 0)) return cols - 1;
+            const frac = animTime / totalDuration;
+            if (!(frac > 0)) return 0;
+            return Math.min(cols - 1, Math.floor(frac * cols));
+        }
+        // ---8<--- TIMEDOMAIN-HELPERS-END
 
         // --- Deterministic per-floor furniture placement (spec B4) -- seeded
         // from (record name, floor index) so out/ regeneration never causes
@@ -2264,6 +2451,32 @@
             }
         }
 
+        // out/<record>/ground_accel.json (spec 9) -- the recorded ground
+        // acceleration, for the time-domain panel's top trace. Cached per
+        // record for the same reason as loadGroundSpectrum() above, and
+        // degrades the same way: a missing/malformed file just leaves the
+        // ground trace empty rather than failing the load.
+        async function loadGroundAccel(folder) {
+            if (groundAccelFileRecord === folder && groundAccelFile) return; // already cached for this record
+            groundAccelFile = null;
+            groundAccelFileRecord = folder;
+            try {
+                const res = await fetch(`out/${folder}/ground_accel.json`);
+                if (!res.ok) {
+                    console.warn(`⚠️ ground_accel.json not found for ${folder} (${res.status}) -- time-domain ground trace disabled.`);
+                    return;
+                }
+                const data = await res.json();
+                if (!Array.isArray(data.X)) {
+                    console.warn(`⚠️ ground_accel.json malformed for ${folder} -- time-domain ground trace disabled.`);
+                    return;
+                }
+                groundAccelFile = { X: data.X, Y: Array.isArray(data.Y) ? data.Y : null };
+            } catch (err) {
+                console.warn('⚠️ Failed to load ground_accel.json -- time-domain ground trace disabled.', err);
+            }
+        }
+
         // ==================================================================
         // Frequency-domain drawer maths + rendering (spec 6, Part A2/A4/B).
         // Recomputed on data load or floor/axis change ONLY -- never inside
@@ -2597,6 +2810,188 @@
             });
         }
 
+        // ==================================================================
+        // Time-domain panel (spec 9). Two stacked traces on one shared time
+        // axis: the ground ACCELERATION actually driving the animation on
+        // top, and the selected floor's RELATIVE displacement below. The
+        // payoff is the contrast -- a broadband input that arrives and stops,
+        // over a narrowband response that keeps ringing after it does.
+        // ==================================================================
+
+        // Rebuild both envelopes for the current record/floor/axis. Two
+        // quantities that look interchangeable and are not:
+        //   * the ground trace is ACCELERATION, from groundAccelData -- not
+        //     groundXData/groundYData, which are ground *displacement* (a
+        //     slow drift that does not look like an earthquake), and never
+        //     re-derived by differentiating that displacement in the browser.
+        //   * the floor trace is RELATIVE displacement (floor minus ground).
+        //     floorXData/floorYData are ABSOLUTE; plotting them directly
+        //     would show mostly the ground's own motion and look entirely
+        //     plausible. Same trap as computeOutputSpectrum()'s.
+        function rebuildTimeEnvelopes() {
+            timeEnvelopes = null;
+            if (!timeCanvas || !groundAccelData || spectrumFloorIndex == null || !timeData.length) return;
+            const axis = spectrumAxis;
+            const gAcc = axis === 'Y' ? groundAccelData.Y : groundAccelData.X;
+            const floorArr = axis === 'Y' ? floorYData[spectrumFloorIndex] : floorXData[spectrumFloorIndex];
+            const groundArr = axis === 'Y' ? groundYData : groundXData;
+            if (!gAcc || !gAcc.length || !floorArr || !groundArr || !groundArr.length) return;
+
+            const rel = new Float64Array(floorArr.length);
+            for (let i = 0; i < floorArr.length; i++) rel[i] = floorArr[i] - groundArr[i];
+
+            // Column count IS the canvas's CSS width -- one column per pixel,
+            // which is the finest detail the panel can possibly show. Clamped
+            // to the SHORTER of the two signals so both envelopes come back
+            // with the identical nCols: one playhead column index indexes into
+            // both, and the two panels share one time axis. The two lengths
+            // agree for every record in this dataset (compute_response() sets
+            // npts = len(acceleration)), so the warn below firing at all would
+            // mean the record's own files disagree.
+            const wrap = timeCanvas.parentElement;
+            if (gAcc.length !== rel.length) {
+                console.warn(`⚠️ ground accel (${gAcc.length}) and floor response (${rel.length}) lengths differ -- time panel axes are approximate.`);
+            }
+            const nCols = Math.max(1, Math.min(
+                Math.round(wrap.clientWidth || 300), gAcc.length, rel.length));
+
+            let gPeak = 0;
+            for (let i = 0; i < gAcc.length; i++) { const v = Math.abs(gAcc[i]); if (v > gPeak) gPeak = v; }
+            let rPeak = 0;
+            for (let i = 0; i < rel.length; i++) { const v = Math.abs(rel[i]); if (v > rPeak) rPeak = v; }
+
+            timeEnvelopes = {
+                axis, floorIndex: spectrumFloorIndex,
+                ground: buildEnvelope(gAcc, nCols), groundPeak: gPeak,
+                floor: buildEnvelope(rel, nCols), floorPeak: rPeak,
+            };
+        }
+
+        // One subplot. The FULL envelope is drawn first as a faint ghost, then
+        // columns 0..playCol are repainted in full colour -- so the axes never
+        // rescale as the trace fills in (they are sized from the whole record,
+        // not the revealed portion), and dragging the seek slider BACKWARDS
+        // shrinks the coloured region for free, since every frame is a fresh
+        // full redraw rather than incremental paint onto a persistent canvas.
+        function drawTimeSubplot(ctx, x, y, w, h, label, env, peak, color, playCol) {
+            ctx.fillStyle = 'rgba(255,255,255,0.02)';
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+            // Symmetric about zero, scaled to this signal's own whole-record
+            // peak. That per-panel autoscale is what makes both traces
+            // readable despite a ~10^3 unit gap between m/s^2 and m -- and is
+            // exactly why the peak has to be PRINTED: a frequency-flat gain
+            // (Richter magnitude, geometric spreading) moves axis and curve by
+            // the identical amount and would otherwise render pixel-identical.
+            // Spec 7 shipped that bug on the frequency drawer; see its comment
+            // in drawSpectrumSubplot().
+            const amp = peak > 0 ? peak : 1;
+            const midY = y + h / 2;
+            const valToY = (v) => midY - (v / amp) * (h / 2 - 2);
+
+            ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+            ctx.beginPath();
+            ctx.moveTo(x, midY);
+            ctx.lineTo(x + w, midY);
+            ctx.stroke();
+
+            const colW = w / env.nCols;
+            const paint = (from, to, alpha, stroke) => {
+                if (to < from) return;
+                ctx.globalAlpha = alpha;
+                ctx.strokeStyle = stroke;
+                ctx.lineWidth = Math.max(1, colW);
+                ctx.beginPath();
+                for (let c = from; c <= to; c++) {
+                    const px = x + (c + 0.5) * colW;
+                    ctx.moveTo(px, valToY(env.max[c]));
+                    ctx.lineTo(px, valToY(env.min[c]));
+                }
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+            };
+            paint(0, env.nCols - 1, 0.18, color);   // ghost: the part not played yet
+            paint(0, playCol, 1, color);            // played so far
+
+            // The pen itself.
+            const penX = x + (playCol + 0.5) * colW;
+            ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(penX, y + 1);
+            ctx.lineTo(penX, y + h - 1);
+            ctx.stroke();
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(penX, valToY((env.max[playCol] + env.min[playCol]) / 2), 2.2, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.textAlign = 'left';
+            ctx.font = '10px ui-monospace, "SF Mono", "Cascadia Code", monospace';
+            const labelW = ctx.measureText(label).width;
+            ctx.fillStyle = 'rgba(11,11,26,0.82)';
+            ctx.fillRect(x + 1, y + 1, labelW + 8, 15);
+            ctx.fillStyle = 'rgba(255,255,255,0.72)';
+            ctx.fillText(label, x + 5, y + 12);
+        }
+
+        // Called every animation frame while the drawer is open AND the Time
+        // tab is active -- O(canvas width), record-length independent.
+        function drawTimePanels() {
+            if (!timeCanvas) return;
+            const disabled = !timeEnvelopes;
+            timeDisabledNote.style.display = disabled ? 'block' : 'none';
+            timeCanvas.style.display = disabled ? 'none' : 'block';
+            timeSamplingNote.textContent = disabled ? ''
+                : `${totalDuration.toFixed(1)} s record · ${timeEnvelopes.ground.nCols} columns`;
+            if (disabled) {
+                timeDisabledNote.textContent = !groundAccelData
+                    ? "Ground acceleration isn't available for this record yet."
+                    : `No ${spectrumAxis} data for this record.`;
+                return;
+            }
+
+            const wrap = timeCanvas.parentElement;
+            const cssW = wrap.clientWidth || 300, cssH = wrap.clientHeight || 340;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const pxW = Math.round(cssW * dpr), pxH = Math.round(cssH * dpr);
+            if (timeCanvas.width !== pxW || timeCanvas.height !== pxH) {
+                timeCanvas.width = pxW;
+                timeCanvas.height = pxH;
+            }
+            const ctx = timeCanvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, cssW, cssH);
+
+            const topM = 8, bottomM = 16, sideM = 4, gap = 26;
+            const panelH = (cssH - topM - bottomM - gap) / 2;
+            const plotX = sideM, plotW = cssW - sideM * 2;
+            const env = timeEnvelopes;
+            const playCol = playheadColumn(animTime, totalDuration, env.ground.nCols);
+            const floorLabel = `floor ${env.floorIndex + 1}`;
+
+            drawTimeSubplot(ctx, plotX, topM, plotW, panelH,
+                `Ground a_g(t) · ${env.axis} · peak ${env.groundPeak.toExponential(2)} m/s²`,
+                env.ground, env.groundPeak, '#7fd4ff', playCol);
+
+            drawTimeSubplot(ctx, plotX, topM + panelH + gap, plotW, panelH,
+                `Relative u(t) · ${floorLabel} · peak ${env.floorPeak.toExponential(2)} m`,
+                env.floor, env.floorPeak, '#7fffb0', playCol);
+
+            // Shared time axis along the bottom.
+            ctx.font = '9px ui-monospace, "SF Mono", "Cascadia Code", monospace';
+            ctx.fillStyle = 'rgba(255,224,178,0.4)';
+            ctx.textAlign = 'left';
+            ctx.fillText('0 s', plotX, cssH - 4);
+            ctx.textAlign = 'right';
+            ctx.fillText(`${totalDuration.toFixed(0)} s`, plotX + plotW, cssH - 4);
+            ctx.textAlign = 'center';
+            ctx.fillText(`t = ${animTime.toFixed(2)} s`, plotX + plotW / 2, cssH - 4);
+        }
+
         // --- Load data for a folder ---
         async function loadFolderData(folder) {
             if (!folder) return;
@@ -2694,6 +3089,10 @@
                 // (which also runs on every live-slider recompute for the
                 // SAME record).
                 await loadGroundSpectrum(folder);
+                // Same once-per-record reasoning (spec 9). Called here and
+                // NOT from applyLoadedData(), which also runs on every live
+                // recompute for the same record.
+                await loadGroundAccel(folder);
 
                 applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY, {
                     frame,
@@ -2704,6 +3103,7 @@
                     recordName: folder,
                     modal: normalizeModal(meta),
                     referenceMagnitude: meta.reference_magnitude,
+                    groundAccel: groundAccelFile,
                 });
                 progressEl.style.display = 'none';
                 console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
@@ -2942,6 +3342,7 @@
             furnitureData = furniture;
             furnitureRateHz = furnitureRate || 0;
             modalData = extra.modal ?? null; // spec 6 -- null-safe; the drawer degrades to a disabled note if this or groundSpectrum is missing
+            groundAccelData = extra.groundAccel ?? null; // spec 9 -- null-safe the same way; whichever path loaded it, the time panel reads only this
 
             periodReadout.textContent = (periodX != null && periodY != null)
                 ? `${periodX.toFixed(2)}s / ${periodY.toFixed(2)}s`
@@ -3078,6 +3479,11 @@
             // when the drawer is closed; see redrawSpectrumPanels()'s own
             // comment.
             redrawSpectrumPanels();
+            // spec 9 -- same reasoning, for the Time tab's envelopes. animTime
+            // is already reset to 0 above, so the pen returns to the left edge
+            // on a record switch and on every live-slider recompute with no
+            // reset special-casing of its own.
+            rebuildTimeEnvelopes();
         }
 
         // --- Live recompute: POST current building-parameter sliders to
@@ -3190,6 +3596,16 @@
                     furnitureRate = header.furniture.decimated_rate_hz || 0;
                 }
 
+                // Ground acceleration, appended at the payload TAIL after the
+                // furniture blocks (spec 9). Gated on the header flag so a
+                // stale seismic-sim-backend that predates this spec degrades
+                // to "no ground trace" instead of reading past the buffer.
+                let groundAccel = null;
+                if (header.has_ground_accel) {
+                    const gaX = Array.from(takeFloats(npts));
+                    groundAccel = { X: gaX, Y: header.has_y ? Array.from(takeFloats(npts)) : null };
+                }
+
                 applyLoadedData(header.num_stories, header.story_height, time, groundX, groundY, floorX, floorY, {
                     frame: normalizeFrame(header),
                     furniture,
@@ -3199,6 +3615,7 @@
                     recordName: folder,
                     modal: normalizeModal(header),
                     referenceMagnitude: header.reference_magnitude,
+                    groundAccel,
                 }, autoScaleAmplify);
                 recomputeOverlay.classList.remove('is-active');
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
@@ -3387,6 +3804,13 @@
             const intensity = Math.max(0, Math.min(1, rawGroundMag / peakGroundDisp));
             intensityFill.style.width = (intensity * 100).toFixed(1) + '%';
 
+            // spec 9 -- the only per-frame canvas work in the app, and it is
+            // gated on the drawer being open AND the Time tab being the active
+            // one, so a closed drawer costs literally nothing. The pen keeps
+            // moving under prefers-reduced-motion: it is playback state, not
+            // decoration.
+            if (analysisDrawerOpen && analysisTab === 'time') drawTimePanels();
+
             controls.update();
             updateFogRange(); // resolved camera position for this frame, before the (reverted-after-render) shake offset below -- see updateFogRange()'s comment above animate()
 
@@ -3520,29 +3944,63 @@
         });
 
         // --- Frequency-domain drawer wiring (spec 6, Part B4/B5/B6) ---
-        function setSpectrumDrawerOpen(open) {
-            spectrumDrawerOpen = open;
-            spectrumDrawer.classList.toggle('is-open', open);
-            spectrumToggleBtn.classList.toggle('is-open', open);
-            spectrumDrawer.setAttribute('aria-hidden', String(!open));
-            spectrumToggleBtn.setAttribute('aria-expanded', String(open));
-            if (open) redrawSpectrumPanels(); // canvas may have been resized/hidden while closed
+        function setAnalysisDrawerOpen(open) {
+            analysisDrawerOpen = open;
+            analysisDrawer.classList.toggle('is-open', open);
+            analysisToggleBtn.classList.toggle('is-open', open);
+            analysisDrawer.setAttribute('aria-hidden', String(!open));
+            analysisToggleBtn.setAttribute('aria-expanded', String(open));
+            if (open) redrawAnalysisTab(); // canvas may have been resized/hidden while closed
         }
-        spectrumToggleBtn.addEventListener('click', () => setSpectrumDrawerOpen(!spectrumDrawerOpen));
-        spectrumCloseBtn.addEventListener('click', () => setSpectrumDrawerOpen(false));
+        analysisToggleBtn.addEventListener('click', () => setAnalysisDrawerOpen(!analysisDrawerOpen));
+        analysisCloseBtn.addEventListener('click', () => setAnalysisDrawerOpen(false));
+        // The tab strip. Switching tabs does NOT reset the floor/axis
+        // selection or the playhead -- it is a change of view onto the same
+        // state, so both tabs must agree on what they are showing.
+        analysisTabStrip.querySelectorAll('button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (btn.dataset.tab === analysisTab) return;
+                analysisTab = btn.dataset.tab;
+                analysisTabStrip.querySelectorAll('button').forEach(b => {
+                    const on = b === btn;
+                    b.classList.toggle('active', on);
+                    b.setAttribute('aria-selected', String(on));
+                });
+                timePane.classList.toggle('is-active', analysisTab === 'time');
+                frequencyPane.classList.toggle('is-active', analysisTab === 'frequency');
+                redrawAnalysisTab();
+            });
+        });
+
+        // One entry point for "redraw whichever tab is showing" -- the drawer
+        // toggle, both shared selectors, the tab strip and the resize
+        // listener all go through here so none of them can drift into
+        // redrawing only the frequency panels.
+        function redrawAnalysisTab(animated = false) {
+            if (analysisTab === 'frequency') {
+                if (animated) redrawSpectrumPanelsAnimated(); else redrawSpectrumPanels();
+            } else {
+                rebuildTimeEnvelopes();
+                drawTimePanels();
+            }
+        }
+
         spectrumFloorSelect.addEventListener('change', (e) => {
             spectrumFloorIndex = parseInt(e.target.value, 10);
-            redrawSpectrumPanelsAnimated();
+            redrawAnalysisTab(true);
         });
         spectrumAxisToggle.querySelectorAll('button').forEach(btn => {
             btn.addEventListener('click', () => {
                 if (btn.classList.contains('active')) return;
                 spectrumAxis = btn.dataset.axis;
                 spectrumAxisToggle.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
-                redrawSpectrumPanelsAnimated();
+                redrawAnalysisTab(true);
             });
         });
-        window.addEventListener('resize', () => { if (spectrumDrawerOpen) redrawSpectrumPanels(); });
+        // Resize matters more for the Time tab than the Frequency one: the
+        // envelope's column count IS the canvas's CSS width, so a resize has
+        // to rebuild it, not just redraw.
+        window.addEventListener('resize', () => { if (analysisDrawerOpen) redrawAnalysisTab(); });
 
         // Mobile bottom-sheet expand/collapse (spec 4, Part E) -- tapping
         // the collapsed strip toggles the sheet open/closed; tapping the

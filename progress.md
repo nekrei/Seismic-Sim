@@ -1051,3 +1051,249 @@ Reviewed the full branch diff (`main..HEAD`, commits `8cfec23` through
 
 Stage: verify complete. Next: present the finish menu (merge locally /
 keep as-is).
+
+## Spec 9 — Task 1: `/compute` carries scaled ground acceleration
+
+- `server.py`: added `"has_ground_accel": true` to the JSON header and
+  appended `accel_x` (and `accel_y` when `has_y`) as float32 at the payload
+  **tail**, after the furniture blocks. Format stays append-only; a stale
+  `seismic-sim-backend` that doesn't send the block degrades via the flag
+  instead of throwing.
+- Ruling: block carries the **scaled** acceleration (post
+  `apply_synthetic_earthquake_scaling`), i.e. the exact array the solver
+  ran on — never the unscaled `out/` file, never re-derived from ground
+  displacement.
+- New check `claude_scripts/check_ground_accel_block.py` (verification
+  check 3, Flask `test_client` — no live server needed). Confirmed FAILING
+  before the change (`buffer is smaller than requested size`), passing
+  after. 3b uses M=9.0 because KOCAELI_ATK's `reference_magnitude` is 7.51,
+  so the spec's suggested 7.5 would have been a ~1.0x no-op.
+- Output: all 7 sub-checks PASS; identity at defaults to 3e-8, offline
+  scaled reference match to 9.5e-7, peak ratio 30.9x vs unscaled at M=9.0.
+  The parser also asserts zero unaccounted trailing bytes.
+
+## Spec 9 — Task 2: ground acceleration on the static path
+
+- `index.html`: new module state `groundAccelData` (what the panel reads),
+  plus `groundAccelFile`/`groundAccelFileRecord` as the static-path
+  per-record fetch cache — mirroring `groundSpectrum`'s pattern exactly.
+- `loadGroundAccel(folder)` added next to `loadGroundSpectrum()`; same
+  warn-and-degrade on 404/malformed. Called from `loadFolderData()` beside
+  `await loadGroundSpectrum(folder)`, **not** from `applyLoadedData()`.
+- `applyLoadedData()` sets `groundAccelData = extra.groundAccel ?? null`.
+  Static path passes the fetched JSON; `liveRecompute()` parses the two
+  new tail blocks **gated on `header.has_ground_accel`** and passes those.
+- Ruling: the live path must NOT fall back to the static file. Spec 7's
+  scaling reshapes the ground motion, so `out/`'s copy stops describing the
+  animated motion the moment any Earthquake Parameter leaves default.
+- New `claude_scripts/check_index_syntax.mjs` (node --check over the
+  extracted inline module script — no build step in this project means a
+  typo there is otherwise only caught by loading the page). Output:
+  `parses OK (144193 chars)`.
+
+## Spec 9 — Task 3: envelope + playhead helpers
+
+- `index.html`: new `// ---8<--- TIMEDOMAIN-HELPERS-BEGIN/END` sentinel
+  block, placed immediately after (and deliberately **separate from**) the
+  SPECTRUM one, holding two pure functions:
+  - `buildEnvelope(signal, nCols)` — column `c` covers samples
+    `[floor(c*n/nCols), floor((c+1)*n/nCols))`, `nCols` clamped to `[1, n]`.
+  - `playheadColumn(animTime, totalDuration, nCols)` — clamped at both ends.
+- `claude_scripts/check_time_domain.mjs` written first (extracts the block
+  at runtime, never a copy), confirmed failing with
+  "Could not find TIMEDOMAIN-HELPERS sentinel block".
+- **Ruling / fix during the pass:** the envelope was first written with
+  `Float32Array`, which failed check 1 (deviation 5.96e-8, and the true
+  final sample falling marginally outside the last column's rounded range).
+  The envelope must be an exact *selection* of real samples, not a rounded
+  one, so both arrays are `Float64Array`. Cost is ~6 KB at 400 columns.
+- Output: **ALL CHECKS PASSED**, 7176 comparisons — 6 signal cases
+  (synthetic n=40000/1009/7/1, divisor and non-divisor column counts, plus
+  the real KOCAELI_ATK trace) x 4 assertions, and a 1000-step playhead
+  sweep at 4 column/duration combinations plus both overshoot clamps.
+- `fft_check.mjs` re-run after inserting the new block: still extracts the
+  SPECTRUM sentinels and still compares (see Task 6 for the full re-run).
+
+## Spec 9 — Tasks 4 + 5: drawer restructure and the time panels
+
+Committed together: Task 4's tab wiring calls `rebuildTimeEnvelopes()`/
+`drawTimePanels()`, which Task 5 defines, so splitting them would have left
+one commit referencing undefined functions.
+
+**Task 4 — rename + tabs + shared selectors**
+- Container renamed (ids and JS identifiers): `spectrumDrawer` →
+  `analysisDrawer`, `spectrumToggleBtn` → `analysisToggleBtn`,
+  `spectrumCloseBtn` → `analysisCloseBtn`, `spectrumDrawerOpen` →
+  `analysisDrawerOpen`, `setSpectrumDrawerOpen` → `setAnalysisDrawerOpen`.
+  Header "Frequency Domain" → "Signals". `#spectrumCanvas`,
+  `#spectrumFloorSelect`, `#spectrumAxisToggle` and the SPECTRUM sentinel
+  block deliberately keep their names.
+- Structure: header → `.tab-strip` (Time | Frequency) → shared Floor/Axis
+  rows → `.tab-panes` with `#timePane` (default active) and
+  `#frequencyPane`.
+- Design (per spec B5, `emil-design-eng` + `animate`): the tab strip reuses
+  `.axis-toggle`'s segmented-control language so two segmented controls 40px
+  apart don't read as unrelated widgets; `:active` `scale(0.97)`; the pane
+  crossfade is a 160ms `cubic-bezier(0.23,1,0.32,1)` opacity+4px translateY
+  **transition** (interruptible/retargetable) not a keyframe, with
+  `visibility` delayed out so the outgoing pane isn't clickable mid-fade.
+  New ids added to the `prefers-reduced-motion` block.
+- Ruling: both panes stay mounted and absolutely stacked rather than
+  `display:none` — a `display:none` pane has no measurable size and both
+  canvases size themselves from `clientWidth/Height`, so hiding one would
+  produce a zero-sized canvas on a resize/load while the other tab shows.
+- One `redrawAnalysisTab(animated)` is the single entry point for the drawer
+  toggle, both shared selectors, the tab strip and the resize listener, so
+  none of them can drift into redrawing only the frequency panels.
+
+**Task 5 — the time panels**
+- `rebuildTimeEnvelopes()` (data load, floor/axis change, resize) builds the
+  ground-**acceleration** envelope from `groundAccelData` and the selected
+  floor's **relative** displacement envelope (`floorArr[i] - groundArr[i]`),
+  plus each one's whole-record peak. Column count = the canvas's CSS width.
+- `drawTimeSubplot()` paints the full envelope as an 18%-alpha ghost, then
+  repaints columns `0…playCol` at full opacity, plus a pen line and dot.
+  Stateless full redraw per frame onto a cleared canvas — which is what makes
+  a backwards seek-slider drag shrink the trace for free.
+- Axes are sized from the **whole** record (`±peak`, symmetric about zero),
+  never from the revealed portion, and **each panel prints its own peak**
+  (`m/s²` / `m`). That printed number is not cosmetic: Richter magnitude and
+  geometric spreading are frequency-flat gains, so a self-normalising axis
+  with no printed level renders pixel-identically — exactly the defect spec 7
+  shipped on the frequency drawer.
+- `drawTimePanels()` is called from `animate()` gated on **drawer open AND
+  Time tab active**, so a closed drawer does zero per-frame canvas work. The
+  pen keeps moving under `prefers-reduced-motion` (playback state, not
+  decoration).
+- Ruling: `nCols` is clamped to the shorter of the two signals so both
+  envelopes share one column count and one playhead index; a length mismatch
+  also logs a warning, since `compute_response()` sets `npts =
+  len(acceleration)` and the two should never disagree.
+
+**Verification run at this point**
+- `node claude_scripts/check_index_syntax.mjs` → `parses OK (160772 chars)`
+- `node claude_scripts/check_time_domain.mjs` → ALL CHECKS PASSED, 7176
+  comparisons (re-run after the restructure).
+- `node claude_scripts/fft_check.mjs` → still finds the SPECTRUM sentinels
+  and still emits both comparison cases (N=4096, N=3000).
+
+## Spec 9 — Task 6: regression + real-browser verification
+
+**Offline checks**
+- Check 3 (`check_ground_accel_block.py`): 7/7 PASS (re-run).
+- Check 4 (`out/` no-op): full pipeline re-run — `mdof_response.py` **and**
+  `plot_response.py` over all 10 records. `git status --porcelain out/` and
+  `git diff --stat out/` both **empty**. Zero tracked-file change.
+- Check 5 (`fft_check.mjs` + `fft_check_scipy.py`): still extracts the
+  SPECTRUM sentinels through the rename/restructure, and **did compare** —
+  N=3000 rel_err 3.383e-14, N=4096 rel_err 3.397e-14, binned spectra
+  2.68e-15 / 2.95e-15. ALL CHECKS PASS.
+- Check 6 (`verify_spectrum.py`): OVERALL PASS, including the anisotropic
+  Column-X/Column-Y case.
+- Checks 1+2 (`check_time_domain.mjs`): ALL PASS, 7176 comparisons.
+
+**Real-browser pass — substitution noted.** Claude in Chrome was **not
+reachable** this session ("Claude in Chrome is not connected"), so the pass
+ran in the built-in Browser pane instead, against `server.py` started from
+inside this worktree at `http://127.0.0.1:8000/`. One upside: the Browser
+pane *can* resize the viewport, so check 11 is a **real reflow**, not the
+CSS-injection partial spec 6 had to settle for.
+
+All 12 checks of verification §7:
+1. **Lockstep** — PASS, measured numerically rather than eyeballed. Diffing
+   the canvas between `t=120s` and `t=124s` localised the change to columns
+   [341, 357] against predicted pen positions 343.2 → 354.5 (±3px = the pen
+   dot's radius).
+2. **Ringdown contrast** — PASS on KOCAELI_ATK. At ζ=0.02, mean amplitude in
+   the record's last 20% relative to that panel's own peak: ground 0.044,
+   floor 0.063 — the building retains ~43% more. Visible on screen as
+   discrete ringing bursts after the ground drops to low-level noise.
+3. **Fixed axes + ghost** — PASS. The label plate hashes bit-identically at
+   `t=60s` and `t=170s` (axes and printed peaks are sized from the whole
+   record). Alpha-weighted mean brightness right of the pen 5.98 vs 62.37
+   left of it: the ghost is present at ~1/10 the intensity.
+4. **Record switch resets** — PASS. ANZA1_CIDLA → KOCAELI_ATK: pen to
+   `0.0s`, duration relabelled `133.1s`, peaks relabelled, Earthquake
+   Parameters reset to the incoming record's own magnitude (7.51).
+5. **Slider recompute** — PASS. ζ 0.05 → 0.2: floor label hash changes
+   (393667 → 402824), ground label hash **bit-identical**, pen back to 0.
+6. **Backwards scrub** — PASS. `t=124s` → `t=60s`: the changed region is
+   exactly [171, 357] against pen(60)=174.6 and pen(124)=354.5 — the drawn
+   region shrinks back to the new pen with nothing stale to its right.
+7. **Magnitude moves the printed peak** — PASS. M 4.92 → 9.0 changes the
+   ground panel's printed-peak text (353147 → 366170) with the pen parked
+   outside the sampled band, so the delta is the digits, not the playhead.
+8. **Shared selectors** — PASS. Floor 3 / Axis Y survive a tab switch.
+9. **Tab switching** — PASS. Time is default-open; the Frequency tab renders
+   Input/Transfer/Output exactly as spec 6 did.
+10. **Closed drawer = no work** — PASS. With the drawer closed, advancing
+    playback 30s → 110s leaves `timeCanvas` **bit-identical**.
+11. **Mobile reflow** — PASS, **real reflow at 375x812** (not partial). Both
+    panels visible and legible, tab strip and shared selectors inside the
+    drawer, no horizontal page overflow; the Frequency tab reflows too.
+12. **Zero console errors** — PASS (no errors and no ⚠️ warnings).
+
+**Three real defects found by this pass and fixed** (none were caught by the
+offline checks):
+1. *Spurious drawer scroll.* Absolutely-positioned descendants still
+   contribute to an ancestor scroll container's scrollable overflow, so the
+   inactive pane gave `.drawer-body` a ~210px phantom vertical scroll
+   (measured: scrollHeight 927 vs clientHeight 717). Fixed with
+   `overflow: hidden` on `.tab-pane`; now 732/732.
+2. *Panes collapsed at the mobile breakpoint.* `.spectrum-canvas-wrap`'s
+   `min-height` used to reach `.drawer-body` because the wrap was a direct
+   flex child; inside an absolutely-positioned pane it no longer does, so at
+   375px the drawer rendered 241px tall with **both canvases invisible**.
+   Fixed by restating the min-height on `.tab-panes` (340px desktop, 240px
+   at the breakpoint).
+3. *`#timeCanvas` had no CSS sizing at all.* Only `#spectrumCanvas` carried
+   the `width/height: 100%` rule, so the new canvas laid out at its intrinsic
+   **attribute** size — device pixels, ~1.8x its CSS box on a high-DPR
+   viewport — and overflowed the drawer (678px wide inside a 375px drawer,
+   second subplot clipped away). Fixed by extending that rule to
+   `#spectrumCanvas, #timeCanvas`. Worth noting this was invisible on desktop
+   at first glance and only became obvious under the mobile check.
+
+## Spec 9 — Task 7: documentation
+
+- **README.md** — the drawer is now described as the two-tab **Signals**
+  drawer, with a new paragraph on what the Time tab shows and why the
+  printed peak is there; the data-flow diagram notes `/compute` sending the
+  scaled ground acceleration back; the "what's honest about this" section
+  gains a bullet on the Time tab being *measured* (exact solver input,
+  floor-minus-ground) and on the envelope's cost model.
+- **AGENTS.md** — spec 9 status bullet (the three load-bearing decisions,
+  the new checks, the three browser-found defects with the general lesson
+  about new canvases); `/compute`'s payload description in the data-flow
+  section; a new "the right-side drawer is no longer frequency-only" entry
+  covering the rename, what deliberately kept its old name, the now-shared
+  `spectrumFloorIndex`/`spectrumAxis`, and `redrawAnalysisTab()` as the
+  single redraw entry point.
+- **specs/README.md** — spec 9 row filled in. Also corrected spec 8's row,
+  which still claimed "not yet merged" although it merged at `753d258`
+  (flagged during this loop's planning stage).
+- **knowledge/index_html.md** — line count and commit stamp refreshed, the
+  whole function map re-grepped (every number had shifted) with rows added
+  for `buildEnvelope`/`playheadColumn`, `loadGroundAccel`,
+  `rebuildTimeEnvelopes`, `drawTimeSubplot`, `drawTimePanels` and
+  `redrawAnalysisTab`; a new traps section on the envelope cost model, the
+  stateless-full-redraw invariant, the printed peak, the
+  acceleration-vs-displacement and relative-vs-absolute traps, and the
+  new-canvas/`overflow`/`min-height` CSS lessons.
+- **knowledge/data_flow_and_wire_formats.md** — the tail blocks added to
+  the byte layout with the `has_ground_accel` gate and why it is a flag;
+  `applyLoadedData`/`takeFloats` line numbers refreshed.
+- **knowledge/server.md** — step 7 notes the appended acceleration; a new
+  "what NOT to do" rule: a new binary block goes at the **tail** behind a
+  boolean header flag, never inserted mid-payload.
+- **Math PDF — confirmed legitimately unchanged.** This spec derives no new
+  math: the per-column min/max envelope and the playhead mapping are
+  plotting mechanics, not signal theory, and the quantities plotted
+  (`a_g(t)`, `u_rel(t)`) are already derived in the existing parts.
+  `generate_math_pdf.py` still carries Part E (Richter/epicenter/
+  attenuation) from spec 7 — checked, not assumed.
+- **requirements.txt** — unchanged; no new dependency.
+- **mirror-backend skill** — no edit needed. Its staleness check diffs the
+  live and local header **key sets** rather than a memorised list, so
+  `has_ground_accel` is caught automatically; AGENTS.md carries the bullet.
+- `graphify update .` run.

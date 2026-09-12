@@ -184,6 +184,15 @@ def compute():
         "story_height": building_x.h,
         "npts": len(time_arr),
         "has_y": has_y,
+        # Spec 9: the ground acceleration the physics actually ran on --
+        # i.e. AFTER apply_synthetic_earthquake_scaling() -- is appended at
+        # the payload tail so the time-domain panel can plot the real input.
+        # The frontend must never re-derive it by differentiating ground
+        # displacement, and must never fall back to out/'s unscaled
+        # ground_accel.json once any Earthquake Parameter leaves default.
+        # Flagged rather than assumed so a stale deployed backend that
+        # doesn't send the block degrades instead of throwing.
+        "has_ground_accel": True,
         "reference_magnitude": reference_magnitude,
         "richter_magnitude": richter_magnitude,
         "epicenter_distance_km": epicenter_distance_km,
@@ -234,7 +243,7 @@ def compute():
 
     # Binary payload is append-only after the existing spec-3 prefix:
     # time, gdisp_x, abs_x, [gdisp_y, abs_y], furn_x(3xNxnpts_dec),
-    # [furn_y(...)] -- the 4-byte alignment established by the header pad
+    # [furn_y(...)], gaccel_x, [gaccel_y] -- the 4-byte alignment from the header pad
     # still holds since every array here is float32 (spec 5, plan section 3).
     parts = [struct.pack("<I", len(header_bytes)), header_bytes, b"\x00" * pad]
     parts.append(time_arr.astype(np.float32).tobytes())
@@ -246,6 +255,12 @@ def compute():
     parts.append(furn_x.tobytes())  # (3, num_stories, npts_dec) float32
     if has_y:
         parts.append(furn_y.tobytes())
+    # Ground acceleration goes at the TAIL, after the furniture blocks, so
+    # the format stays append-only (spec 9). len(accel_x) == len(time_arr):
+    # compute_response() sets npts = len(acceleration) and time = arange(npts)*dt.
+    parts.append(accel_x.astype(np.float32).tobytes())
+    if has_y:
+        parts.append(accel_y.astype(np.float32).tobytes())
 
     return Response(b"".join(parts), mimetype="application/octet-stream")
 
