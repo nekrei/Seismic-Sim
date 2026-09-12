@@ -1410,6 +1410,21 @@
         // recompute for that same record, never refetched on a drag.
         let groundSpectrum = null;
         let groundSpectrumRecord = null; // which record groundSpectrum belongs to, for the cache check above
+        // groundAccelData: { X: number[], Y: number[]|null } -- the ground
+        // ACCELERATION driving the animation, for spec 9's time-domain panel.
+        // Both load paths converge here, but they are NOT interchangeable:
+        // the static path fetches out/<record>/ground_accel.json, while the
+        // live path must use /compute's appended tail block, because spec 7's
+        // apply_synthetic_earthquake_scaling() reshapes the ground motion the
+        // moment Magnitude/Distance/Depth leaves default -- at which point the
+        // static file no longer describes the motion on screen. Never derive
+        // this by differentiating ground displacement in the browser.
+        let groundAccelData = null;
+        // Static-path fetch cache only (parameter-independent, like
+        // groundSpectrum): the raw JSON for one record, reused across every
+        // same-record live recompute rather than refetched on a drag.
+        let groundAccelFile = null;
+        let groundAccelFileRecord = null;
         let spectrumFloorIndex = null;   // null until first populateSpectrumFloorSelect() -- independent of View section's activeFloorIndex on purpose (see Part B4)
         let spectrumAxis = 'X';
         let spectrumDrawerOpen = false;
@@ -2264,6 +2279,32 @@
             }
         }
 
+        // out/<record>/ground_accel.json (spec 9) -- the recorded ground
+        // acceleration, for the time-domain panel's top trace. Cached per
+        // record for the same reason as loadGroundSpectrum() above, and
+        // degrades the same way: a missing/malformed file just leaves the
+        // ground trace empty rather than failing the load.
+        async function loadGroundAccel(folder) {
+            if (groundAccelFileRecord === folder && groundAccelFile) return; // already cached for this record
+            groundAccelFile = null;
+            groundAccelFileRecord = folder;
+            try {
+                const res = await fetch(`out/${folder}/ground_accel.json`);
+                if (!res.ok) {
+                    console.warn(`⚠️ ground_accel.json not found for ${folder} (${res.status}) -- time-domain ground trace disabled.`);
+                    return;
+                }
+                const data = await res.json();
+                if (!Array.isArray(data.X)) {
+                    console.warn(`⚠️ ground_accel.json malformed for ${folder} -- time-domain ground trace disabled.`);
+                    return;
+                }
+                groundAccelFile = { X: data.X, Y: Array.isArray(data.Y) ? data.Y : null };
+            } catch (err) {
+                console.warn('⚠️ Failed to load ground_accel.json -- time-domain ground trace disabled.', err);
+            }
+        }
+
         // ==================================================================
         // Frequency-domain drawer maths + rendering (spec 6, Part A2/A4/B).
         // Recomputed on data load or floor/axis change ONLY -- never inside
@@ -2694,6 +2735,10 @@
                 // (which also runs on every live-slider recompute for the
                 // SAME record).
                 await loadGroundSpectrum(folder);
+                // Same once-per-record reasoning (spec 9). Called here and
+                // NOT from applyLoadedData(), which also runs on every live
+                // recompute for the same record.
+                await loadGroundAccel(folder);
 
                 applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY, {
                     frame,
@@ -2704,6 +2749,7 @@
                     recordName: folder,
                     modal: normalizeModal(meta),
                     referenceMagnitude: meta.reference_magnitude,
+                    groundAccel: groundAccelFile,
                 });
                 progressEl.style.display = 'none';
                 console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
@@ -2942,6 +2988,7 @@
             furnitureData = furniture;
             furnitureRateHz = furnitureRate || 0;
             modalData = extra.modal ?? null; // spec 6 -- null-safe; the drawer degrades to a disabled note if this or groundSpectrum is missing
+            groundAccelData = extra.groundAccel ?? null; // spec 9 -- null-safe the same way; whichever path loaded it, the time panel reads only this
 
             periodReadout.textContent = (periodX != null && periodY != null)
                 ? `${periodX.toFixed(2)}s / ${periodY.toFixed(2)}s`
@@ -3190,6 +3237,16 @@
                     furnitureRate = header.furniture.decimated_rate_hz || 0;
                 }
 
+                // Ground acceleration, appended at the payload TAIL after the
+                // furniture blocks (spec 9). Gated on the header flag so a
+                // stale seismic-sim-backend that predates this spec degrades
+                // to "no ground trace" instead of reading past the buffer.
+                let groundAccel = null;
+                if (header.has_ground_accel) {
+                    const gaX = Array.from(takeFloats(npts));
+                    groundAccel = { X: gaX, Y: header.has_y ? Array.from(takeFloats(npts)) : null };
+                }
+
                 applyLoadedData(header.num_stories, header.story_height, time, groundX, groundY, floorX, floorY, {
                     frame: normalizeFrame(header),
                     furniture,
@@ -3199,6 +3256,7 @@
                     recordName: folder,
                     modal: normalizeModal(header),
                     referenceMagnitude: header.reference_magnitude,
+                    groundAccel,
                 }, autoScaleAmplify);
                 recomputeOverlay.classList.remove('is-active');
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);

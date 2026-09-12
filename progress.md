@@ -1071,3 +1071,22 @@ keep as-is).
 - Output: all 7 sub-checks PASS; identity at defaults to 3e-8, offline
   scaled reference match to 9.5e-7, peak ratio 30.9x vs unscaled at M=9.0.
   The parser also asserts zero unaccounted trailing bytes.
+
+## Spec 9 — Task 2: ground acceleration on the static path
+
+- `index.html`: new module state `groundAccelData` (what the panel reads),
+  plus `groundAccelFile`/`groundAccelFileRecord` as the static-path
+  per-record fetch cache — mirroring `groundSpectrum`'s pattern exactly.
+- `loadGroundAccel(folder)` added next to `loadGroundSpectrum()`; same
+  warn-and-degrade on 404/malformed. Called from `loadFolderData()` beside
+  `await loadGroundSpectrum(folder)`, **not** from `applyLoadedData()`.
+- `applyLoadedData()` sets `groundAccelData = extra.groundAccel ?? null`.
+  Static path passes the fetched JSON; `liveRecompute()` parses the two
+  new tail blocks **gated on `header.has_ground_accel`** and passes those.
+- Ruling: the live path must NOT fall back to the static file. Spec 7's
+  scaling reshapes the ground motion, so `out/`'s copy stops describing the
+  animated motion the moment any Earthquake Parameter leaves default.
+- New `claude_scripts/check_index_syntax.mjs` (node --check over the
+  extracted inline module script — no build step in this project means a
+  typo there is otherwise only caught by loading the page). Output:
+  `parses OK (144193 chars)`.
