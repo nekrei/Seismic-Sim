@@ -1689,6 +1689,68 @@
         }
         // ---8<--- SPECTRUM-HELPERS-END
 
+        // ---8<--- TIMEDOMAIN-HELPERS-BEGIN (extracted verbatim by claude_scripts/check_time_domain.mjs)
+        //
+        // Spec 9. A DELIBERATELY SEPARATE sentinel block from the SPECTRUM
+        // one above -- fft_check.mjs extracts that block by its own
+        // sentinels and would break *silently* (find nothing, still exit 0)
+        // if it were widened or reflowed to hold these too.
+        //
+        // Why an envelope at all: a record is ~40k samples and the panel is
+        // ~400 CSS pixels wide, redrawn every animation frame next to a live
+        // three.js scene. Reducing each signal ONCE per data load to a
+        // per-pixel-column min/max pair makes the per-frame cost O(canvas
+        // width) and record-length independent. It is not a lossy
+        // approximation for this purpose: a waveform plot at width W can
+        // only ever show each column's extremes, and this stores exactly
+        // those -- a selection, not an interpolation (verification check 1
+        // asserts deviation is exactly 0).
+
+        // Column c covers samples [floor(c*n/nCols), floor((c+1)*n/nCols)).
+        // That is a partition of [0, n): consecutive columns share a
+        // boundary exactly, and the last column ends at n, so the final
+        // sample is always included. nCols is clamped to <= n so no column
+        // is ever empty (an empty column would leave Infinity/-Infinity in
+        // the arrays and blow up the autoscale).
+        function buildEnvelope(signal, nCols) {
+            const n = signal.length;
+            const cols = Math.max(1, Math.min(Math.floor(nCols) || 1, n));
+            // Float64, not Float32: the envelope must be an exact SELECTION
+            // of real samples (verification check 1 asserts deviation 0).
+            // Float32Array would round every stored extreme, which also
+            // lets the true final sample fall marginally outside the last
+            // column's stored range. 400 columns x 2 arrays is ~6 KB.
+            const mn = new Float64Array(cols);
+            const mx = new Float64Array(cols);
+            for (let c = 0; c < cols; c++) {
+                const lo = Math.floor(c * n / cols);
+                const hi = Math.floor((c + 1) * n / cols);
+                let vmin = Infinity, vmax = -Infinity;
+                for (let i = lo; i < hi; i++) {
+                    const v = signal[i];
+                    if (v < vmin) vmin = v;
+                    if (v > vmax) vmax = v;
+                }
+                mn[c] = vmin;
+                mx[c] = vmax;
+            }
+            return { min: mn, max: mx, nCols: cols };
+        }
+
+        // Which column the pen has reached. Clamped at both ends: overshoot
+        // (animTime slightly past totalDuration, or a zero/NaN duration)
+        // must land on the last column rather than index past the envelope,
+        // and t = totalDuration must reach nCols-1 rather than leaving the
+        // final column permanently undrawn.
+        function playheadColumn(animTime, totalDuration, nCols) {
+            const cols = Math.max(1, Math.floor(nCols) || 1);
+            if (!(totalDuration > 0)) return cols - 1;
+            const frac = animTime / totalDuration;
+            if (!(frac > 0)) return 0;
+            return Math.min(cols - 1, Math.floor(frac * cols));
+        }
+        // ---8<--- TIMEDOMAIN-HELPERS-END
+
         // --- Deterministic per-floor furniture placement (spec B4) -- seeded
         // from (record name, floor index) so out/ regeneration never causes
         // spurious placement churn, and switching records/params reshuffles

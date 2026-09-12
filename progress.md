@@ -1090,3 +1090,26 @@ keep as-is).
   extracted inline module script — no build step in this project means a
   typo there is otherwise only caught by loading the page). Output:
   `parses OK (144193 chars)`.
+
+## Spec 9 — Task 3: envelope + playhead helpers
+
+- `index.html`: new `// ---8<--- TIMEDOMAIN-HELPERS-BEGIN/END` sentinel
+  block, placed immediately after (and deliberately **separate from**) the
+  SPECTRUM one, holding two pure functions:
+  - `buildEnvelope(signal, nCols)` — column `c` covers samples
+    `[floor(c*n/nCols), floor((c+1)*n/nCols))`, `nCols` clamped to `[1, n]`.
+  - `playheadColumn(animTime, totalDuration, nCols)` — clamped at both ends.
+- `claude_scripts/check_time_domain.mjs` written first (extracts the block
+  at runtime, never a copy), confirmed failing with
+  "Could not find TIMEDOMAIN-HELPERS sentinel block".
+- **Ruling / fix during the pass:** the envelope was first written with
+  `Float32Array`, which failed check 1 (deviation 5.96e-8, and the true
+  final sample falling marginally outside the last column's rounded range).
+  The envelope must be an exact *selection* of real samples, not a rounded
+  one, so both arrays are `Float64Array`. Cost is ~6 KB at 400 columns.
+- Output: **ALL CHECKS PASSED**, 7176 comparisons — 6 signal cases
+  (synthetic n=40000/1009/7/1, divisor and non-divisor column counts, plus
+  the real KOCAELI_ATK trace) x 4 assertions, and a 1000-step playhead
+  sweep at 4 column/duration combinations plus both overshoot clamps.
+- `fft_check.mjs` re-run after inserting the new block: still extracts the
+  SPECTRUM sentinels and still compares (see Task 6 for the full re-run).
