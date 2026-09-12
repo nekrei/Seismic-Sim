@@ -1051,3 +1051,23 @@ Reviewed the full branch diff (`main..HEAD`, commits `8cfec23` through
 
 Stage: verify complete. Next: present the finish menu (merge locally /
 keep as-is).
+
+## Spec 9 — Task 1: `/compute` carries scaled ground acceleration
+
+- `server.py`: added `"has_ground_accel": true` to the JSON header and
+  appended `accel_x` (and `accel_y` when `has_y`) as float32 at the payload
+  **tail**, after the furniture blocks. Format stays append-only; a stale
+  `seismic-sim-backend` that doesn't send the block degrades via the flag
+  instead of throwing.
+- Ruling: block carries the **scaled** acceleration (post
+  `apply_synthetic_earthquake_scaling`), i.e. the exact array the solver
+  ran on — never the unscaled `out/` file, never re-derived from ground
+  displacement.
+- New check `claude_scripts/check_ground_accel_block.py` (verification
+  check 3, Flask `test_client` — no live server needed). Confirmed FAILING
+  before the change (`buffer is smaller than requested size`), passing
+  after. 3b uses M=9.0 because KOCAELI_ATK's `reference_magnitude` is 7.51,
+  so the spec's suggested 7.5 would have been a ~1.0x no-op.
+- Output: all 7 sub-checks PASS; identity at defaults to 3e-8, offline
+  scaled reference match to 9.5e-7, peak ratio 30.9x vs unscaled at M=9.0.
+  The parser also asserts zero unaccounted trailing bytes.
