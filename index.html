@@ -1192,7 +1192,7 @@
         // and /compute from the same origin, so a relative path works. On
         // GitHub Pages (static-only, no Python), /compute must point at the
         // separately-hosted backend instead -- see seismic-sim-backend.
-        const COMPUTE_BACKEND_URL = 'https://seismic-sim-backend.onrender.com';
+        const COMPUTE_BACKEND_URL = 'https://seismic-sim-backend-sg.onrender.com';
         const IS_LOCAL_DEV = ['localhost', '127.0.0.1'].includes(window.location.hostname);
         const COMPUTE_URL = IS_LOCAL_DEV ? '/compute' : `${COMPUTE_BACKEND_URL}/compute`;
 
@@ -2876,9 +2876,8 @@
         function scheduleAutoOrbit() {
             clearTimeout(autoOrbitTimer);
             controls.autoRotate = false;
-            if (activeFloorIndex === null) {
-                autoOrbitTimer = setTimeout(() => { controls.autoRotate = true; }, AUTO_ORBIT_IDLE_MS);
-            }
+            // ponytail: auto-orbit disabled per user request; re-enable by restoring
+            // the `if (activeFloorIndex === null) { autoOrbitTimer = setTimeout(...) }` body.
         }
 
         controls.addEventListener('start', () => { cameraTween = null; scheduleAutoOrbit(); });
