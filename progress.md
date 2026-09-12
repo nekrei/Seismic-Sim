@@ -1253,3 +1253,47 @@ offline checks):
    second subplot clipped away). Fixed by extending that rule to
    `#spectrumCanvas, #timeCanvas`. Worth noting this was invisible on desktop
    at first glance and only became obvious under the mobile check.
+
+## Spec 9 — Task 7: documentation
+
+- **README.md** — the drawer is now described as the two-tab **Signals**
+  drawer, with a new paragraph on what the Time tab shows and why the
+  printed peak is there; the data-flow diagram notes `/compute` sending the
+  scaled ground acceleration back; the "what's honest about this" section
+  gains a bullet on the Time tab being *measured* (exact solver input,
+  floor-minus-ground) and on the envelope's cost model.
+- **AGENTS.md** — spec 9 status bullet (the three load-bearing decisions,
+  the new checks, the three browser-found defects with the general lesson
+  about new canvases); `/compute`'s payload description in the data-flow
+  section; a new "the right-side drawer is no longer frequency-only" entry
+  covering the rename, what deliberately kept its old name, the now-shared
+  `spectrumFloorIndex`/`spectrumAxis`, and `redrawAnalysisTab()` as the
+  single redraw entry point.
+- **specs/README.md** — spec 9 row filled in. Also corrected spec 8's row,
+  which still claimed "not yet merged" although it merged at `753d258`
+  (flagged during this loop's planning stage).
+- **knowledge/index_html.md** — line count and commit stamp refreshed, the
+  whole function map re-grepped (every number had shifted) with rows added
+  for `buildEnvelope`/`playheadColumn`, `loadGroundAccel`,
+  `rebuildTimeEnvelopes`, `drawTimeSubplot`, `drawTimePanels` and
+  `redrawAnalysisTab`; a new traps section on the envelope cost model, the
+  stateless-full-redraw invariant, the printed peak, the
+  acceleration-vs-displacement and relative-vs-absolute traps, and the
+  new-canvas/`overflow`/`min-height` CSS lessons.
+- **knowledge/data_flow_and_wire_formats.md** — the tail blocks added to
+  the byte layout with the `has_ground_accel` gate and why it is a flag;
+  `applyLoadedData`/`takeFloats` line numbers refreshed.
+- **knowledge/server.md** — step 7 notes the appended acceleration; a new
+  "what NOT to do" rule: a new binary block goes at the **tail** behind a
+  boolean header flag, never inserted mid-payload.
+- **Math PDF — confirmed legitimately unchanged.** This spec derives no new
+  math: the per-column min/max envelope and the playhead mapping are
+  plotting mechanics, not signal theory, and the quantities plotted
+  (`a_g(t)`, `u_rel(t)`) are already derived in the existing parts.
+  `generate_math_pdf.py` still carries Part E (Richter/epicenter/
+  attenuation) from spec 7 — checked, not assumed.
+- **requirements.txt** — unchanged; no new dependency.
+- **mirror-backend skill** — no edit needed. Its staleness check diffs the
+  live and local header **key sets** rather than a memorised list, so
+  `has_ground_accel` is caught automatically; AGENTS.md carries the bullet.
+- `graphify update .` run.
