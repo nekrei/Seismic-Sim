@@ -1113,3 +1113,66 @@ keep as-is).
   sweep at 4 column/duration combinations plus both overshoot clamps.
 - `fft_check.mjs` re-run after inserting the new block: still extracts the
   SPECTRUM sentinels and still compares (see Task 6 for the full re-run).
+
+## Spec 9 — Tasks 4 + 5: drawer restructure and the time panels
+
+Committed together: Task 4's tab wiring calls `rebuildTimeEnvelopes()`/
+`drawTimePanels()`, which Task 5 defines, so splitting them would have left
+one commit referencing undefined functions.
+
+**Task 4 — rename + tabs + shared selectors**
+- Container renamed (ids and JS identifiers): `spectrumDrawer` →
+  `analysisDrawer`, `spectrumToggleBtn` → `analysisToggleBtn`,
+  `spectrumCloseBtn` → `analysisCloseBtn`, `spectrumDrawerOpen` →
+  `analysisDrawerOpen`, `setSpectrumDrawerOpen` → `setAnalysisDrawerOpen`.
+  Header "Frequency Domain" → "Signals". `#spectrumCanvas`,
+  `#spectrumFloorSelect`, `#spectrumAxisToggle` and the SPECTRUM sentinel
+  block deliberately keep their names.
+- Structure: header → `.tab-strip` (Time | Frequency) → shared Floor/Axis
+  rows → `.tab-panes` with `#timePane` (default active) and
+  `#frequencyPane`.
+- Design (per spec B5, `emil-design-eng` + `animate`): the tab strip reuses
+  `.axis-toggle`'s segmented-control language so two segmented controls 40px
+  apart don't read as unrelated widgets; `:active` `scale(0.97)`; the pane
+  crossfade is a 160ms `cubic-bezier(0.23,1,0.32,1)` opacity+4px translateY
+  **transition** (interruptible/retargetable) not a keyframe, with
+  `visibility` delayed out so the outgoing pane isn't clickable mid-fade.
+  New ids added to the `prefers-reduced-motion` block.
+- Ruling: both panes stay mounted and absolutely stacked rather than
+  `display:none` — a `display:none` pane has no measurable size and both
+  canvases size themselves from `clientWidth/Height`, so hiding one would
+  produce a zero-sized canvas on a resize/load while the other tab shows.
+- One `redrawAnalysisTab(animated)` is the single entry point for the drawer
+  toggle, both shared selectors, the tab strip and the resize listener, so
+  none of them can drift into redrawing only the frequency panels.
+
+**Task 5 — the time panels**
+- `rebuildTimeEnvelopes()` (data load, floor/axis change, resize) builds the
+  ground-**acceleration** envelope from `groundAccelData` and the selected
+  floor's **relative** displacement envelope (`floorArr[i] - groundArr[i]`),
+  plus each one's whole-record peak. Column count = the canvas's CSS width.
+- `drawTimeSubplot()` paints the full envelope as an 18%-alpha ghost, then
+  repaints columns `0…playCol` at full opacity, plus a pen line and dot.
+  Stateless full redraw per frame onto a cleared canvas — which is what makes
+  a backwards seek-slider drag shrink the trace for free.
+- Axes are sized from the **whole** record (`±peak`, symmetric about zero),
+  never from the revealed portion, and **each panel prints its own peak**
+  (`m/s²` / `m`). That printed number is not cosmetic: Richter magnitude and
+  geometric spreading are frequency-flat gains, so a self-normalising axis
+  with no printed level renders pixel-identically — exactly the defect spec 7
+  shipped on the frequency drawer.
+- `drawTimePanels()` is called from `animate()` gated on **drawer open AND
+  Time tab active**, so a closed drawer does zero per-frame canvas work. The
+  pen keeps moving under `prefers-reduced-motion` (playback state, not
+  decoration).
+- Ruling: `nCols` is clamped to the shorter of the two signals so both
+  envelopes share one column count and one playhead index; a length mismatch
+  also logs a warning, since `compute_response()` sets `npts =
+  len(acceleration)` and the two should never disagree.
+
+**Verification run at this point**
+- `node claude_scripts/check_index_syntax.mjs` → `parses OK (160772 chars)`
+- `node claude_scripts/check_time_domain.mjs` → ALL CHECKS PASSED, 7176
+  comparisons (re-run after the restructure).
+- `node claude_scripts/fft_check.mjs` → still finds the SPECTRUM sentinels
+  and still emits both comparison cases (N=4096, N=3000).
