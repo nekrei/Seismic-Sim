@@ -1176,3 +1176,80 @@ one commit referencing undefined functions.
   comparisons (re-run after the restructure).
 - `node claude_scripts/fft_check.mjs` → still finds the SPECTRUM sentinels
   and still emits both comparison cases (N=4096, N=3000).
+
+## Spec 9 — Task 6: regression + real-browser verification
+
+**Offline checks**
+- Check 3 (`check_ground_accel_block.py`): 7/7 PASS (re-run).
+- Check 4 (`out/` no-op): full pipeline re-run — `mdof_response.py` **and**
+  `plot_response.py` over all 10 records. `git status --porcelain out/` and
+  `git diff --stat out/` both **empty**. Zero tracked-file change.
+- Check 5 (`fft_check.mjs` + `fft_check_scipy.py`): still extracts the
+  SPECTRUM sentinels through the rename/restructure, and **did compare** —
+  N=3000 rel_err 3.383e-14, N=4096 rel_err 3.397e-14, binned spectra
+  2.68e-15 / 2.95e-15. ALL CHECKS PASS.
+- Check 6 (`verify_spectrum.py`): OVERALL PASS, including the anisotropic
+  Column-X/Column-Y case.
+- Checks 1+2 (`check_time_domain.mjs`): ALL PASS, 7176 comparisons.
+
+**Real-browser pass — substitution noted.** Claude in Chrome was **not
+reachable** this session ("Claude in Chrome is not connected"), so the pass
+ran in the built-in Browser pane instead, against `server.py` started from
+inside this worktree at `http://127.0.0.1:8000/`. One upside: the Browser
+pane *can* resize the viewport, so check 11 is a **real reflow**, not the
+CSS-injection partial spec 6 had to settle for.
+
+All 12 checks of verification §7:
+1. **Lockstep** — PASS, measured numerically rather than eyeballed. Diffing
+   the canvas between `t=120s` and `t=124s` localised the change to columns
+   [341, 357] against predicted pen positions 343.2 → 354.5 (±3px = the pen
+   dot's radius).
+2. **Ringdown contrast** — PASS on KOCAELI_ATK. At ζ=0.02, mean amplitude in
+   the record's last 20% relative to that panel's own peak: ground 0.044,
+   floor 0.063 — the building retains ~43% more. Visible on screen as
+   discrete ringing bursts after the ground drops to low-level noise.
+3. **Fixed axes + ghost** — PASS. The label plate hashes bit-identically at
+   `t=60s` and `t=170s` (axes and printed peaks are sized from the whole
+   record). Alpha-weighted mean brightness right of the pen 5.98 vs 62.37
+   left of it: the ghost is present at ~1/10 the intensity.
+4. **Record switch resets** — PASS. ANZA1_CIDLA → KOCAELI_ATK: pen to
+   `0.0s`, duration relabelled `133.1s`, peaks relabelled, Earthquake
+   Parameters reset to the incoming record's own magnitude (7.51).
+5. **Slider recompute** — PASS. ζ 0.05 → 0.2: floor label hash changes
+   (393667 → 402824), ground label hash **bit-identical**, pen back to 0.
+6. **Backwards scrub** — PASS. `t=124s` → `t=60s`: the changed region is
+   exactly [171, 357] against pen(60)=174.6 and pen(124)=354.5 — the drawn
+   region shrinks back to the new pen with nothing stale to its right.
+7. **Magnitude moves the printed peak** — PASS. M 4.92 → 9.0 changes the
+   ground panel's printed-peak text (353147 → 366170) with the pen parked
+   outside the sampled band, so the delta is the digits, not the playhead.
+8. **Shared selectors** — PASS. Floor 3 / Axis Y survive a tab switch.
+9. **Tab switching** — PASS. Time is default-open; the Frequency tab renders
+   Input/Transfer/Output exactly as spec 6 did.
+10. **Closed drawer = no work** — PASS. With the drawer closed, advancing
+    playback 30s → 110s leaves `timeCanvas` **bit-identical**.
+11. **Mobile reflow** — PASS, **real reflow at 375x812** (not partial). Both
+    panels visible and legible, tab strip and shared selectors inside the
+    drawer, no horizontal page overflow; the Frequency tab reflows too.
+12. **Zero console errors** — PASS (no errors and no ⚠️ warnings).
+
+**Three real defects found by this pass and fixed** (none were caught by the
+offline checks):
+1. *Spurious drawer scroll.* Absolutely-positioned descendants still
+   contribute to an ancestor scroll container's scrollable overflow, so the
+   inactive pane gave `.drawer-body` a ~210px phantom vertical scroll
+   (measured: scrollHeight 927 vs clientHeight 717). Fixed with
+   `overflow: hidden` on `.tab-pane`; now 732/732.
+2. *Panes collapsed at the mobile breakpoint.* `.spectrum-canvas-wrap`'s
+   `min-height` used to reach `.drawer-body` because the wrap was a direct
+   flex child; inside an absolutely-positioned pane it no longer does, so at
+   375px the drawer rendered 241px tall with **both canvases invisible**.
+   Fixed by restating the min-height on `.tab-panes` (340px desktop, 240px
+   at the breakpoint).
+3. *`#timeCanvas` had no CSS sizing at all.* Only `#spectrumCanvas` carried
+   the `width/height: 100%` rule, so the new canvas laid out at its intrinsic
+   **attribute** size — device pixels, ~1.8x its CSS box on a high-DPR
+   viewport — and overflowed the drawer (678px wide inside a 375px drawer,
+   second subplot clipped away). Fixed by extending that rule to
+   `#spectrumCanvas, #timeCanvas`. Worth noting this was invisible on desktop
+   at first glance and only became obvious under the mobile check.

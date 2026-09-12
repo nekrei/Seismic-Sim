@@ -745,7 +745,7 @@
             flex: 1;
             min-height: 340px;
         }
-        #spectrumCanvas {
+        #spectrumCanvas, #timeCanvas {
             width: 100%;
             height: 100%;
             display: block;
@@ -819,13 +819,18 @@
            resize or a record load while the other tab is showing still
            produces correct dimensions, and it is what makes the crossfade a
            transition (interruptible, retargetable) rather than a keyframe. */
-        .tab-panes { position: relative; flex: 1; min-height: 0; }
+        .tab-panes { position: relative; flex: 1; min-height: 340px; }
         .tab-pane {
             position: absolute;
             inset: 0;
             display: flex;
             flex-direction: column;
             gap: 12px;
+            /* Absolutely-positioned descendants still contribute to an
+               ancestor scroll container's scrollable overflow -- without this
+               the inactive pane gave .drawer-body a spurious vertical scroll
+               (measured in-browser: scrollHeight 927 vs clientHeight 717). */
+            overflow: hidden;
             opacity: 0;
             visibility: hidden;
             transform: translateY(4px);
@@ -857,6 +862,7 @@
             }
             #analysisDrawer.is-open { transform: translateY(0); }
             .spectrum-canvas-wrap { min-height: 240px; }
+            .tab-panes { min-height: 240px; }
 
             #epicenterMap { width: 128px; }
             .epicenter-map-frame { width: 90px; height: 90px; }
