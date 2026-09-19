@@ -1581,3 +1581,78 @@ stays elastic under the strongest record in the set.
     its upgrade path (a simplified P-M interaction reusing the `P_i`
     `geometric_stiffness_matrix()` already computes). `M_p` must not be
     presented as *the* column capacity without it.
+
+## Task 5 — backend plumbing: profiles, soft-story preset, header keys
+
+- Red first: 5 malformed-profile requests all returned **200 with a binary
+  payload** (silently accepted, different building computed), gravity
+  instability returned **500**, and all 24 new header keys were missing.
+- `server.py`: `ParamError`, `_validate_profile()`, `_y_or_none()`;
+  `_validate_params()` now returns a **dict** (18 values was an unreadable
+  tuple, and it had exactly one caller); `compute()` catches `ParamError`
+  → 400 and `GravityInstabilityError` → 422; header gains the full Part E
+  table.
+- `mdof_response.py`: `SOFT_STORY_HEIGHT_RATIO = 1.6`;
+  `save_building_data()` gains the identical keys and a
+  `soft_ground_story` kwarg; `__main__` reads
+  `SEISMIC_SIM_SECTION_MODE` / `SEISMIC_SIM_P_DELTA` and catches
+  `GravityInstabilityError` per record with `continue` rather than
+  aborting the batch.
+
+### Green
+
+```
+[PASS] 7a. uniform profiles give bit-identical modal results AND an identical binary payload to the scalar path
+[PASS] 7b. length N-1 / N+1 / non-finite / non-positive / wrong-length column profile -> HTTP 400 with a JSON body (all 5)
+[PASS] 4b. gravity-unstable -> HTTP 422, valid JSON, error=gravity_unstable, story=0
+[PASS] 4c. default parameters: every float in the header is finite
+[PASS] 4c. near-unstable (theta_max = 0.85, m = 9.706e+04 kg): every float in the header is finite
+[PASS] E. all 24 new header keys present with the right shape
+[PASS] E. the scalar story_height is retained for pre-spec-10 readers
+[FAIL] 9. out/ IS STALE -- expected until Task 7
+```
+
+### Check 1's end-to-end half, run now
+
+`SEISMIC_SIM_SECTION_MODE=gross SEISMIC_SIM_P_DELTA=0 python mdof_response.py`
+over all 10 records:
+
+```
+10 files changed, 1680 insertions(+)
+   -- all 10 are out/<record>/building_data.json, and the diff is
+      PURELY ADDITIVE: zero deletions, zero changed values.
+```
+
+Every `response_X/Y.csv`, `furniture_response.bin`, `ground_accel.json`
+and `spectrum.json` is **byte-identical**. `out/` was then restored with
+`git checkout -- out/`; Task 7 regenerates it for real.
+
+### Rulings
+
+14. **Check 1's "empty `git diff --stat out/`" cannot survive Part E, and
+    should not.** The spec requires the new keys in `building_data.json`,
+    so that file must diff. The claim is therefore scoped to what it was
+    really protecting — the numerical artifacts — and strengthened: the
+    `building_data.json` diff must be **purely additive** (zero deletions,
+    no changed values), which is checkable and was checked. **This is a
+    correction owed to `verification/10-elastic-foundation.md` check 1.**
+15. **`_validate_params()` returns a dict.** 18 positional values is a
+    readability and mis-ordering hazard; there is exactly one caller.
+16. **An unknown `section_stiffness_mode` falls back to the default rather
+    than 400ing**, unlike a malformed profile. It is a closed vocabulary
+    the client picks from, so a stale client sending an old name should
+    still get a building; a wrong-length profile, by contrast, describes a
+    *different building* and cannot be guessed at.
+17. **An explicit `story_height_profile` beats `soft_ground_story`** — the
+    more specific request wins. The preset itself is resolved
+    **server-side**, so "soft ground story" means one thing in one place
+    and the client never encodes structural meaning.
+18. **`theta_demand_Y` / `peak_drift_ratio_Y` / `mu_demand_Y` are `null`,
+    not X's values, for a record with no second horizontal component.**
+    They need a solved time history and `building_y.compute_response()`
+    never runs there. Mirroring X under a `_Y` key would be worse than
+    reporting nothing.
+19. **Latent spec-8 bug fixed (planned ruling 3):** `save_building_data()`
+    wrote the module constants `PLAN_SPAN_X/Y` instead of
+    `building_x.plan_span_x/y`. Confirmed harmless today — the gross-mode
+    regeneration above shows `plan_span_x/y` among the *unchanged* values.
