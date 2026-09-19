@@ -209,10 +209,30 @@ def assemble_frame_stiffness(N, E, I_c, I_b, h, L):
     (+12*E*I_b/L) -- with the beam assumed axially rigid (both ends move
     together laterally, per spec A3), its only effect on this reduced DOF
     set is rotational restraint at floor i.
+
+    `I_c`, `I_b` and `h` are per-story (spec 10, C1): each may be a scalar
+    (broadcast to every story, exactly as before) or a length-N sequence,
+    indexed by story. This is what lets damage localise and what makes a
+    soft ground story expressible at all. `L` stays scalar -- it is a plan
+    dimension, shared by every story of the frame.
+
+    Each story's values are pulled out as plain Python floats before the
+    arithmetic, so a uniform per-story array evaluates the *same* expression
+    tree as the old scalar code and reproduces it bit-for-bit, not merely
+    to within a tolerance (verification check 1).
     """
     size = 2 * N
     K = np.zeros((size, size))
-    c = 2.0 * E * I_c
+
+    def per_story(v, name):
+        arr = np.broadcast_to(np.asarray(v, dtype=float), (N,)).copy()
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(f"{name} must be finite per story, got {v!r}")
+        return arr
+
+    I_c_arr = per_story(I_c, "I_c")
+    I_b_arr = per_story(I_b, "I_b")
+    h_arr = per_story(h, "h")
 
     def dof(i):
         """(delta_index, theta_index) for floor i; both None for the
@@ -229,6 +249,12 @@ def assemble_frame_stiffness(N, E, I_c, I_b, h, L):
     for i in range(1, N + 1):
         d_bot, t_bot = dof(i - 1)
         d_top, t_top = dof(i)
+
+        # This story's own section/geometry. Story i spans joints i-1..i,
+        # so it takes I_c[i-1] and h[i-1]; the beam AT floor i takes
+        # I_b[i-1].
+        c = 2.0 * E * float(I_c_arr[i - 1])
+        h = float(h_arr[i - 1])
 
         # Lateral-lateral (shear) terms
         add(d_bot, d_bot, 12 * c / h ** 3)
@@ -254,7 +280,7 @@ def assemble_frame_stiffness(N, E, I_c, I_b, h, L):
 
         # Beam at floor i
         _, t_i = dof(i)
-        add(t_i, t_i, 12 * E * I_b / L)
+        add(t_i, t_i, 12 * E * float(I_b_arr[i - 1]) / L)
 
     return K
 
@@ -291,6 +317,9 @@ def build_condensed_K(N, E, I_c, I_b, h, L):
     and uncoupled), so the assembly stays scoped to a single frame -- this
     is also what verify_frame_furniture.py compares against the closed
     form, which is itself a single-frame (2-column) result.
+
+    `I_c`, `I_b` and `h` may each be scalar or per-story -- see
+    assemble_frame_stiffness.
     """
     K_full = assemble_frame_stiffness(N, E, I_c, I_b, h, L)
     K_one_frame = condense_rotations(K_full, N)
@@ -548,16 +577,42 @@ class MDOF_ShearBuilding:
         self.N = num_stories
         self.m = mass_per_floor
         self.zeta = zeta
-        self.h = story_height
-        self.column_depth_x = column_depth_x
-        self.column_depth_y = column_depth_y
-        self.beam_depth = beam_depth
+        # Per-floor property arrays (spec 10, C1). Each of these may be
+        # passed as a scalar -- broadcast to every story, which is the
+        # pre-spec-10 behaviour reproduced bit-for-bit -- or as a length-N
+        # sequence, which is how a soft ground story and localised damage
+        # are expressed. `.copy()` so a caller's list/array can't alias in.
+        self.h = self._per_floor(story_height, "story_height")
+        self.column_depth_x = self._per_floor(column_depth_x, "column_depth_x")
+        self.column_depth_y = self._per_floor(column_depth_y, "column_depth_y")
+        self.beam_depth = self._per_floor(beam_depth, "beam_depth")
+        self.total_height = float(self.h.sum())
         self.axis = axis
         self.E = E
         self.plan_span_x = plan_span_x
         self.plan_span_y = plan_span_y
         self._build_matrices()
         self._modal_analysis()
+
+    def _per_floor(self, value, name):
+        """Normalise a scalar-or-length-N property to a length-N float array.
+
+        A wrong-length profile is rejected rather than truncated or
+        recycled: a truncated profile is a *different building* that still
+        renders plausibly, which is precisely the class of bug that is
+        impossible to spot on screen (see server.py's 400 on the same
+        condition).
+        """
+        arr = np.asarray(value, dtype=float)
+        if arr.ndim == 0:
+            arr = np.broadcast_to(arr, (self.N,))
+        elif arr.shape != (self.N,):
+            raise ValueError(
+                f"{name} must be a scalar or a length-{self.N} sequence, "
+                f"got shape {arr.shape}")
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(f"{name} must be finite, got {value!r}")
+        return arr.copy()
 
     def _build_matrices(self):
         self.M = np.eye(self.N) * self.m
@@ -1005,7 +1060,10 @@ def save_building_data(filename, building_x, building_y, furniture_meta=None,
     """
     data = {
         "num_stories": int(building_x.N),
-        "story_height": float(building_x.h),
+        # Scalar ground-story values, kept for compatibility with every
+        # pre-spec-10 reader. These are per-floor arrays internally now
+        # (spec 10, C1); the full profiles ship alongside them below.
+        "story_height": float(building_x.h[0]),
         "damping_ratio": float(building_x.zeta),
         # Richter magnitude this record corresponds to (data/richter
         # readings.json), used as the Earthquake Parameters panel's
@@ -1014,9 +1072,9 @@ def save_building_data(filename, building_x, building_y, furniture_meta=None,
 
         # Frame geometry (spec A2) -- shared by both axes.
         "elastic_modulus_Pa": float(building_x.E),
-        "column_depth_x": float(building_x.column_depth_x),
-        "column_depth_y": float(building_x.column_depth_y),
-        "beam_depth": float(building_x.beam_depth),
+        "column_depth_x": float(building_x.column_depth_x[0]),
+        "column_depth_y": float(building_x.column_depth_y[0]),
+        "beam_depth": float(building_x.beam_depth[0]),
         "beam_width": float(BEAM_WIDTH),
         "plan_span_x": float(PLAN_SPAN_X),
         "plan_span_y": float(PLAN_SPAN_Y),

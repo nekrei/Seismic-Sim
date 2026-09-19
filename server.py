@@ -181,7 +181,9 @@ def compute():
     # dominated the old all-JSON response.
     header = {
         "num_stories": num_stories,
-        "story_height": building_x.h,
+        # Scalar ground-story height, kept for pre-spec-10 readers; the
+        # per-floor profile (spec 10, C1) ships alongside it.
+        "story_height": float(building_x.h[0]),
         "npts": len(time_arr),
         "has_y": has_y,
         # Spec 9: the ground acceleration the physics actually ran on --
