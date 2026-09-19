@@ -1656,3 +1656,87 @@ and `spectrum.json` is **byte-identical**. `out/` was then restored with
     wrote the module constants `PLAN_SPAN_X/Y` instead of
     `building_x.plan_span_x/y`. Confirmed harmless today — the gross-mode
     regeneration above shows `plan_span_x/y` among the *unchanged* values.
+
+## Task 6 — frontend: per-floor story heights + soft-ground-story toggle
+
+- Red first: `claude_scripts/check_story_heights.mjs` written against a new
+  `// ---8<--- STORYHEIGHT-HELPERS-BEGIN/END` sentinel block. Helper checks
+  (1–5) passed immediately; the wiring checks (6) failed
+  (`createBuilding calls floorLevels()`, `the old single-height placement
+  formula is gone`) until the viewer was changed.
+- New helpers `normalizeStoryHeights()` / `floorLevels()` in their own
+  sentinel block — a **third** one, deliberately separate from SPECTRUM and
+  TIMEDOMAIN, each of which is extracted verbatim by its own check and
+  breaks silently if reflowed. The check asserts they stay distinct.
+- `createBuilding(numFloors, storyHeights, frame, folderName)` — cumulative
+  levels, returns `storyHeights` alongside `totalHeight`.
+- `currentStoryHeight` (scalar) **removed**, replaced by
+  `currentStoryHeights` (array), set from `createBuilding()`'s own return
+  value so it cannot drift from what was drawn.
+  `frameCameraToFloor()` reads that floor's own height.
+- Both load paths prefer `story_heights` and fall back to the scalar
+  `story_height`.
+- New `#softGroundStoryToggle` checkbox in Building Parameters, added to
+  `buildingParamsAtDefault()` (unchecked = default) and to the `/compute`
+  body; fires `scheduleLiveRecompute()` on `change`.
+- 422 and 400 handling: `showRecomputeError()` puts the message in the
+  recompute overlay's new error state and **keeps the previous building on
+  screen**; cleared at the start of the next request.
+
+### Confirmed, not assumed
+
+- `updateColumnTransforms()` needs **no** change — it derives a column's
+  length from its two endpoints' live world positions (`sourceWorldPos`),
+  so per-floor heights flow through it for free. Read the function to
+  confirm rather than trusting the spec's prediction.
+- `placeFurnitureForFloor()`'s `slabTop` argument is
+  `slabThickness / 2 + 0.01`, a constant independent of story height — no
+  change needed.
+- `repositionInteriorLights(totalHeight)` keeps its signature and receives
+  the new cumulative total.
+
+### The bit-identity trap in the placement math
+
+`floorLevels()` takes the **closed form** `(f+1)*(h+gap)` when every height
+is equal, and the running sum only when they differ. That is not an
+optimisation. A probe over 140 (height, floor) pairs found naive
+accumulation disagrees with the old multiply in **71 of them**, by up to
+`2.84e-14` scene units. Invisible on screen — and "invisible" is exactly
+what makes a regression impossible to notice later, so it is closed off the
+same way Task 1 closed it off in the physics and spec 8 closed it off for
+the footprint. Check 10's item 1 asserts `Object.is` equality over 408
+comparisons.
+
+### Green
+
+```
+[PASS] STORYHEIGHT block does not overlap the SPECTRUM or TIMEDOMAIN blocks
+[PASS] 1. uniform heights reproduce (f+1)*(h+gap) and n*(h+gap) bit-identically over 408 comparisons -- all exact (Object.is)
+[PASS] 2. a scalar height and the equivalent uniform array give identical levels
+[PASS] 3. non-uniform heights give the running cumulative sum; strictly increasing; totalHeight == last level; soft ground story renders taller (ratio 1.5932 including the gap)
+[PASS] 4. the drawn ground-story height equals 1.6x the others to 1e-12 -- 1.600000000000001
+[PASS] 5. all 7 malformed-profile cases throw rather than being silently accepted
+[PASS] 6. createBuilding takes storyHeights / calls floorLevels() / the old formula is gone
+[PASS] 7. every <canvas> has a CSS rule in the stylesheet (spec 9 defect 3)
+ALL CHECKS PASSED
+```
+
+Every other `.mjs` check re-run clean: `check_footprint_area` (14 checks),
+`check_sway_gain`, `check_furniture_gain`, `check_time_domain` (7176
+comparisons), `fft_check`, `check_index_syntax` (parses OK, 171879 chars).
+
+### Rulings
+
+20. **`floorLevels()`'s uniform fast path is a correctness requirement,
+    not an optimisation** — see above.
+21. **`currentStoryHeight` was deleted rather than kept as a mean.** With a
+    soft ground story there is no single "the" story height, and a mean is
+    not bit-stable under summation anyway. Three stale comments referring
+    to it were updated in the same pass.
+22. **`swayBaseline` uses the ground-story height**, not a mean — exactly
+    the old scalar when uniform, and a single well-defined number when not.
+23. **Check 10 item 7 is a standing guard carried forward from spec 9's
+    defect (3):** every `<canvas>` must have a CSS sizing rule, or it lays
+    out at its intrinsic device-pixel attribute size. The symptom is
+    near-invisible on desktop, which is why it needs a check rather than an
+    eyeball.

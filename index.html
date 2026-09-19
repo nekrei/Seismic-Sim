@@ -400,6 +400,24 @@
             transition: opacity 0.4s ease;
         }
         .recompute-overlay.is-active { opacity: 1; }
+        /* Error state: the spinner stack is replaced by a message, and the
+           overlay stops looking like "work in progress". */
+        .recompute-overlay.is-error .recompute-stack,
+        .recompute-overlay.is-error .recompute-label { display: none; }
+        .recompute-error {
+            display: none;
+            max-width: 32rem;
+            padding: 18px 22px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,120,120,0.45);
+            background: rgba(60,14,14,0.85);
+            color: #ffd9d9;
+            font-size: 0.95rem;
+            line-height: 1.5;
+            text-align: center;
+            pointer-events: auto;
+        }
+        .recompute-overlay.is-error .recompute-error { display: block; }
         .recompute-stack {
             display: flex;
             flex-direction: column-reverse;
@@ -907,6 +925,12 @@
             <div class="recompute-floor" style="animation-delay:0s"></div>
         </div>
         <div class="recompute-label">Recomputing<span class="dots"><span>.</span><span>.</span><span>.</span></span></div>
+        <!-- Gravity-instability message (spec 10, B3). /compute returns
+             422 when the building cannot stand under its own weight at
+             the current sliders -- a physically meaningful RESULT, so it
+             reads as one. The previous building stays on screen behind
+             this. -->
+        <div class="recompute-error" id="recomputeError"></div>
     </div>
 
     <div id="controls">
@@ -994,6 +1018,18 @@
                     <span class="panel-label">Area</span>
                     <input type="range" id="areaSlider" min="200" max="2000" step="any" value="542.501085" />
                     <span class="panel-value" id="areaLabel">543 sq ft</span>
+                </div>
+                <!-- Soft ground story (spec 10, C2) -- the Dhaka
+                     parking-level typology. ONE checkbox: the server
+                     resolves it into a story-height profile, so "soft
+                     ground story" means exactly one thing in exactly one
+                     place and the client never encodes structural meaning.
+                     Nothing is special-cased; the softness is an emergent
+                     consequence of k ~ 1/h^3 and k_g = P/h. -->
+                <div class="ctrl-row">
+                    <span class="panel-label">Soft ground story</span>
+                    <input type="checkbox" id="softGroundStoryToggle" />
+                    <span class="panel-value" id="softGroundStoryLabel">off</span>
                 </div>
                 <!-- Target Period is gone (spec 5): once k comes from real
                      column/beam dimensions, period is an OUTPUT of the
@@ -1209,6 +1245,9 @@
         const floorSelect = document.getElementById('floorSelect');
         const backToFullViewBtn = document.getElementById('backToFullViewBtn');
         const recomputeOverlay = document.getElementById('recomputeOverlay');
+        const recomputeError = document.getElementById('recomputeError');
+        const softGroundStoryToggle = document.getElementById('softGroundStoryToggle');
+        const softGroundStoryLabel = document.getElementById('softGroundStoryLabel');
         const sheetStrip = document.getElementById('sheetStrip');
         const stripPlayBtn = document.getElementById('stripPlayBtn');
         const stripRecordName = document.getElementById('stripRecordName');
@@ -1486,12 +1525,18 @@
         let swayBaseline = 0;
 
         // Per-floor camera view state (spec 4, Part B). null = whole-building
-        // view. currentTotalHeight/currentStoryHeight are set inside
+        // view. currentTotalHeight/currentStoryHeights are set inside
         // applyLoadedData() whenever the building is (re)built, and are also
         // what repositionInteriorLights()/frameCameraToFloor() key off of.
         let activeFloorIndex = null;
         let currentTotalHeight = 0;
-        let currentStoryHeight = 0;
+        // Per-floor story heights as actually drawn (spec 10, C3). The old
+        // scalar currentStoryHeight is gone: with a soft ground story there
+        // is no single "the" story height, and frameCameraToFloor() needs
+        // the height of the floor it is framing, not an average. Set from
+        // createBuilding()'s own return value so it cannot drift from what
+        // was drawn.
+        let currentStoryHeights = [];
         // Rendered plan footprint in scene units, set by createBuilding().
         // Variable since spec 8 (the Area slider) -- previously these were
         // the hardcoded 2.8 x 2.0 literals inside createBuilding(), which is
@@ -1978,7 +2023,74 @@
         // physical column/beam dimensions and plan span (from
         // building_data.json or /compute's header); `folderName` seeds
         // furniture placement.
-        function createBuilding(numFloors, floorHeight, frame, folderName) {
+        // ---8<--- STORYHEIGHT-HELPERS-BEGIN (extracted verbatim by claude_scripts/check_story_heights.mjs)
+        // Per-floor story heights (spec 10, C1/C3). Deliberately a THIRD
+        // sentinel block, separate from SPECTRUM and TIMEDOMAIN: each is
+        // extracted verbatim by its own check, and a block that gets
+        // reflowed or merged breaks its check SILENTLY.
+        //
+        // Pure functions, no THREE dependency, so the check can run them
+        // under plain node.
+
+        // Scalar or length-N array -> length-N array of finite positive
+        // heights. A wrong-length array is an error, never truncated or
+        // padded -- same rule as the server's 400 and
+        // MDOF_ShearBuilding._per_floor(): a truncated profile is a
+        // DIFFERENT BUILDING that still renders perfectly plausibly.
+        function normalizeStoryHeights(numFloors, storyHeights) {
+            if (!Array.isArray(storyHeights)) {
+                const h = Number(storyHeights);
+                if (!Number.isFinite(h) || h <= 0) {
+                    throw new Error(`story height must be finite and positive, got ${storyHeights}`);
+                }
+                return new Array(numFloors).fill(h);
+            }
+            if (storyHeights.length !== numFloors) {
+                throw new Error(`story height profile must have exactly ${numFloors} entries, got ${storyHeights.length}`);
+            }
+            return storyHeights.map((v, i) => {
+                const h = Number(v);
+                if (!Number.isFinite(h) || h <= 0) {
+                    throw new Error(`story height [${i}] must be finite and positive, got ${v}`);
+                }
+                return h;
+            });
+        }
+
+        // Cumulative floor levels and total height.
+        //
+        // The uniform case takes the closed form `(f+1)*(h+gap)` rather
+        // than the running sum, and that is NOT an optimisation -- it is
+        // what makes a uniform building render BIT-IDENTICALLY to the
+        // pre-spec-10 code. Naive accumulation disagrees with the
+        // multiply in about half of all (height, floor) pairs by up to
+        // ~3e-14 scene units. Invisible on screen, but "invisible" is
+        // exactly the property that makes a regression impossible to
+        // notice later, so it is closed off here the same way the physics
+        // side closed it off in Task 1 and spec 8 closed it off for the
+        // footprint.
+        function floorLevels(heights, gap) {
+            const n = heights.length;
+            const y = new Array(n);
+            let uniform = true;
+            for (let i = 1; i < n; i++) {
+                if (heights[i] !== heights[0]) { uniform = false; break; }
+            }
+            if (uniform) {
+                const step = heights[0] + gap;
+                for (let f = 0; f < n; f++) y[f] = (f + 1) * step;
+                return { y, totalHeight: n * step };
+            }
+            let acc = 0;
+            for (let f = 0; f < n; f++) {
+                acc += heights[f] + gap;
+                y[f] = acc;
+            }
+            return { y, totalHeight: acc };
+        }
+        // ---8<--- STORYHEIGHT-HELPERS-END
+
+        function createBuilding(numFloors, storyHeights, frame, folderName) {
             for (const obj of sceneObjects) scene.remove(obj);
             sceneObjects = [];
             buildingGroups = [];
@@ -1998,8 +2110,12 @@
             // relationship is inverted here: scale fixed, footprint varies.
             const width = frame.planSpanX * SCENE_UNITS_PER_METRE,
                 depth = frame.planSpanY * SCENE_UNITS_PER_METRE,
-                gap = 0.04,
-                floorH = floorHeight;
+                gap = 0.04;
+            // Per-floor story heights (spec 10, C1/C3). `storyHeights` is a
+            // scalar or a length-numFloors array; a uniform one reproduces
+            // the old single-height placement bit-for-bit -- see floorLevels().
+            const heights = normalizeStoryHeights(numFloors, storyHeights);
+            const levels = floorLevels(heights, gap);
             currentFootprintW = width;
             currentFootprintD = depth;
             const colorBottom = new THREE.Color(0xc47a5a);
@@ -2034,7 +2150,7 @@
             const slabGeo = new THREE.BoxGeometry(width + 0.1, slabThickness, depth + 0.1);
 
             for (let f = 0; f < numFloors; f++) {
-                const yPos = (f + 1) * (floorH + gap);
+                const yPos = levels.y[f];
                 const group = new THREE.Group();
                 group.position.set(0, yPos, 0);
                 scene.add(group);
@@ -2164,7 +2280,15 @@
             topGroup.add(lightMesh);
 
             buildingGroups = groups;
-            return { lightSphere: lightMesh, totalHeight: numFloors * (floorH + gap) };
+            // storyHeights is returned so applyLoadedData() can keep
+            // currentStoryHeights in lockstep with what was actually drawn,
+            // rather than re-deriving it and risking the drift
+            // knowledge/index_html.md already warns about.
+            return {
+                lightSphere: lightMesh,
+                totalHeight: levels.totalHeight,
+                storyHeights: heights,
+            };
         }
 
         // --- Per-frame column transform update -- a column's world
@@ -3021,7 +3145,10 @@
                 if (!metaRes.ok) throw new Error(`Cannot load ${metaUrl} (${metaRes.status})`);
                 const meta = await metaRes.json();
                 const numStories = meta.num_stories;
-                const storyHeight = meta.story_height;
+                // Prefer the per-floor profile, fall back to the scalar
+                // (spec 10, C3) -- append-only, so an out/ regenerated by a
+                // pre-spec-10 pipeline still loads.
+                const storyHeight = meta.story_heights || meta.story_height;
                 const frame = normalizeFrame(meta);
 
                 // Furniture (spec 5, Part B) -- defensively gated on the
@@ -3204,7 +3331,11 @@
 
             const vFov = camera.fov * Math.PI / 180;
             const margin = 1.5; // a bit more headroom than the whole-building fit -- there's less context to read the shot by at this zoom
-            const boxHeight = Math.max(currentStoryHeight * 2.2, 2);
+            // That floor's OWN height, not an average -- with a soft ground
+            // story the storeys genuinely differ, and framing floor 1 with
+            // the mean height would crop it (spec 10, C3).
+            const thisStoryHeight = currentStoryHeights[floorIndex] || 0;
+            const boxHeight = Math.max(thisStoryHeight * 2.2, 2);
             const footprint = 3.0; // slightly tighter than the whole-building footprint (3.5) -- one floor's plan, not the antenna/roof included
 
             const distForHeight = (boxHeight / 2) / Math.tan(vFov / 2) * margin;
@@ -3337,9 +3468,10 @@
         // `furnitureRate` (its sample rate), `periodX`/`periodY` (for the
         // read-only T1 readout -- period is now an OUTPUT, not a slider,
         // spec C1), and `recordName` (furniture placement's seed). ---
-        function applyLoadedData(numStories, storyHeight, time, groundX, groundY, floorX, floorY, extra, autoScaleAmplify = true) {
+        function applyLoadedData(numStories, storyHeights, time, groundX, groundY, floorX, floorY, extra, autoScaleAmplify = true) {
             const { frame, furniture, furnitureRate, periodX, periodY, recordName, referenceMagnitude } = extra;
-            const { lightSphere: light, totalHeight } = createBuilding(numStories, storyHeight, frame, recordName);
+            const { lightSphere: light, totalHeight, storyHeights: drawnHeights } =
+                createBuilding(numStories, storyHeights, frame, recordName);
             lightSphere = light;
             createFoundationSlab();
 
@@ -3347,11 +3479,11 @@
             // switch OR any Building Parameter change) resets to whole-
             // building view, avoiding a stale out-of-range floor index after
             // e.g. the Stories slider drops. currentTotalHeight/
-            // currentStoryHeight are what frameCameraToFloor()/
+            // currentStoryHeights are what frameCameraToFloor()/
             // frameCameraToFullBuilding() key off of.
             activeFloorIndex = null;
             currentTotalHeight = totalHeight;
-            currentStoryHeight = numStories > 0 ? totalHeight / numStories : 0;
+            currentStoryHeights = drawnHeights;
             repositionInteriorLights(totalHeight); // spec 4, Part C -- interior fill lights move with building height
             populateFloorSelect(numStories);
             populateSpectrumFloorSelect(numStories); // spec 6 -- independent of the View section's floor select, see its own comment
@@ -3433,7 +3565,11 @@
                 // selected.
                 console.log(`📊 Peak floor displacement: ${(peakAbsDisp * 1000).toFixed(3)} mm`);
 
-                swayBaseline = TARGET_SWAY_FRACTION * storyHeight;
+                // Ground-story height as the legibility reference. Exactly
+                // the old scalar when the building is uniform; with a soft
+                // ground story it stays a single well-defined number rather
+                // than a mean, which would not be bit-stable anyway.
+                swayBaseline = TARGET_SWAY_FRACTION * drawnHeights[0];
                 if (peakAbsDisp > 1e-9) {
                     setAmplify(swayBaseline / peakAbsDisp);
                 } else {
@@ -3530,6 +3666,7 @@
                 column_depth_y: parseFloat(columnYSlider.value),
                 beam_depth: parseFloat(beamSlider.value),
                 area_sqft: parseFloat(areaSlider.value),
+                soft_ground_story: softGroundStoryToggle.checked,
                 epicenter_distance_km: parseFloat(epicenterDistanceSlider.value),
                 epicenter_depth_km: parseFloat(epicenterDepthSlider.value),
             };
@@ -3550,6 +3687,7 @@
             // "recomputing..." text line; a superseded (aborted) request
             // simply lets the newer request's own show/hide own the
             // overlay's lifecycle instead of flickering it off here.
+            clearRecomputeError();
             recomputeOverlay.classList.add('is-active');
             try {
                 const res = await fetch(COMPUTE_URL, {
@@ -3558,6 +3696,29 @@
                     body: JSON.stringify(params),
                     signal,
                 });
+                if (res.status === 422) {
+                    // Gravity instability (spec 10, B3): the parameters are
+                    // well-formed, the building just cannot stand under its
+                    // own weight. A RESULT, not a failure -- so it is shown
+                    // as a message and the previous building stays on
+                    // screen rather than being torn down or, worse, drawn
+                    // from NaN modal data.
+                    const info = await res.json().catch(() => ({}));
+                    const where = Number.isInteger(info.story)
+                        ? ` Story ${info.story + 1} gives way first.` : '';
+                    showRecomputeError(
+                        `This building cannot stand under its own weight.${where} ` +
+                        `Gravity (P-Δ) exceeds the lateral stiffness at these ` +
+                        `settings — reduce the mass or story height, or increase ` +
+                        `the column depth.`);
+                    return;
+                }
+                if (res.status === 400) {
+                    const info = await res.json().catch(() => ({}));
+                    showRecomputeError(
+                        `Invalid building parameters: ${info.detail || 'request rejected'}.`);
+                    return;
+                }
                 if (!res.ok) throw new Error(`/compute failed (${res.status})`);
                 const buf = await res.arrayBuffer();
 
@@ -3623,7 +3784,7 @@
                     groundAccel = { X: gaX, Y: header.has_y ? Array.from(takeFloats(npts)) : null };
                 }
 
-                applyLoadedData(header.num_stories, header.story_height, time, groundX, groundY, floorX, floorY, {
+                applyLoadedData(header.num_stories, header.story_heights || header.story_height, time, groundX, groundY, floorX, floorY, {
                     frame: normalizeFrame(header),
                     furniture,
                     furnitureRate,
@@ -3646,6 +3807,20 @@
                 console.error('❌ Live recompute failed:', err);
                 recomputeOverlay.classList.remove('is-active');
             }
+        }
+
+        // Gravity-instability / bad-parameter message on the recompute
+        // overlay (spec 10, B3). The overlay stays up in its error state
+        // and the previously-loaded building remains visible behind it;
+        // the next successful recompute clears it.
+        function showRecomputeError(message) {
+            recomputeError.textContent = message;
+            recomputeOverlay.classList.add('is-active', 'is-error');
+        }
+
+        function clearRecomputeError() {
+            recomputeOverlay.classList.remove('is-error');
+            recomputeError.textContent = '';
         }
 
         // Debounce building-parameter changes so a live request only fires
@@ -3890,6 +4065,9 @@
                 && parseFloat(columnYSlider.value) === DEFAULT_COLUMN_DEPTH_Y
                 && parseFloat(beamSlider.value) === DEFAULT_BEAM_DEPTH
                 && parseFloat(areaSlider.value) === DEFAULT_AREA_SQFT
+                // Unchecked IS the default (spec 10, C2), so the static
+                // out/ fast path stays valid until it is ticked.
+                && !softGroundStoryToggle.checked
                 && earthquakeParamsAtDefault();
         }
 
@@ -4084,6 +4262,13 @@
         });
         areaSlider.addEventListener('input', (e) => {
             areaLabel.textContent = Math.round(parseFloat(e.target.value)) + ' sq ft';
+            scheduleLiveRecompute();
+        });
+        // 'change', not 'input' -- a checkbox fires exactly once either
+        // way, and a soft ground story is a whole-building rebuild, not a
+        // value being dragged through.
+        softGroundStoryToggle.addEventListener('change', (e) => {
+            softGroundStoryLabel.textContent = e.target.checked ? 'on' : 'off';
             scheduleLiveRecompute();
         });
 
