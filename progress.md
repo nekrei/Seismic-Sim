@@ -1530,3 +1530,54 @@ spuriously.
     differentiation**, which matters because re-differentiating the
     trimmed displacement would run it back through the drift-removal
     filter.
+
+## Task 4 — material strengths and derived capacities
+
+- Red first: check 8 failing on `column_plastic_moment exists`.
+- Constants `F_Y_STEEL`, `F_C_CONCRETE`, `RHO_LONGITUDINAL`,
+  `CONCRETE_COVER`, `PHI_AXIAL`, `AXIAL_CAP_FACTOR`, all marked
+  `TO VERIFY`, all exposed as `MDOF_ShearBuilding` kwargs so spec 18's
+  generator can vary them.
+- New module functions `column_section_for_axis()`,
+  `column_plastic_moment()`, `story_plastic_shear()`,
+  `column_axial_capacity()`. Per-instance profiles `M_p_profile`,
+  `V_p_profile`, `P_cap_profile`, `delta_y_profile` (in
+  `_stability_coefficients()`), and `mu_demand` (in
+  `_demand_stability_coefficients()`, since it needs a solved response).
+- Nothing here touches the elastic solve — check 1 still bit-identical.
+
+### Green
+
+```
+    axis X: b=1.100 m  d=1.050 m  A_s=0.023100 m^2  a=0.345882 m  ->  M_p=8.509225e+06 N*m
+[PASS] 8a. M_p matches the independent derivation, both axes -- rel = 0.000e+00
+[PASS] 8a. M_p in the 1e5-1e7 N*m band -- 8.5092e+06 N*m
+[PASS] 8b. V_p == 8*M_p/h over the 4 corner columns -- 1.944966e+07 N
+    A_g=1.2100 m^2  A_st=0.024200 m^2  P_cap per column=2.100899e+07 N
+[PASS] 8c. P_cap matches independently, and is in the 1e6-1e8 N band -- 8.4036e+07 N
+[PASS] 8d. yield drift ratio per story (%) = [1.0138 1.6551 1.7635 1.7829 1.7878 1.8003 1.943]
+[PASS] 8d. delta_y,i == V_p,i / k0,i -- [0.035485 0.057929 0.061723 0.0624 0.062573 0.063009 0.068005] m
+[PASS] 8e. mu_demand = [0.29099 0.28617 0.26356 0.24457 0.21124 0.15731 0.09487] on KOCAELI_ATK X
+ALL CHECKS PASSED
+```
+
+Yield drift ratios land at 1.0–1.9%, inside check 8d's 0.1–3% band — that
+band is a units-error detector, and a units error here would still animate
+plausibly. μ < 1 on every story of KOCAELI_ATK, i.e. the default building
+stays elastic under the strongest record in the set.
+
+### Rulings
+
+11. **`column_section_for_axis()` is a shared helper, not a second
+    convention.** The capacity formulas need the same (width, bending
+    depth) split `column_inertia()` uses. Factoring it out means the
+    capacity side cannot drift from the stiffness side — which is the
+    exact failure mode ruling 2 was protecting `column_inertia` from in
+    the other direction.
+12. **`story_plastic_shear` keeps the summation form** (`n_columns *
+    (M_p + M_p) / h`) even though identical columns collapse it to
+    `8*M_p/h`, because spec 11 makes the columns differ per story.
+13. **The P-M interaction simplification is named in the docstring**, with
+    its upgrade path (a simplified P-M interaction reusing the `P_i`
+    `geometric_stiffness_matrix()` already computes). `M_p` must not be
+    presented as *the* column capacity without it.

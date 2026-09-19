@@ -95,6 +95,21 @@ C_D_DEFLECTION_AMPLIFICATION = 1.0
 # post -- and is deliberately not used here.
 THETA_IGNORE = 0.10
 THETA_CODE_CAP = 0.25   # TO VERIFY against the primary standard
+
+# --- RC material strengths and capacities (spec 10, Part D) ---------------
+# Illustrative RC material properties. Representative, NOT a design
+# specification -- this project has no rebar detailing model, and the
+# capacities below carry a named simplification (see column_plastic_moment).
+# Nothing in Part D affects the elastic solve; it exists so spec 11's
+# backbones and spec 15's impact trigger read real capacities off the same
+# geometry the stiffness already came from, instead of guessing.
+F_Y_STEEL = 420e6          # Pa, Grade 60                        -- TO VERIFY
+F_C_CONCRETE = 30e6        # Pa                                  -- TO VERIFY
+RHO_LONGITUDINAL = 0.02    # column longitudinal steel ratio;
+                           # ACI 318 permits 0.01-0.06           -- TO VERIFY
+CONCRETE_COVER = 0.05      # m, to bar centroid                  -- TO VERIFY
+PHI_AXIAL = 0.65           # ACI 318 strength reduction, tied    -- TO VERIFY
+AXIAL_CAP_FACTOR = 0.80    # ACI 318 max axial, tied columns     -- TO VERIFY
 # Furniture time-series are decimated toward this rate before being written
 # to out/<record>/furniture_response.bin -- see furniture_decimation's
 # docstring for why this is a legitimate sampling-theorem application, not
@@ -375,6 +390,93 @@ def build_condensed_K(N, E, I_c, I_b, h, L):
     K_full = assemble_frame_stiffness(N, E, I_c, I_b, h, L)
     K_one_frame = condense_rotations(K_full, N)
     return N_PARALLEL_FRAMES * K_one_frame
+
+
+def column_section_for_axis(b_x, b_y, axis):
+    """(width b, bending depth) of a column resisting sway in `axis`.
+
+    Reuses column_inertia's convention exactly: resisting X-sway bends
+    about the Y-dimension face, so the bending depth is b_x and the width
+    is b_y; Y is the transpose. Kept as one function so the capacity
+    formulas below cannot drift from the stiffness formulas above.
+    """
+    if axis == "X":
+        return b_y, b_x
+    elif axis == "Y":
+        return b_x, b_y
+    raise ValueError(f"axis must be 'X' or 'Y', got {axis!r}")
+
+
+def column_plastic_moment(b_x, b_y, axis, f_y=F_Y_STEEL, f_c=F_C_CONCRETE,
+                          rho=RHO_LONGITUDINAL, cover=CONCRETE_COVER):
+    """
+    Plastic moment capacity of ONE column, bending about the axis relevant
+    to sway in `axis` (spec 10, D2):
+
+        d   = depth_bending - cover
+        A_s = rho * b * d
+        a   = A_s*f_y / (0.85*f_c*b)
+        M_p = A_s*f_y*(d - a/2)
+
+    **Named simplification: this is a singly-reinforced FLEXURAL capacity
+    and ignores axial load entirely.** Real columns carry large axial
+    force, which raises moment capacity up to the balance point and
+    reduces it above -- the P-M interaction diagram. Getting that right
+    needs a section analysis this project does not have.
+
+    Upgrade path: a simplified P-M interaction using the same `P_i`
+    geometric_stiffness_matrix() already computes. Until then M_p must not
+    be presented as *the* column capacity without this caveat attached --
+    see knowledge/mdof_response.md and the math PDF, which carry it too.
+
+    Scalar or per-story arrays both work (b_x/b_y may be arrays).
+    """
+    b, depth = column_section_for_axis(b_x, b_y, axis)
+    d = depth - cover
+    A_s = rho * b * d
+    a = A_s * f_y / (0.85 * f_c * b)
+    return A_s * f_y * (d - a / 2)
+
+
+def story_plastic_shear(b_x, b_y, axis, h, **kwargs):
+    """
+    Story plastic shear capacity (spec 10, D3):
+
+        V_p,i = sum_j (M_p,ij^top + M_p,ij^bot) / h_i
+
+    over the 2*N_PARALLEL_FRAMES = 4 corner columns, each hinging at top
+    and bottom. With identical columns and identical top/bottom detailing
+    that collapses to 8*M_p/h_i -- the summation form is kept anyway
+    because spec 11 makes the columns differ per story.
+
+    Inherits column_plastic_moment's axial-load simplification.
+    """
+    n_columns = 2 * N_PARALLEL_FRAMES
+    M_p = column_plastic_moment(b_x, b_y, axis, **kwargs)
+    return n_columns * (M_p + M_p) / np.asarray(h, dtype=float)
+
+
+def column_axial_capacity(b_x, b_y, f_y=F_Y_STEEL, f_c=F_C_CONCRETE,
+                          rho=RHO_LONGITUDINAL, phi=PHI_AXIAL,
+                          cap_factor=AXIAL_CAP_FACTOR):
+    """
+    Total axial capacity of a story's 2*N_PARALLEL_FRAMES corner columns
+    (spec 10, D4):
+
+        A_g      = b_x*b_y,   A_st = rho*A_g
+        P_cap,ij = cap_factor*phi*[0.85*f_c*(A_g - A_st) + f_y*A_st]
+        P_cap,i  = sum_j P_cap,ij
+
+    Spec 15's pancake cascade compares an assumed impact force against
+    this. Exported now so that comparison is against a number derived from
+    the same section the stiffness came from, rather than a fresh
+    invention at animation time.
+    """
+    A_g = b_x * b_y
+    A_st = rho * A_g
+    per_column = cap_factor * phi * (
+        0.85 * f_c * (A_g - A_st) + f_y * A_st)
+    return 2 * N_PARALLEL_FRAMES * per_column
 
 
 class GravityInstabilityError(Exception):
@@ -734,7 +836,11 @@ class MDOF_ShearBuilding:
                  plan_span_x=PLAN_SPAN_X, plan_span_y=PLAN_SPAN_Y,
                  section_stiffness_mode=DEFAULT_SECTION_STIFFNESS_MODE,
                  cracked_factor_column=None, cracked_factor_beam=None,
-                 p_delta=True):
+                 p_delta=True,
+                 f_y=F_Y_STEEL, f_c=F_C_CONCRETE,
+                 rho_longitudinal=RHO_LONGITUDINAL,
+                 concrete_cover=CONCRETE_COVER, phi_axial=PHI_AXIAL,
+                 axial_cap_factor=AXIAL_CAP_FACTOR):
         self.N = num_stories
         self.m = mass_per_floor
         self.zeta = zeta
@@ -769,6 +875,16 @@ class MDOF_ShearBuilding:
             preset_b if cracked_factor_beam is None else cracked_factor_beam)
         self.p_delta = bool(p_delta)
         self.gravity_unstable = False
+
+        # RC material properties (spec 10, D1) -- kwargs so spec 18's
+        # generator can vary them. They affect capacities only, never the
+        # elastic solve.
+        self.f_y = float(f_y)
+        self.f_c = float(f_c)
+        self.rho_longitudinal = float(rho_longitudinal)
+        self.concrete_cover = float(concrete_cover)
+        self.phi_axial = float(phi_axial)
+        self.axial_cap_factor = float(axial_cap_factor)
 
         self._build_matrices()
         self._modal_analysis()
@@ -905,6 +1021,28 @@ class MDOF_ShearBuilding:
         """
         self.k0_profile = self._elastic_k0()
         self.theta_stiffness = self.k_g / self.k0_profile
+
+        # Derived member capacities (spec 10, Part D). None of this touches
+        # the elastic solve -- it exists so spec 11's backbones and spec
+        # 15's impact trigger read capacities off the same geometry the
+        # stiffness came from. Each inherits column_plastic_moment's
+        # axial-load (P-M interaction) simplification.
+        self.M_p_profile = column_plastic_moment(
+            self.column_depth_x, self.column_depth_y, self.axis,
+            f_y=self.f_y, f_c=self.f_c, rho=self.rho_longitudinal,
+            cover=self.concrete_cover)
+        self.V_p_profile = story_plastic_shear(
+            self.column_depth_x, self.column_depth_y, self.axis, self.h,
+            f_y=self.f_y, f_c=self.f_c, rho=self.rho_longitudinal,
+            cover=self.concrete_cover)
+        self.P_cap_profile = column_axial_capacity(
+            self.column_depth_x, self.column_depth_y,
+            f_y=self.f_y, f_c=self.f_c, rho=self.rho_longitudinal,
+            phi=self.phi_axial, cap_factor=self.axial_cap_factor)
+
+        # Story yield shear == plastic shear capacity (spec D5), so the
+        # yield drift follows from the elastic story stiffness.
+        self.delta_y_profile = self.V_p_profile / self.k0_profile
 
     def _modal_analysis(self):
         """Solve generalized eigenvalue problem: K φ = ω² M φ using scipy.linalg.eigh."""
@@ -1063,6 +1201,14 @@ class MDOF_ShearBuilding:
                              np.inf)
         self.theta_demand = theta
         self.story_shear_at_peak_drift = V_at_peak
+
+        # Demand ductility ratio (spec 10, D5). **An ELASTIC-DEMAND
+        # indicator only, and must be labelled as one everywhere it
+        # appears.** An elastic model over-predicts force and
+        # under-predicts displacement once the real structure yields, so
+        # mu_i > 1 here means "this story would have yielded" -- NOT "this
+        # story reached ductility mu_i". Reported, never enforced.
+        self.mu_demand = self.peak_drift / self.delta_y_profile
 
     def compute_furniture_response(self):
         """
