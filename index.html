@@ -1027,7 +1027,14 @@
                      Nothing is special-cased; the softness is an emergent
                      consequence of k ~ 1/h^3 and k_g = P/h. -->
                 <div class="ctrl-row">
-                    <span class="panel-label">Soft ground story</span>
+                    <!-- A real <label for>, not a <span>: without it the
+                         checkbox has NO accessible name and a screen
+                         reader announces it as "on" (an unnamed checkbox
+                         falls back to its default value attribute) --
+                         confirmed in the accessibility tree during the
+                         real-browser pass. It also makes the text itself
+                         a click target, for free. -->
+                    <label class="panel-label" for="softGroundStoryToggle">Soft ground story</label>
                     <input type="checkbox" id="softGroundStoryToggle" />
                     <span class="panel-value" id="softGroundStoryLabel">off</span>
                 </div>
