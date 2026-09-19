@@ -1740,3 +1740,86 @@ comparisons), `fft_check`, `check_index_syntax` (parses OK, 171879 chars).
     out at its intrinsic device-pixel attribute size. The symptom is
     near-invisible on desktop, which is why it needs a check rather than an
     eyeball.
+
+## Task 7 — regenerate `out/`, full check sweep
+
+### The `out/` diff — expected, and flagged before committing per AGENTS.md
+
+```
+60 files changed, 403348 insertions(+), 401668 deletions(-)
+```
+
+Changed (10 records each): `building_data.json`, `furniture_response.bin`,
+`response_X.csv`, `response_Y.csv`, `response_plot_X.png`,
+`spectrum_plot_X.png`.
+
+**Unchanged, and this is the check that matters:** `ground_accel.json` and
+`spectrum.json` — **zero** of the 20 moved. The ground motion is invariant
+under every Building Parameter, which is precisely what AGENTS.md says and
+what lets `spectrum.json` stay frontend-only and out of the
+`seismic-sim-backend` mirror. Had either moved, something would have been
+reaching into the record.
+
+`response_plot_X.png` and `spectrum_plot_X.png` move because they overlay
+the building's own transfer function, which is what this spec changed.
+
+### T₁, before → after (identical across all 10 records, as expected — the
+building parameters do not vary by record)
+
+| | before | after | change |
+|---|---|---|---|
+| T₁ X | 1.062352 s | **1.621202 s** | +52.6% |
+| T₁ Y | 0.946466 s | **1.452074 s** | +53.4% |
+
+Decomposed: cracked sections alone give 1.589161 s (X) — measured in Task
+2 — so P-Δ contributes the remaining +2.0%, consistent with
+θ_stiffness ≈ 0.036–0.050 at the default build. Both effects lengthen the
+period, both are real, and neither is the naive `sqrt(1/0.35) = 1.69`.
+
+### Full sweep — every check confirmed to have run a real comparison
+
+| Script | Result |
+|---|---|
+| `verify_elastic_foundation.py` | **ALL CHECKS PASSED** — check 9 went green on its own, as designed |
+| `verify_frame_furniture.py` | ALL CHECKS PASSED |
+| `verify_floor_area.py` | ALL CHECKS PASSED (18 checks) |
+| `verify_spectrum.py` | OVERALL: PASS |
+| `verify_synthetic_earthquake.py` | Checks 1–4 PASS *(after a fix — see below)* |
+| `check_quake_continuity.py` | OK — identity rel-err 4.3e-16 |
+| `check_ground_accel_block.py` | ALL CHECKS PASSED — **zero unaccounted trailing bytes**, so no binary block appeared by accident |
+| `fft_check.mjs` + `fft_check_scipy.py` | ALL CHECKS PASS — complex rel_err 3.40e-14 at both lengths |
+| `check_footprint_area.mjs` | ALL CHECKS PASSED (14 checks) |
+| `check_sway_gain.mjs` | OK |
+| `check_furniture_gain.mjs` | OK |
+| `check_time_domain.mjs` | ALL CHECKS PASSED (7176 comparisons) |
+| `check_index_syntax.mjs` | parses OK (171879 chars) |
+| `check_story_heights.mjs` | ALL CHECKS PASSED |
+
+### Pre-existing defect found and fixed: a check that had never run
+
+`claude_scripts/verify_synthetic_earthquake.py` did
+`from mdof_response import ...` with **no `sys.path` setup at all**, and its
+own docstring says to run it as
+`python claude_scripts/verify_synthetic_earthquake.py` from the repo root —
+which puts `claude_scripts/` on `sys.path`, not the root. It raised
+`ModuleNotFoundError` every time. **This is spec 7's check, and it has been
+dead since it was written.** Fixed with the same two lines
+`verify_floor_area.py` and `verify_frame_furniture.py` already carry. It now
+passes all 4 checks, including `/compute` parity at defaults.
+
+This is exactly what Task 7's "each confirmed to have run a real comparison,
+not just exited 0" is for.
+
+### Ruling
+
+24. **`verify_frame_furniture.py` did NOT need parameterising**, contrary to
+    the plan's Task 7 step 2. It passed unchanged, and for a good reason:
+    ruling 2 kept the cracked multiplier out of
+    `column_inertia`/`beam_inertia`/`build_condensed_K`, so its closed-form
+    comparisons still compare gross against gross and remain exactly as
+    strict as before. Cracked-section coverage lives in
+    `verify_elastic_foundation.py` check 2c, which compares against the
+    closed form evaluated with cracked inertias over 12 geometries
+    (worst rel 6.087e-16). Parameterising it as well would have been
+    redundant work whose only effect would be to weaken the separation
+    ruling 2 exists to protect. **Its tolerance was not touched.**
