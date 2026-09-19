@@ -1297,3 +1297,104 @@ offline checks):
   live and local header **key sets** rather than a memorised list, so
   `has_ground_accel` is caught automatically; AGENTS.md carries the bullet.
 - `graphify update .` run.
+
+---
+
+# Spec 10 — Elastic foundation for collapse modelling
+
+Branch `goal/10-elastic-foundation`, worktree
+`.worktrees/goal-10-elastic-foundation`. Plan:
+`claude_scripts/plans/2026-09-20-10-elastic-foundation.md` (10 tasks).
+
+## Task 0 — pre-spec-10 baseline fixture
+
+- New `claude_scripts/make_baseline_fixture.py`; output
+  `claude_scripts/fixtures/pre_spec10_baseline.npz` (10.70 MB, 1102 arrays).
+- Ran against the **unmodified** code, before any spec-10 edit. This is the
+  only moment the "before" exists; verification check 1 (bit-identity of the
+  gross / P-Delta-off / uniform-profile configuration) is the gate on the
+  whole spec and has nothing to compare against without it.
+- Captured per combination: `K`, `omega_n`, `phi`, `Gamma`,
+  `story_stiffness`. Plus, at default parameters on `KOCAELI_ATK` (both
+  axes): `time`, `ground_disp`, `floor_disp_rel`, `floor_disp_abs`,
+  `floor_accel_abs`, and the decimated furniture block
+  (`npts=26624`, `dt=0.005`).
+- `git diff --stat out/` empty at capture time — baseline `out/` is the
+  committed state, as the plan requires.
+
+### Rulings
+
+1. **216 combinations, not the plan's 12.** The plan listed
+   N ∈ {1,2,7,20} × column {0.3,1.10,2.0} × beam {0.2,1.50,3.0} ×
+   area {200, 542.501085, 2000} × both axes and called it "12-combination";
+   the full cartesian product of those same lists is 4·3·3·3·2 = 216. Taking
+   the product is *less* code than any one-at-a-time subset and runs in
+   seconds, so the fixture is a strict superset of what the plan asked for.
+   The shipped default sits in the middle of each list, so the default
+   building is always one of the cells.
+2. **Nothing to commit for Task 0.** The plan says
+   `Commit: add pre-spec-10 baseline fixture`, but `claude_scripts/` is
+   gitignored (`.gitignore:16`) — the fixture cannot be committed. It
+   persists in the main checkout instead, which the worktree reaches through
+   the `claude_scripts` directory junction, so it survives this worktree
+   being deleted. No commit was made; `git status` is clean.
+- `floor_accel_abs` was captured beyond the plan's list because Task 3
+  reuses it for `θ_demand` — a regression there would otherwise be invisible
+  until the furniture block moved.
+
+## Task 1 — per-floor property arrays (pure refactor)
+
+- `claude_scripts/verify_elastic_foundation.py` written first, with check 1
+  in four parts: 1a (216 matrix combinations), 1b (full `KOCAELI_ATK`
+  response both axes), 1c (uniform arrays == scalars — **the red test**),
+  1d (`total_height == sum(h)`).
+  Red run: 1a/1b PASS, 1c FAIL
+  (`TypeError: unsupported operand type(s) for ** or pow(): 'list' and 'int'`),
+  1d skipped. Exactly the expected pre-refactor state.
+- `assemble_frame_stiffness()` now normalises `I_c`/`I_b`/`h` to length-N
+  arrays and indexes per story; `L` stays scalar (it is a plan dimension).
+- `MDOF_ShearBuilding._per_floor()` added; `self.h`,
+  `self.column_depth_x/y`, `self.beam_depth` are arrays;
+  `self.total_height = h.sum()`.
+- Consumer sites updated: `save_building_data()`'s `story_height` /
+  `column_depth_x` / `column_depth_y` / `beam_depth` and `server.py`'s
+  header `story_height` now read element `[0]` (ground story) and keep
+  their scalar wire types. A full grep confirmed those six lines are the
+  only readers of these attributes anywhere in the repo.
+
+### Green
+
+```
+[PASS] 1a. K / omega_n / phi / Gamma bit-identical over 216 parameter combinations -- all exact
+[PASS] 1b. full response on KOCAELI_ATK bit-identical (both axes, incl. floor_accel_abs and the decimated furniture block) -- all exact
+[PASS] 1c. uniform per-floor arrays give bit-identical K / omega_n / phi / Gamma to the equivalent scalars -- all exact
+[PASS] 1d. total_height == sum(story_height), and == N*h when uniform -- non-uniform total=24.5, uniform total=24.5
+ALL CHECKS PASSED
+```
+
+`verify_frame_furniture.py` and `verify_floor_area.py` both re-run: ALL
+CHECKS PASSED. Full pipeline regenerated over all 10 records →
+`git diff --stat out/` **empty**. That is check 1's end-to-end half.
+
+### Rulings
+
+3. **Bit-identity is protected by extracting Python floats inside the
+   assembly loop** (`c = 2.0*E*float(I_c_arr[i-1])`, `h = float(h_arr[i-1])`)
+   rather than doing array arithmetic. A probe confirmed numpy and Python
+   agree bitwise on `d**3` for every value in the matrix, so this was
+   belt-and-braces rather than strictly necessary — but it keeps the
+   expression tree provably identical to the pre-spec-10 code instead of
+   resting on a libm detail.
+4. **A wrong-length profile raises, never truncates or recycles**
+   (`_per_floor`). A truncated profile is a different building that still
+   renders plausibly — invisible on screen. Same rule server.py will apply
+   as a 400 in Task 5.
+5. **`verify_elastic_foundation.py` passes `section_stiffness_mode`/
+   `p_delta` only once `__init__` actually accepts them**, decided by
+   `inspect.signature`. That keeps one script valid across Tasks 1→3
+   instead of needing an edit at each step; the resolved kwargs are printed
+   on every run, so a silently-missing one is visible rather than assumed.
+6. **`save_building_data()` and the `/compute` header keep scalar
+   `story_height`/`column_depth_*`/`beam_depth`**, now read as element
+   `[0]` (the ground story). The full per-floor profiles ship as separate
+   keys in Task 5; nothing downstream changes shape in this task.
