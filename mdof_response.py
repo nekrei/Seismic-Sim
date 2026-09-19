@@ -73,6 +73,28 @@ SECTION_STIFFNESS_PRESETS = {
     "asce41-17-low-axial": (0.30, 0.30),  # TO VERIFY -- Table 10-5 low-axial end, secondary-sourced
 }
 DEFAULT_SECTION_STIFFNESS_MODE = "project-default"
+
+# --- P-Delta / gravity (spec 10, Part B) ----------------------------------
+# Standard gravity. Numerically the same constant as G_TO_MS2 above -- that
+# one is a unit conversion (g -> m/s^2 for PEER records), this one is an
+# actual acceleration entering the physics, so it gets its own name rather
+# than overloading the converter's.
+GRAVITY_MS2 = G_TO_MS2  # 9.80665 m/s^2
+
+# Deflection amplification factor used in theta_demand. This model is not
+# code-designed and has no C_d; inventing one would be a fabricated number,
+# so it is exactly 1.0 and said so out loud (spec 10, B5).
+C_D_DEFLECTION_AMPLIFICATION = 1.0
+
+# ASCE 7-16 Sec 12.8.7 -- verified against multiple secondary readings of
+# the clause (the primary standard is paywalled and was not read): theta
+# <= 0.10 may be ignored; theta is capped at min(0.5/(beta*Cd), 0.25),
+# above which the structure is to be redesigned. The widely-repeated
+# "0.33 = instability" figure that both of this project's research
+# documents quote is NOT in ASCE 7-16 -- it traces to a consulting blog
+# post -- and is deliberately not used here.
+THETA_IGNORE = 0.10
+THETA_CODE_CAP = 0.25   # TO VERIFY against the primary standard
 # Furniture time-series are decimated toward this rate before being written
 # to out/<record>/furniture_response.bin -- see furniture_decimation's
 # docstring for why this is a legitimate sampling-theorem application, not
@@ -355,6 +377,113 @@ def build_condensed_K(N, E, I_c, I_b, h, L):
     return N_PARALLEL_FRAMES * K_one_frame
 
 
+class GravityInstabilityError(Exception):
+    """
+    Raised when gravity overwhelms lateral stiffness -- the building cannot
+    stand up under its own weight at these parameters (spec 10, B3).
+
+    This is a *physically meaningful result*, not a crash, and it exists
+    because the alternative is much worse than an exception:
+    `scipy.linalg.eigh(K, M)` requires **M** positive definite, not K, and
+    M always is. So an indefinite K_L returns a NEGATIVE eigenvalue,
+    `np.sqrt` turns it into `nan`, and that `nan` propagates silently
+    through `settle_time = 5/(zeta*omega_1)`, the entire FFT solve, and
+    into the JSON header -- where `json.dumps` emits a bare `NaN` token
+    that `JSON.parse` rejects, surfacing in the browser as a parse error a
+    very long way from its cause.
+
+    `story` is the 0-indexed story that gave way first (largest
+    k_g,i / k0,i), so callers can say *where*, not just *that*.
+    """
+
+    def __init__(self, message, story=None):
+        super().__init__(message)
+        self.story = story
+
+
+def geometric_stiffness_matrix(N, m_per_floor, h, g=GRAVITY_MS2):
+    """
+    Linearised P-Delta geometric stiffness matrix (spec 10, B1).
+
+    Gravity acting through lateral drift produces an overturning moment
+    that first-order analysis misses. Per story:
+
+        k_g,i = P_i / h_i,      P_i = g * sum_{j >= i} m_j
+
+    P_i is the gravity load story i's columns carry -- every floor mass at
+    or above it. With uniform mass that makes k_g largest at the BASE,
+    which is not incidental: it is why the lower stories go unstable first,
+    and it is the mechanism the whole collapse roadmap rests on.
+
+    Assembled with shear-building topology (story i contributes
+    k_g,i * b_i b_i^T with b_i = e_i - e_{i-1}, e_0 dropped at the fixed
+    base):
+
+        K_G[i,i]   = k_g,i + k_g,i+1        (k_g,N+1 == 0)
+        K_G[i,i+1] = K_G[i+1,i] = -k_g,i+1
+
+    **K_G is tridiagonal even though the condensed K is not, and that is
+    correct, not an inconsistency.** K is full because joint rotations were
+    condensed out of a frame; K_G is tridiagonal because the P-Delta moment
+    depends only on each story's *relative* drift. Do not "fix" the
+    topology mismatch.
+
+    `m_per_floor` and `h` may be scalar or per-story. Returns
+    (K_G, k_g, P) so callers do not have to re-derive k_g from the matrix.
+    """
+    m_arr = np.broadcast_to(np.asarray(m_per_floor, dtype=float), (N,)).copy()
+    h_arr = np.broadcast_to(np.asarray(h, dtype=float), (N,)).copy()
+
+    # P_i = g * sum of every floor mass at or above story i.
+    P = g * np.cumsum(m_arr[::-1])[::-1]
+    k_g = P / h_arr
+
+    K_G = np.zeros((N, N))
+    for i in range(N):
+        k_above = k_g[i + 1] if i + 1 < N else 0.0
+        K_G[i, i] = k_g[i] + k_above
+        if i + 1 < N:
+            K_G[i, i + 1] = -k_g[i + 1]
+            K_G[i + 1, i] = -k_g[i + 1]
+    return K_G, k_g, P
+
+
+def story_stiffness_profile(K_L, M, phi1):
+    """
+    Per-story lateral stiffness k0,i via a first-mode pushover
+    (spec 10, B4):
+
+        s     = M @ phi1          (first-mode-proportional lateral pattern)
+        K_L u = s                 (static solve)
+        delta_i = u_i - u_{i-1}   (story drift, u_0 = 0)
+        V_i     = sum_{j >= i} s_j
+        k0,i    = V_i / delta_i
+
+    Downstream this is "the stiffness of story i" everywhere -- the
+    stability coefficient below, spec 11's backbone anchors, spec 14's
+    colouring, spec 18's drift-based sizing. The condensed K cannot supply
+    one: it is full, and its diagonal is not a story spring.
+
+    **This is an approximation for a frame** -- flexural coupling means no
+    exact story-spring decomposition exists -- but it has an exact limiting
+    case that makes it checkable: at the rigid-beam limit (rho -> infinity)
+    the condensed K becomes exactly a shear-building matrix, and then
+    V_i/delta_i reproduces its story springs for ANY load pattern, to
+    floating-point precision. That is verification check 5.
+
+    Sign-invariant: eigh may return phi1 with either sign, and s, u, delta
+    and V all flip together, so k0 does not.
+
+    `MDOF_ShearBuilding.story_stiffness` (K[0,0], spec 5 metadata) is NOT
+    this and must not be repurposed.
+    """
+    s = M @ phi1
+    u = np.linalg.solve(K_L, s)
+    delta = np.diff(np.concatenate(([0.0], u)))
+    V = np.cumsum(s[::-1])[::-1]
+    return V / delta
+
+
 def frame_story_stiffness_closed_form(E, I_c, I_b, h, L):
     """
     A3's hand-derived single-story closed form for ONE planar frame (2
@@ -604,7 +733,8 @@ class MDOF_ShearBuilding:
                  beam_depth=1.50, axis="X", E=E_CONCRETE,
                  plan_span_x=PLAN_SPAN_X, plan_span_y=PLAN_SPAN_Y,
                  section_stiffness_mode=DEFAULT_SECTION_STIFFNESS_MODE,
-                 cracked_factor_column=None, cracked_factor_beam=None):
+                 cracked_factor_column=None, cracked_factor_beam=None,
+                 p_delta=True):
         self.N = num_stories
         self.m = mass_per_floor
         self.zeta = zeta
@@ -637,9 +767,12 @@ class MDOF_ShearBuilding:
             preset_c if cracked_factor_column is None else cracked_factor_column)
         self.cracked_factor_beam = float(
             preset_b if cracked_factor_beam is None else cracked_factor_beam)
+        self.p_delta = bool(p_delta)
+        self.gravity_unstable = False
 
         self._build_matrices()
         self._modal_analysis()
+        self._stability_coefficients()
 
     def _per_floor(self, value, name):
         """Normalise a scalar-or-length-N property to a length-N float array.
@@ -678,7 +811,27 @@ class MDOF_ShearBuilding:
         self.I_b = self.cracked_factor_beam * beam_inertia(
             self.beam_depth, BEAM_WIDTH)
         self.L = frame_span(self.axis, self.plan_span_x, self.plan_span_y)
-        self.K = build_condensed_K(self.N, self.E, self.I_c, self.I_b, self.h, self.L)
+
+        # Elastic (cracked) frame stiffness, before gravity. Kept as its
+        # own attribute because spec 11 needs the undamaged story
+        # stiffnesses separately, and every verification check that
+        # isolates P-Delta needs the "before" matrix.
+        self.K_no_pdelta = build_condensed_K(
+            self.N, self.E, self.I_c, self.I_b, self.h, self.L)
+
+        # K_G depends only on masses and story heights -- never on the
+        # response -- so it is constant and everything downstream (the
+        # eigensolve, H_n(jw), the FFT solve, the participation factors,
+        # transfer_function() and its JS mirror) is untouched in form.
+        self.K_G, self.k_g, self.P_gravity = geometric_stiffness_matrix(
+            self.N, self.m, self.h)
+
+        if self.p_delta:
+            self.K = self.K_no_pdelta - self.K_G
+        else:
+            # Assigned directly, not via a zero-scaled subtraction, so the
+            # regression path is bit-identical rather than merely close.
+            self.K = self.K_no_pdelta
 
         # Base-story (floor 1) condensed lateral stiffness -- useful
         # metadata (period readout, sanity display), but explicitly NOT a
@@ -688,6 +841,71 @@ class MDOF_ShearBuilding:
         # long-range coupling" wording, not exact tridiagonality).
         self.story_stiffness = float(self.K[0, 0])
 
+    def _elastic_k0(self):
+        """Per-story elastic stiffness k0,i, from `K_no_pdelta`.
+
+        **The denominator is the ELASTIC (pre-gravity) stiffness, not
+        `self.K`.** Spec 10 B4 writes the pushover as `K_L u = s` with
+        `K_L = K_cracked - K_G`, but that contradicts B5's own stated
+        meaning of theta ("how much of this story's stiffness gravity has
+        already eaten") and breaks verification check 6's exact N=1
+        identity. With k0 from K_L you get k_g/k_eff = theta/(1-theta)
+        instead of theta -- measured as a 7e-6 relative miss on that
+        identity, which is what exposed it. ASCE 7's theta uses the
+        first-order stiffness too, and spec 11's `k_t,i <= P_i/h_i`
+        criterion wants a tangent stiffness that gravity has not already
+        been subtracted from. See progress.md's ruling for spec 10 Task 3.
+
+        Using K_no_pdelta's own first mode (rather than self.phi[:, 0])
+        also makes k0 a pure property of the elastic frame: toggling
+        p_delta no longer perturbs it, so theta stays comparable across
+        that toggle.
+        """
+        eigvals, eigvecs = scipy_eigh(self.K_no_pdelta, self.M, lower=True)
+        phi1 = eigvecs[:, np.argsort(eigvals)[0]]
+        return story_stiffness_profile(self.K_no_pdelta, self.M, phi1)
+
+    def _weakest_story(self):
+        """0-indexed story with the largest k_g,i / k0,i -- the one gravity
+        ate first, reported by GravityInstabilityError so a caller can say
+        *where*, not just *that*.
+
+        Runs on the error path, where `self.K` is the indefinite matrix
+        whose eigenproblem just failed, so `_elastic_k0()`'s use of
+        `K_no_pdelta` is load-bearing here and not just a preference.
+        Falls back to the diagonal if even that solve fails, so the
+        diagnostic can never itself raise and mask the real error.
+        """
+        try:
+            k0 = self._elastic_k0()
+        except Exception:  # noqa: BLE001 -- diagnostics must not raise
+            k0 = np.diag(self.K_no_pdelta)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(k0 > 0, self.k_g / k0, np.inf)
+        return int(np.argmax(ratio))
+
+    def _stability_coefficients(self):
+        """Per-story stiffness k0,i and the response-independent stability
+        coefficient theta_stiffness,i = k_g,i / k0,i (spec 10, B4/B5).
+
+        theta_stiffness reads directly as "how much of this story's
+        stiffness gravity has already eaten", and it is exactly the
+        quantity spec 11's collapse criterion (k_t,i <= P_i/h_i)
+        generalises, with the *tangent* stiffness in the denominator.
+
+        It is NOT monotonically decreasing with height for this model, and
+        that is real: story 1's columns are fixed at the base while every
+        story above has a rotating joint at both ends, so k0,1 is markedly
+        the largest and theta peaks at story 2. Verification check 6
+        originally asserted a story-1 peak; that assumed a uniform k0 and
+        was corrected to report the peak instead.
+
+        The response-dependent theta_demand needs a solved time history and
+        is computed by compute_response() instead.
+        """
+        self.k0_profile = self._elastic_k0()
+        self.theta_stiffness = self.k_g / self.k0_profile
+
     def _modal_analysis(self):
         """Solve generalized eigenvalue problem: K φ = ω² M φ using scipy.linalg.eigh."""
         # Use SciPy's eigh which supports the b matrix for generalized problems
@@ -695,6 +913,23 @@ class MDOF_ShearBuilding:
 
         # Sort by ascending eigenvalues
         idx = np.argsort(eigvals)
+
+        # Gravity-instability guard (spec 10, B3) -- BEFORE np.sqrt, which
+        # is the whole point. eigh needs M positive definite, not K, so an
+        # indefinite K_L comes back as a negative eigenvalue rather than an
+        # error, and sqrt would quietly turn it into nan. See
+        # GravityInstabilityError's docstring for where that nan ends up.
+        if eigvals[idx][0] <= 0.0:
+            self.gravity_unstable = True
+            raise GravityInstabilityError(
+                f"Gravity exceeds lateral stiffness: the building cannot "
+                f"stand under its own weight at these parameters "
+                f"(story {self._weakest_story() + 1} of {self.N}, axis "
+                f"{self.axis}; smallest eigenvalue "
+                f"{float(eigvals[idx][0]):.6e} <= 0). Reduce the mass or "
+                f"story height, or increase the column depth.",
+                story=self._weakest_story())
+
         self.omega_n = np.sqrt(eigvals[idx])
         self.phi = eigvecs[:, idx]
 
@@ -778,7 +1013,56 @@ class MDOF_ShearBuilding:
         self.floor_disp_abs = self.floor_disp_rel + self.ground_disp[np.newaxis, :]
         self.floor_accel_abs = self.floor_accel_rel + self.accel[np.newaxis, :]
 
+        self._demand_stability_coefficients()
+
         return self.time, self.ground_disp, self.floor_disp_rel, self.floor_disp_abs
+
+    def _demand_stability_coefficients(self):
+        """Response-dependent drift and stability coefficient (spec 10, B5):
+
+            theta_demand,i = P_i * delta_i,max / (V_i(t*) * h_i * C_d)
+            t* = argmax_t |delta_i(t)|
+            V_i(t) = sum_{j >= i} m_j * u_j''_abs(t)
+
+        The story shear comes straight from `floor_accel_abs`, which
+        compute_response() already produces for the furniture subsystem --
+        **no new time-domain differentiation is introduced**, which matters
+        because re-differentiating the trimmed floor displacement would run
+        it back through the drift-removal filter and distort it.
+
+        C_d is exactly 1.0 (C_D_DEFLECTION_AMPLIFICATION): this model is
+        not code-designed and has no deflection amplification factor, and
+        inventing one would be a fabricated number.
+
+        Magnitudes are taken of the shear because the drift peak and the
+        shear can carry either sign; theta is a ratio of magnitudes.
+        """
+        # Story drift from RELATIVE displacement (drift is relative by
+        # definition; the absolute arrays carry the ground motion, which
+        # would swamp it).
+        u = self.floor_disp_rel
+        drift = np.empty_like(u)
+        drift[0, :] = u[0, :]
+        if self.N > 1:
+            drift[1:, :] = u[1:, :] - u[:-1, :]
+        self.story_drift = drift
+
+        t_star = np.argmax(np.abs(drift), axis=1)
+        self.peak_drift = np.abs(drift[np.arange(self.N), t_star])
+        self.peak_drift_ratio = self.peak_drift / self.h
+
+        # V_i(t) = sum over floors at or above i of m_j * a_j_abs(t).
+        story_shear = np.cumsum(
+            (self.m * self.floor_accel_abs)[::-1, :], axis=0)[::-1, :]
+        V_at_peak = np.abs(story_shear[np.arange(self.N), t_star])
+
+        denom = V_at_peak * self.h * C_D_DEFLECTION_AMPLIFICATION
+        with np.errstate(divide="ignore", invalid="ignore"):
+            theta = np.where(denom > 0,
+                             self.P_gravity * self.peak_drift / denom,
+                             np.inf)
+        self.theta_demand = theta
+        self.story_shear_at_peak_drift = V_at_peak
 
     def compute_furniture_response(self):
         """

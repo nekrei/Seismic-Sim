@@ -1443,3 +1443,90 @@ still gross. It resolves when Task 7 regenerates `out/`. Every other check
 in that script still passes, including its closed-form comparisons — which
 is independent confirmation that ruling 2 held and the geometry helpers
 were left alone.
+
+## Task 3 — P-Δ geometric stiffness, gravity guard, k₀, θ
+
+- Red first: checks 3–6 added, failing on `p_delta exists on
+  MDOF_ShearBuilding -- not implemented yet (Task 3)`.
+- New in `mdof_response.py`: `GRAVITY_MS2`,
+  `C_D_DEFLECTION_AMPLIFICATION = 1.0`, `THETA_IGNORE = 0.10`,
+  `THETA_CODE_CAP = 0.25`, `GravityInstabilityError`,
+  `geometric_stiffness_matrix()` (returns `K_G, k_g, P`),
+  `story_stiffness_profile()`, and on the class `_elastic_k0()`,
+  `_weakest_story()`, `_stability_coefficients()`,
+  `_demand_stability_coefficients()`.
+- `_build_matrices()` now keeps `K_no_pdelta`, `K_G`, `k_g`, `P_gravity`
+  and sets `self.K = K_no_pdelta - K_G` under `p_delta=True`. With
+  `p_delta=False` it assigns `K_no_pdelta` **directly** — not via a
+  zero-scaled subtraction — so the regression path stays bit-identical.
+- `_modal_analysis()` checks `eigvals.min() > 0` **before** `np.sqrt`.
+
+### Three real defects found by the checks, none by inspection
+
+1. **`k₀` was using the wrong matrix — the one that mattered.** Spec 10 B4
+   literally writes the pushover as `K_L u = s` with `K_L = K_cracked −
+   K_G`, so that is what was implemented. Check 6's N=1 identity then
+   missed by 7e-6 — because `k_g/k_eff = θ/(1−θ)`, not `θ`. Fixed by taking
+   `k₀` from `K_no_pdelta` (with its own first mode, so toggling `p_delta`
+   does not perturb `k₀` at all). **After the fix the identity is exact:
+   `rel = 0.000e+00`.** B4's `K_L` contradicts B5's own stated meaning of θ
+   ("how much of this story's stiffness gravity has already eaten"), ASCE
+   7's first-order definition, and spec 11's `k_t,i ≤ P_i/h_i`, all three
+   of which want the pre-gravity denominator. **This is a correction to the
+   spec, not just to the code.**
+2. **Check 5's `ρ ≥ 1e6` is too loose for its own 1e-9 tolerance.** It
+   failed at ρ = 1.3e7 with a 1.5e-7 deviation. Not a code error: from the
+   closed form `k/k_∞ = 1 − 3/(2(2+3ρ)) ≈ 1 − 1/(2ρ)`, so the limit is only
+   approached as `1/(2ρ)`. A probe confirmed the measured deviation tracks
+   `1/(2ρ)` to three figures across four decades. `beam_depth = 4000` m
+   gives ρ = 1.3e10 and a 1.5e-10 deviation; conditioning verified clean
+   out to ρ = 1.3e13 (deviation 1.6e-13).
+3. **Check 6's "θ largest at story 1" is false for this model.** θ peaks at
+   story **2**: story 1's columns are fixed at the base while every story
+   above has a rotating joint at both ends, so `k₀,1/k₀,2 = 1.6325` and the
+   ratio `k_g/k₀` peaks one story up. Handled the way the doc itself
+   prescribes for check 5's monotonicity — **reported, not asserted away**.
+   What is asserted instead is the part carrying physical meaning: θ > 0
+   everywhere and monotone decay above the peak.
+
+### Green (full run)
+
+```
+[PASS] 3a. N=1 P-Delta omega_1 matches k_eff = k_story - m*g/h over 16 combinations -- worst rel = 1.323e-16
+[PASS] 3b. K_G is EXACTLY tridiagonal -- max off-band |entry| = 0.000e+00
+[PASS] 3b. K_G symmetric to 1e-15 (max asymmetry 0.000e+00); k_g, diagonal and superdiagonal all match the independent P_i/h_i to 0.000e+00
+[PASS] 3b. k_g largest at the base -- [1.961e7 1.681e7 1.401e7 1.121e7 8.406e6 5.604e6 2.802e6]
+[PASS] 3c. f_1(P-Delta) < f_1(no P-Delta) at all 5 masses x 2 axes
+[PASS] 3c. relative gap widens monotonically: 0.490%/0.397%, 0.982%/0.796%, 1.976%/1.601%, 4.002%/3.234%, 8.217%/6.606%
+[PASS] 4a. m_crit = 3.868234e+05 kg (analytic); stable at 0.90*m_crit, GravityInstabilityError at 1.10*m_crit carrying story=0
+[PASS] 4a. N=7 instability also caught, reporting story 1
+[PASS] 5. N=1/3/7/20: k0 matches the rigid-beam springs, worst 1.535e-10 (rho = 1.301e+10)
+[PASS] 6. theta_stiffness == k_g/k0 to 1e-12 -- [0.03578 0.05007 0.04446 0.03596 0.02704 0.01815 0.0098]
+[PASS] 6. at N=1 the period lengthening == 1/sqrt(1-theta_1) -- rel = 0.000e+00
+[PASS] 6d. theta_demand finite and positive, all 10 records x 2 axes -- largest 0.05283 at KOCAELI_ATK axis X story 2
+ALL CHECKS PASSED
+```
+
+Largest θ_demand anywhere in the dataset is 0.053, below `THETA_IGNORE`
+(0.10) — i.e. at default parameters P-Δ is real but small, which is the
+expected answer for a 7-story frame and means the guard is not firing
+spuriously.
+
+### Rulings
+
+7. **θ's denominator is the elastic stiffness** (defect 1 above) —
+   overrides spec 10 B4's literal `K_L u = s`.
+8. **`k₀` uses `K_no_pdelta`'s own first mode**, not `self.phi[:,0]`, so
+   `k₀` is a pure property of the elastic frame and θ stays comparable
+   across the `p_delta` toggle.
+9. **`_weakest_story()` must never raise.** It runs on the error path,
+   where `self.K` is the indefinite matrix that just failed; it uses the
+   elastic matrix and falls back to `diag(K_no_pdelta)` if even that solve
+   fails, so a diagnostic can never mask the real error.
+10. **θ_demand takes magnitudes of the story shear.** The drift peak and
+    the shear each carry either sign; θ is a ratio of magnitudes. The
+    shear itself comes from `floor_accel_abs`, which `compute_response()`
+    already produces for furniture — **no new time-domain
+    differentiation**, which matters because re-differentiating the
+    trimmed displacement would run it back through the drift-removal
+    filter.
