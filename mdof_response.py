@@ -44,6 +44,35 @@ DEFAULT_AREA_SQFT = round((PLAN_SPAN_X * PLAN_SPAN_Y) / SQM_PER_SQFT, 6)
 # second, identical parallel frame on the far side of the building's other
 # plan dimension -- see assemble_frame_stiffness's docstring and spec A4.
 N_PARALLEL_FRAMES = 2
+
+# --- Cracked-section stiffness (spec 10, Part A) --------------------------
+# Effective (cracked-section) stiffness multipliers on the GROSS second
+# moments of area. Reinforced concrete cracks long before it yields, so the
+# gross section overestimates stiffness substantially under seismic demand.
+#
+# NOT A CODE CITATION. "TO VERIFY" means exactly that. The research
+# documents this project's collapse work is built on assert "0.35 I_g for
+# columns and 0.5 I_g for beams per ASCE 41 / ACI 318"; that attribution
+# does not survive checking (spec 10, A2):
+#   ACI 318-19 Table 6.6.3.1.1(a)  0.70 columns / 0.35 beams  <- opposite ordering
+#   ASCE 41-17 Table 10-5          0.3-0.7 E_c*I_g, axial-load interpolated
+# Both of those are secondary-sourced; the primary standards are paywalled
+# and were not read. 0.35/0.50 is this PROJECT's chosen default, kept
+# because the user chose it, and labelled honestly rather than passed off
+# as a code value. The code-sourced alternatives are reachable through
+# SECTION_STIFFNESS_PRESETS without editing anything.
+CRACKED_FACTOR_COLUMN = 0.35   # TO VERIFY -- project default, see spec 10 A2
+CRACKED_FACTOR_BEAM = 0.50     # TO VERIFY -- project default, see spec 10 A2
+
+# (column factor, beam factor). Selected by MDOF_ShearBuilding's
+# `section_stiffness_mode`.
+SECTION_STIFFNESS_PRESETS = {
+    "gross":               (1.00, 1.00),  # pre-spec-10 behaviour, regression only
+    "project-default":     (CRACKED_FACTOR_COLUMN, CRACKED_FACTOR_BEAM),
+    "aci318-19":           (0.70, 0.35),  # TO VERIFY -- Table 6.6.3.1.1(a), secondary-sourced
+    "asce41-17-low-axial": (0.30, 0.30),  # TO VERIFY -- Table 10-5 low-axial end, secondary-sourced
+}
+DEFAULT_SECTION_STIFFNESS_MODE = "project-default"
 # Furniture time-series are decimated toward this rate before being written
 # to out/<record>/furniture_response.bin -- see furniture_decimation's
 # docstring for why this is a legitimate sampling-theorem application, not
@@ -573,7 +602,9 @@ class MDOF_ShearBuilding:
     def __init__(self, num_stories, mass_per_floor=1000e3, zeta=0.05,
                  story_height=3.5, column_depth_x=1.10, column_depth_y=1.10,
                  beam_depth=1.50, axis="X", E=E_CONCRETE,
-                 plan_span_x=PLAN_SPAN_X, plan_span_y=PLAN_SPAN_Y):
+                 plan_span_x=PLAN_SPAN_X, plan_span_y=PLAN_SPAN_Y,
+                 section_stiffness_mode=DEFAULT_SECTION_STIFFNESS_MODE,
+                 cracked_factor_column=None, cracked_factor_beam=None):
         self.N = num_stories
         self.m = mass_per_floor
         self.zeta = zeta
@@ -591,6 +622,22 @@ class MDOF_ShearBuilding:
         self.E = E
         self.plan_span_x = plan_span_x
         self.plan_span_y = plan_span_y
+
+        # Cracked-section stiffness (spec 10, Part A). The preset supplies
+        # both factors; an explicit cracked_factor_* overrides its half,
+        # so a caller can sweep one factor without inventing a preset.
+        if section_stiffness_mode not in SECTION_STIFFNESS_PRESETS:
+            raise ValueError(
+                f"section_stiffness_mode must be one of "
+                f"{sorted(SECTION_STIFFNESS_PRESETS)}, got "
+                f"{section_stiffness_mode!r}")
+        preset_c, preset_b = SECTION_STIFFNESS_PRESETS[section_stiffness_mode]
+        self.section_stiffness_mode = section_stiffness_mode
+        self.cracked_factor_column = float(
+            preset_c if cracked_factor_column is None else cracked_factor_column)
+        self.cracked_factor_beam = float(
+            preset_b if cracked_factor_beam is None else cracked_factor_beam)
+
         self._build_matrices()
         self._modal_analysis()
 
@@ -617,8 +664,19 @@ class MDOF_ShearBuilding:
     def _build_matrices(self):
         self.M = np.eye(self.N) * self.m
 
-        self.I_c = column_inertia(self.column_depth_x, self.column_depth_y, self.axis)
-        self.I_b = beam_inertia(self.beam_depth, BEAM_WIDTH)
+        # EFFECTIVE (cracked) second moments -- the knock-down is applied
+        # here, where the structural model is assembled, and deliberately
+        # NOT inside column_inertia()/beam_inertia(), which are honest
+        # geometry functions with independent callers
+        # (claude_scripts/verify_frame_furniture.py, calibrate_frame.py,
+        # frame_story_stiffness_closed_form's callers) that would all
+        # silently change meaning. Spec 10, A1. With the "gross" preset
+        # both factors are exactly 1.0, so this is bit-identical to the
+        # pre-spec-10 line it replaces.
+        self.I_c = self.cracked_factor_column * column_inertia(
+            self.column_depth_x, self.column_depth_y, self.axis)
+        self.I_b = self.cracked_factor_beam * beam_inertia(
+            self.beam_depth, BEAM_WIDTH)
         self.L = frame_span(self.axis, self.plan_span_x, self.plan_span_y)
         self.K = build_condensed_K(self.N, self.E, self.I_c, self.I_b, self.h, self.L)
 

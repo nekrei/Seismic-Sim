@@ -1398,3 +1398,48 @@ CHECKS PASSED. Full pipeline regenerated over all 10 records →
    `story_height`/`column_depth_*`/`beam_depth`**, now read as element
    `[0]` (the ground story). The full per-floor profiles ship as separate
    keys in Task 5; nothing downstream changes shape in this task.
+
+## Task 2 — cracked-section stiffness
+
+- Red first: check 2 added to `verify_elastic_foundation.py`, failing with
+  `section_stiffness_mode exists on MDOF_ShearBuilding -- not implemented
+  yet (Task 2)`.
+- `CRACKED_FACTOR_COLUMN = 0.35`, `CRACKED_FACTOR_BEAM = 0.50`,
+  `SECTION_STIFFNESS_PRESETS` (4 presets) and
+  `DEFAULT_SECTION_STIFFNESS_MODE` added to the constants block, with the
+  A2 sourcing note written into the code comment itself.
+- `__init__` gains `section_stiffness_mode` (validated against the preset
+  table, `ValueError` on an unknown key) plus optional
+  `cracked_factor_column`/`cracked_factor_beam` overrides.
+- `_build_matrices()` multiplies the factors onto `column_inertia()` /
+  `beam_inertia()`'s results **there**, not inside those functions.
+
+### Green
+
+```
+[PASS] 1a/1b/1c/1d  (check 1 now passes section_stiffness_mode="gross" explicitly)
+[PASS] 2a. project-default preset is (0.35, 0.50)
+[PASS] 2b. gross preset is (1.0, 1.0) -- the regression toggle
+[PASS] 2c. N=1 condensed K matches the cracked closed form over 12 geometries -- worst rel deviation = 6.087e-16
+[PASS] 2d. axis X: T1_gross=1.062352s  T1_cracked=1.589161s  ratio=1.495890  (naive sqrt(1/0.35)=1.690309, rel diff 11.502%)
+[PASS] 2d. axis Y: T1_gross=0.946466s  T1_cracked=1.428831s  ratio=1.509648  (rel diff 10.688%)
+[PASS] 2e. column_inertia/beam_inertia still return GROSS values
+ALL CHECKS PASSED
+```
+
+The measured ratios (1.496 / 1.510) sit ~11% below the research doc's
+"≈1.7", exactly as spec A3 predicted: scaling `I_c` by 0.35 and `I_b` by
+0.50 shifts ρ by 0.50/0.35 = 1.4286, so `k_story` does not scale by a clean
+0.35. A clean 1.690 would have meant the beams were scaled by the column
+factor — the bug check 2d exists to catch.
+
+### Known, expected, deferred
+
+`verify_frame_furniture.py`'s **last** check now fails —
+`/compute (default params) matches regenerated out/<record>/response_X.csv
+-- abs_disp match=False`. That is correct behaviour, not a regression:
+`/compute` now defaults to cracked sections while the committed `out/` is
+still gross. It resolves when Task 7 regenerates `out/`. Every other check
+in that script still passes, including its closed-form comparisons — which
+is independent confirmation that ruling 2 held and the geometry helpers
+were left alone.
