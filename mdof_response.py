@@ -74,6 +74,14 @@ SECTION_STIFFNESS_PRESETS = {
 }
 DEFAULT_SECTION_STIFFNESS_MODE = "project-default"
 
+# Soft-ground-story preset (spec 10, C2): the ground story is this much
+# taller than the rest, columns and beams unchanged. The Dhaka
+# parking-level typology. Nothing about it is special-cased anywhere --
+# the softness is an EMERGENT consequence of k ~ 1/h^3 and k_g = P/h, not
+# a hand-applied weakening, which is exactly what verification check 7c
+# asserts.
+SOFT_STORY_HEIGHT_RATIO = 1.6   # TO VERIFY
+
 # --- P-Delta / gravity (spec 10, Part B) ----------------------------------
 # Standard gravity. Numerically the same constant as G_TO_MS2 above -- that
 # one is a unit conversion (g -> m/s^2 for PEER records), this one is an
@@ -1537,7 +1545,7 @@ def save_ground_spectrum(filename, accel_x, accel_y, dt, n_bins=400):
 
 
 def save_building_data(filename, building_x, building_y, furniture_meta=None,
-                        reference_magnitude=6.0):
+                        reference_magnitude=6.0, soft_ground_story=False):
     """
     Module-level replacement for the old per-instance save_to_json --
     spec 5 needs BOTH axes' independent condensed-stiffness modal results
@@ -1564,8 +1572,48 @@ def save_building_data(filename, building_x, building_y, furniture_meta=None,
         "column_depth_y": float(building_x.column_depth_y[0]),
         "beam_depth": float(building_x.beam_depth[0]),
         "beam_width": float(BEAM_WIDTH),
-        "plan_span_x": float(PLAN_SPAN_X),
-        "plan_span_y": float(PLAN_SPAN_Y),
+        # Read off the INSTANCE, not the module constants. Identical today
+        # because the offline pipeline always runs at the default area,
+        # but the constants were a latent spec-8 inconsistency: a
+        # building_x built with a non-default plan_span would have had its
+        # real dimensions silently replaced by the defaults here.
+        "plan_span_x": float(building_x.plan_span_x),
+        "plan_span_y": float(building_x.plan_span_y),
+
+        # --- spec 10, Part E -- the same keys the /compute header carries,
+        # so the static and live paths stay symmetric (the asymmetry spec 6
+        # had to close for participation_factors_*).
+        "story_heights": building_x.h.tolist(),
+        "section_stiffness_mode": building_x.section_stiffness_mode,
+        "cracked_factor_column": float(building_x.cracked_factor_column),
+        "cracked_factor_beam": float(building_x.cracked_factor_beam),
+        "p_delta_enabled": bool(building_x.p_delta),
+        "soft_ground_story": bool(soft_ground_story),
+        "gravity_unstable": False,
+        "k_g_per_story_N_per_m_X": building_x.k_g.tolist(),
+        "k_g_per_story_N_per_m_Y": building_y.k_g.tolist(),
+        "k0_per_story_N_per_m_X": building_x.k0_profile.tolist(),
+        "k0_per_story_N_per_m_Y": building_y.k0_profile.tolist(),
+        "theta_stiffness_X": building_x.theta_stiffness.tolist(),
+        "theta_stiffness_Y": building_y.theta_stiffness.tolist(),
+        "theta_demand_X": building_x.theta_demand.tolist(),
+        "theta_demand_Y": (building_y.theta_demand.tolist()
+                           if hasattr(building_y, "theta_demand") else None),
+        "peak_drift_ratio_X": building_x.peak_drift_ratio.tolist(),
+        "peak_drift_ratio_Y": (building_y.peak_drift_ratio.tolist()
+                               if hasattr(building_y, "peak_drift_ratio")
+                               else None),
+        "V_p_per_story_N_X": building_x.V_p_profile.tolist(),
+        "V_p_per_story_N_Y": building_y.V_p_profile.tolist(),
+        "delta_y_per_story_m_X": building_x.delta_y_profile.tolist(),
+        "delta_y_per_story_m_Y": building_y.delta_y_profile.tolist(),
+        # ELASTIC-DEMAND indicator, not an achieved ductility (spec D5).
+        "mu_demand_X": building_x.mu_demand.tolist(),
+        "mu_demand_Y": (building_y.mu_demand.tolist()
+                        if hasattr(building_y, "mu_demand") else None),
+        "P_cap_per_story_N": np.broadcast_to(
+            np.asarray(building_x.P_cap_profile, dtype=float),
+            (building_x.N,)).tolist(),
 
         # Per-axis modal results -- independently condensed K per axis
         # (spec A1's anisotropy), so these are no longer shared numbers.
@@ -1617,6 +1665,21 @@ if __name__ == "__main__":
     COLUMN_DEPTH_X = 1.10  # m
     COLUMN_DEPTH_Y = 1.10  # m
     BEAM_DEPTH = 1.50      # m
+
+    # Section-stiffness preset for this regeneration (spec 10, A2).
+    # Overridable so verification check 1's end-to-end half can regenerate
+    # out/ with the pre-spec-10 "gross" behaviour and confirm an EMPTY
+    # git diff, without editing this file:
+    #     SEISMIC_SIM_SECTION_MODE=gross SEISMIC_SIM_P_DELTA=0 python mdof_response.py
+    SECTION_MODE = os.environ.get("SEISMIC_SIM_SECTION_MODE",
+                                  DEFAULT_SECTION_STIFFNESS_MODE)
+    if SECTION_MODE not in SECTION_STIFFNESS_PRESETS:
+        print(f"Warning: unknown SEISMIC_SIM_SECTION_MODE={SECTION_MODE!r}; "
+              f"falling back to {DEFAULT_SECTION_STIFFNESS_MODE!r}.")
+        SECTION_MODE = DEFAULT_SECTION_STIFFNESS_MODE
+    P_DELTA = os.environ.get("SEISMIC_SIM_P_DELTA", "1") not in ("0", "false", "False")
+    print(f"Section stiffness mode: {SECTION_MODE} "
+          f"{SECTION_STIFFNESS_PRESETS[SECTION_MODE]}   P-Delta: {P_DELTA}")
 
     # Per-record Richter magnitude (spec 7, Part A) -- maps folder name to
     # the record's real-world magnitude, used as the Earthquake Parameters
@@ -1687,16 +1750,25 @@ if __name__ == "__main__":
         # condensed K per axis (spec A1's anisotropy; a rectangular
         # column is stiffer one way than the other once
         # COLUMN_DEPTH_X != COLUMN_DEPTH_Y).
-        building_x = MDOF_ShearBuilding(
-            NUM_STORIES, mass_per_floor=1000e3, zeta=0.05,
-            column_depth_x=COLUMN_DEPTH_X, column_depth_y=COLUMN_DEPTH_Y,
-            beam_depth=BEAM_DEPTH, axis="X",
-        )
-        building_y = MDOF_ShearBuilding(
-            NUM_STORIES, mass_per_floor=1000e3, zeta=0.05,
-            column_depth_x=COLUMN_DEPTH_X, column_depth_y=COLUMN_DEPTH_Y,
-            beam_depth=BEAM_DEPTH, axis="Y",
-        )
+        try:
+            building_x = MDOF_ShearBuilding(
+                NUM_STORIES, mass_per_floor=1000e3, zeta=0.05,
+                column_depth_x=COLUMN_DEPTH_X, column_depth_y=COLUMN_DEPTH_Y,
+                beam_depth=BEAM_DEPTH, axis="X",
+                section_stiffness_mode=SECTION_MODE, p_delta=P_DELTA,
+            )
+            building_y = MDOF_ShearBuilding(
+                NUM_STORIES, mass_per_floor=1000e3, zeta=0.05,
+                column_depth_x=COLUMN_DEPTH_X, column_depth_y=COLUMN_DEPTH_Y,
+                beam_depth=BEAM_DEPTH, axis="Y",
+                section_stiffness_mode=SECTION_MODE, p_delta=P_DELTA,
+            )
+        except GravityInstabilityError as e:
+            # Print and move on -- one unstable parameter set must not
+            # abort the whole batch (spec 10, B3).
+            print(f"  GRAVITY INSTABILITY: {e}")
+            print("  Skipping this record.")
+            continue
 
         def load_component(orient, label, building):
             at2_file = at2_by_orient.get(orient)
