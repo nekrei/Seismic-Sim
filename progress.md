@@ -1823,3 +1823,57 @@ not just exited 0" is for.
     (worst rel 6.087e-16). Parameterising it as well would have been
     redundant work whose only effect would be to weaken the separation
     ruling 2 exists to protect. **Its tolerance was not touched.**
+
+## Task 8 — real-browser behavioural pass (check 12)
+
+Run in the **built-in Browser pane**, as check 12 itself specifies (it can
+resize the viewport; Claude in Chrome could not in specs 6 and 9). Server
+started from inside the worktree. All 8 items driven, not read.
+
+| # | Item | Result |
+|---|---|---|
+| 1 | Longer period visible | **PASS** — T₁ readout **1.62s / 1.45s**, matching the offline `1.621202 / 1.452074` and up from the pre-spec-10 1.06 / 0.95 |
+| 2 | Soft-ground-story toggle | **PASS** — ground floor visibly taller, storeys above unchanged; frame, plates, furniture and lights all follow; T₁ → **1.93s / 1.76s** |
+| 3 | Camera framing | **PASS** — re-frames correctly at N=7 and N=20 with a soft story; returning to full view does not fight per-floor limits |
+| 4 | Fog / lighting / auto-orbit at extreme zoom-out, 20-story soft-ground-story | **PASS** — no fade to darkness (spec 4's shipped fog bug lived exactly here); auto-orbit resumes after idle and lighting stays correct through the rotation |
+| 5 | Gravity-instability message | **PASS** — *"This building cannot stand under its own weight. Story 1 gives way first. Gravity (P-Δ) exceeds the lateral stiffness at these settings — reduce the mass or story height, or increase the column depth."* Previous building stays on screen behind it; recovers cleanly when the sliders come back |
+| 6 | Signals drawer unaffected | **PASS** — both tabs draw; Frequency shows **Input −32.9 dB / Transfer 1.3 dB / Output −37.6 dB**, Time shows **ground peak 1.44e-3 m/s² / relative u(t) peak 1.02e-3 m** — every panel still prints its own peak |
+| 7 | Mobile reflow at 375×812 | **PASS**, and a **real reflow**, not a CSS injection — the new checkbox sits inside Building Parameters in the same `.ctrl-row` layout and does not overflow the bottom sheet |
+| 8 | Zero console errors | **PASS with one note** — see below |
+
+### Item 8, stated precisely
+
+The only console entry across the entire pass is one browser-generated
+network log: `Failed to load resource: the server responded with a status
+of 422 (UNPROCESSABLE ENTITY)`. That is the browser reporting a non-2xx
+HTTP status for the **deliberately** unstable request in item 5, not a
+JavaScript error, and it is unavoidable for any endpoint that legitimately
+returns 422. **Zero JavaScript errors, zero uncaught exceptions, zero
+JSON.parse failures** — which is exactly what spec B3's guard exists to
+prevent.
+
+### A real defect found by this pass, and fixed
+
+**The new checkbox had no accessible name.** The accessibility tree
+reported it as `checkbox "on"` — an unnamed checkbox falls back to its
+default `value` attribute — because its caption was a
+`<span class="panel-label">` with no association to the input. Fixed by
+making it a real `<label for="softGroundStoryToggle">`, which is the native
+solution, needs no JS, and makes the caption text a click target for free.
+Re-verified in the browser: it now reports as
+`checkbox "Soft ground story"`.
+
+**The same gap exists on every other control in the panel** — all ten
+sliders report as unnamed `textbox "<value>"`, and the `<select>`s too.
+That is pre-existing (specs 3–8), out of this spec's scope, and has been
+filed as a separate task rather than widened into this branch.
+
+### One thing that looked like a bug and was not
+
+The Signals drawer appeared absent from screenshots while being fully open
+in the DOM (`is-open`, `getBoundingClientRect()` on-screen at x=1020–1440,
+`elementFromPoint` returning `timeCanvas`). Temporarily hiding the WebGL
+canvas made it render in the screenshot immediately, with all three
+frequency panels correct. **A screenshot/WebGL compositing artifact of the
+Browser pane, not a product defect** — worth recording so the next session
+does not chase it.
