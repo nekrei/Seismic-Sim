@@ -5,6 +5,8 @@ data/
 CLAUDE.md
 AGENTS.md
 .claude/
+.agents/
+.codex/
 specs/
 verification/
 graphify-out/
