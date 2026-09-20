@@ -1992,3 +1992,12 @@ building retained, and zero JavaScript exceptions. The all-record pipeline
 and plots regenerated all 10 records with zero tracked `out/` diff. Public,
 math, course-concept, knowledge, local handoff and skill documentation were
 updated. Branch remains unmerged and unpushed.
+
+### Performance ruling accepted (2026-09-21)
+
+The user accepted the measured N=7 result of 21.925 s against the original
+under-20-second target. The exception remains explicit in the spec and
+verification record. Optimizing the shared hysteresis/FFT hot path is deferred
+until spec 12's coupled 3N prototype can be measured, avoiding work against a
+solver shape that spec 12 immediately changes. Spec 11 is approved for local
+merge; no push or backend mirror was authorized.
