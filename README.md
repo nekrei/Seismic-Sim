@@ -139,6 +139,46 @@ This is the heart of the project. It has three jobs:
      building is now genuinely **stiffer sideways one way than the
      other** — X and Y each get their own independently-built model
      (`axis="X"` / `axis="Y"`), instead of reusing one number for both.
+   - Knocks that stiffness down to account for **cracked concrete**.
+     Reinforced concrete develops hairline cracks long before it comes
+     anywhere near breaking, and a cracked beam bends more easily than an
+     intact one, so using the raw geometry overstates how stiff a real
+     building is. Columns are multiplied by 0.35 and beams by 0.50
+     (`SECTION_STIFFNESS_PRESETS`). Those two numbers are **this
+     project's chosen defaults, not values copied out of a building
+     code** — the code tables say something different, and the comment in
+     the source says so rather than pretending otherwise. Other presets
+     (including `"gross"`, meaning no knock-down at all) are one
+     parameter away.
+   - Accounts for **gravity making the building easier to push over**.
+     When a building leans, its own weight is no longer pulling straight
+     down through the columns — it pulls slightly sideways too, adding to
+     whatever the earthquake is already doing. Engineers call this the
+     P-Δ effect. It is subtracted from the stiffness as a second matrix
+     (`geometric_stiffness_matrix`), and it is strongest at the **bottom**
+     of the building, because the ground floor's columns carry the weight
+     of every floor above them. That is exactly why real buildings tend to
+     fail at the bottom.
+   - **Refuses to pretend** when the sliders describe a building that
+     cannot stand up. Push the mass high enough, or the columns thin
+     enough, and gravity wins outright: there is no sway period, because
+     the building simply falls over. The code detects that and raises a
+     `GravityInstabilityError` naming which storey gave way, instead of
+     quietly producing "not a number" and animating nonsense.
+   - Lets **each floor differ** — storey heights, column depths and beam
+     depths are per-floor lists internally, not single numbers. That is
+     what makes the "soft ground story" option possible: a taller, and
+     therefore floppier, ground floor of the kind used for parking
+     underneath an apartment block. Nothing about it is special-cased;
+     the weakness falls out of the arithmetic, because stiffness drops
+     with the cube of a column's height.
+   - Works out each storey's **strength** as well as its stiffness — how
+     much bending a column can take before it gives (`M_p`), how much
+     sideways force a storey can resist (`V_p`), how much weight it can
+     carry straight down (`P_cap`), and how far it can lean before it
+     starts yielding. None of this changes the animation; it exists so
+     later work has real numbers to compare against instead of invented
+     ones.
    - Works out the building's small number of *natural sway patterns*
      (the "modes" from the glossary above) — this is the part of the code
      that needs the most background to understand, and it's explained
@@ -166,6 +206,22 @@ This is the heart of the project. It has three jobs:
    `index.html` can move away from these, but `out/`'s precomputed static
    files always reflect these exact defaults). There's no menu option to
    change any of these per-recording yet; you'd edit those lines directly.
+
+   Two environment variables do exist, both for regression-checking rather
+   than everyday use: `SEISMIC_SIM_SECTION_MODE=gross` turns the
+   cracked-concrete knock-down off, and `SEISMIC_SIM_P_DELTA=0` turns the
+   gravity effect off. Together they reproduce the pre-cracked-sections
+   model exactly, which is how the change was verified as
+   behaviour-preserving before the new defaults were judged.
+
+   **Why `out/` changed when cracked sections and P-Δ landed.** Both
+   effects make the building less stiff, and a less stiff building sways
+   more slowly, so every stored result moved: the 7-floor default's sway
+   period went from **1.06 s to 1.62 s** in X and **0.95 s to 1.45 s** in
+   Y. The stored *ground motion* files (`ground_accel.json`,
+   `spectrum.json`) did **not** change, and could not have — the
+   earthquake recording does not care what building you put in front of
+   it.
 
 ### `plot_response.py` — makes a static picture
 
@@ -215,8 +271,9 @@ results. It:
   displacement from millimeters to hundreds of meters, a range no single
   manual slider position could stay legible across.
 - Has a **Building Parameters** panel (stories, mass per floor, damping,
-  column depth X, column depth Y, beam depth, floor area, plus a
-  read-only period readout) — moving any of the sliders sends your values
+  column depth X, column depth Y, beam depth, floor area, a
+  soft-ground-story checkbox, plus a read-only period readout) — moving
+  any of the controls sends your values
   to `server.py`,
   which recomputes the *actual physics* for that building live (not a
   visual trick) and updates the animation, roughly 200-400ms after you stop
@@ -241,6 +298,23 @@ results. It:
   the Column X/Y sliders — changing how much floor you have doesn't
   change the size of the columns holding it up), and the furniture
   spreads out across the larger plate.
+- The **Soft ground story** checkbox makes the ground floor 1.6× taller
+  than the rest, leaving every column and beam exactly as it was. This is
+  the apartment-block-over-open-parking layout that fails so
+  characteristically in real earthquakes. Nothing about it is
+  special-cased in the physics: a column's sideways stiffness falls with
+  the *cube* of its height, so simply making that one storey taller makes
+  it much floppier than the ones above, and the sway then concentrates
+  there. The server decides what "soft ground story" means, not the
+  browser, so there is exactly one definition of it.
+- If you push the sliders far enough — very heavy floors, very thin
+  columns, very tall storeys — you reach a building that **cannot stand
+  up under its own weight**, and the viewer says so in as many words,
+  naming the storey that gives way first, and leaves the last working
+  building on screen. That is a real result rather than an error: past
+  that point gravity alone overcomes the frame's sideways stiffness, and
+  there is no sway period to compute because the building just falls
+  over.
 - Has an **Earthquake Parameters** panel — Epicenter Distance, Epicenter
   Depth, and Richter Magnitude sliders that reshape the *selected record's*
   own ground motion into a synthetic "what if this quake had happened
@@ -449,6 +523,25 @@ explains why it exists and what it contains.
 - Every floor also has a handful of furniture items (tables, chairs, a
   fan) with their own small extra sway relative to their floor, computed
   with the same frequency-domain technique as the building itself.
+- The elastic model itself got three corrections (spec 10) before any of
+  the collapse work that depends on it. **Cracked concrete** is now
+  accounted for (columns ×0.35, beams ×0.50 — this project's defaults,
+  labelled as such rather than attributed to a code table they do not
+  match). **Gravity** now works against the frame through the P-Δ effect,
+  strongest at the base, where a real building's weight actually
+  accumulates. And every floor can now **differ** from every other, which
+  is what makes the soft-ground-story option possible. Together the first
+  two lengthened the default building's sway period from 1.06 s to 1.62 s
+  in X — which is why `out/` changed. The refactor was checked as
+  behaviour-preserving *first*: with both effects switched off it
+  reproduces the previous model bit-for-bit across 216 parameter
+  combinations and a full record, and regenerating `out/` in that mode
+  changes no numerical file at all.
+- Pushed far enough, the sliders now describe a building that cannot
+  stand under its own weight, and the code says so — naming the storey
+  that fails — rather than silently producing "not a number" and
+  animating it.
+
 - Only the X-direction static plots are generated by default.
 - The Signals drawer's Frequency tab (spec 6) makes the FFT machinery visible
   instead of merely internal: input spectrum, transfer function and output
@@ -472,7 +565,9 @@ explains why it exists and what it contains.
   Parameters sliders, backed by `server.py`. The old "Target Period"
   slider is gone — period is now an *output* of the frame dimensions, not
   something you dial in directly (a read-only readout shows it instead).
-  Per-floor stiffness variation (e.g. a "soft story") isn't supported yet.
+  Per-floor variation **is** supported now (spec 10): storey heights,
+  column depths and beam depths are per-floor internally, and the
+  **Soft ground story** checkbox is the one-click version of it.
 - No automated test suite as a project convention.
 - Two bugs in the Building Parameters panel are fixed: a parameter tweak
   was silently changing the Amplify zoom (now decoupled — Amplify only

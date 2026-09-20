@@ -1297,3 +1297,663 @@ offline checks):
   live and local header **key sets** rather than a memorised list, so
   `has_ground_accel` is caught automatically; AGENTS.md carries the bullet.
 - `graphify update .` run.
+
+---
+
+# Spec 10 — Elastic foundation for collapse modelling
+
+Branch `goal/10-elastic-foundation`, worktree
+`.worktrees/goal-10-elastic-foundation`. Plan:
+`claude_scripts/plans/2026-09-20-10-elastic-foundation.md` (10 tasks).
+
+## Task 0 — pre-spec-10 baseline fixture
+
+- New `claude_scripts/make_baseline_fixture.py`; output
+  `claude_scripts/fixtures/pre_spec10_baseline.npz` (10.70 MB, 1102 arrays).
+- Ran against the **unmodified** code, before any spec-10 edit. This is the
+  only moment the "before" exists; verification check 1 (bit-identity of the
+  gross / P-Delta-off / uniform-profile configuration) is the gate on the
+  whole spec and has nothing to compare against without it.
+- Captured per combination: `K`, `omega_n`, `phi`, `Gamma`,
+  `story_stiffness`. Plus, at default parameters on `KOCAELI_ATK` (both
+  axes): `time`, `ground_disp`, `floor_disp_rel`, `floor_disp_abs`,
+  `floor_accel_abs`, and the decimated furniture block
+  (`npts=26624`, `dt=0.005`).
+- `git diff --stat out/` empty at capture time — baseline `out/` is the
+  committed state, as the plan requires.
+
+### Rulings
+
+1. **216 combinations, not the plan's 12.** The plan listed
+   N ∈ {1,2,7,20} × column {0.3,1.10,2.0} × beam {0.2,1.50,3.0} ×
+   area {200, 542.501085, 2000} × both axes and called it "12-combination";
+   the full cartesian product of those same lists is 4·3·3·3·2 = 216. Taking
+   the product is *less* code than any one-at-a-time subset and runs in
+   seconds, so the fixture is a strict superset of what the plan asked for.
+   The shipped default sits in the middle of each list, so the default
+   building is always one of the cells.
+2. **Nothing to commit for Task 0.** The plan says
+   `Commit: add pre-spec-10 baseline fixture`, but `claude_scripts/` is
+   gitignored (`.gitignore:16`) — the fixture cannot be committed. It
+   persists in the main checkout instead, which the worktree reaches through
+   the `claude_scripts` directory junction, so it survives this worktree
+   being deleted. No commit was made; `git status` is clean.
+- `floor_accel_abs` was captured beyond the plan's list because Task 3
+  reuses it for `θ_demand` — a regression there would otherwise be invisible
+  until the furniture block moved.
+
+## Task 1 — per-floor property arrays (pure refactor)
+
+- `claude_scripts/verify_elastic_foundation.py` written first, with check 1
+  in four parts: 1a (216 matrix combinations), 1b (full `KOCAELI_ATK`
+  response both axes), 1c (uniform arrays == scalars — **the red test**),
+  1d (`total_height == sum(h)`).
+  Red run: 1a/1b PASS, 1c FAIL
+  (`TypeError: unsupported operand type(s) for ** or pow(): 'list' and 'int'`),
+  1d skipped. Exactly the expected pre-refactor state.
+- `assemble_frame_stiffness()` now normalises `I_c`/`I_b`/`h` to length-N
+  arrays and indexes per story; `L` stays scalar (it is a plan dimension).
+- `MDOF_ShearBuilding._per_floor()` added; `self.h`,
+  `self.column_depth_x/y`, `self.beam_depth` are arrays;
+  `self.total_height = h.sum()`.
+- Consumer sites updated: `save_building_data()`'s `story_height` /
+  `column_depth_x` / `column_depth_y` / `beam_depth` and `server.py`'s
+  header `story_height` now read element `[0]` (ground story) and keep
+  their scalar wire types. A full grep confirmed those six lines are the
+  only readers of these attributes anywhere in the repo.
+
+### Green
+
+```
+[PASS] 1a. K / omega_n / phi / Gamma bit-identical over 216 parameter combinations -- all exact
+[PASS] 1b. full response on KOCAELI_ATK bit-identical (both axes, incl. floor_accel_abs and the decimated furniture block) -- all exact
+[PASS] 1c. uniform per-floor arrays give bit-identical K / omega_n / phi / Gamma to the equivalent scalars -- all exact
+[PASS] 1d. total_height == sum(story_height), and == N*h when uniform -- non-uniform total=24.5, uniform total=24.5
+ALL CHECKS PASSED
+```
+
+`verify_frame_furniture.py` and `verify_floor_area.py` both re-run: ALL
+CHECKS PASSED. Full pipeline regenerated over all 10 records →
+`git diff --stat out/` **empty**. That is check 1's end-to-end half.
+
+### Rulings
+
+3. **Bit-identity is protected by extracting Python floats inside the
+   assembly loop** (`c = 2.0*E*float(I_c_arr[i-1])`, `h = float(h_arr[i-1])`)
+   rather than doing array arithmetic. A probe confirmed numpy and Python
+   agree bitwise on `d**3` for every value in the matrix, so this was
+   belt-and-braces rather than strictly necessary — but it keeps the
+   expression tree provably identical to the pre-spec-10 code instead of
+   resting on a libm detail.
+4. **A wrong-length profile raises, never truncates or recycles**
+   (`_per_floor`). A truncated profile is a different building that still
+   renders plausibly — invisible on screen. Same rule server.py will apply
+   as a 400 in Task 5.
+5. **`verify_elastic_foundation.py` passes `section_stiffness_mode`/
+   `p_delta` only once `__init__` actually accepts them**, decided by
+   `inspect.signature`. That keeps one script valid across Tasks 1→3
+   instead of needing an edit at each step; the resolved kwargs are printed
+   on every run, so a silently-missing one is visible rather than assumed.
+6. **`save_building_data()` and the `/compute` header keep scalar
+   `story_height`/`column_depth_*`/`beam_depth`**, now read as element
+   `[0]` (the ground story). The full per-floor profiles ship as separate
+   keys in Task 5; nothing downstream changes shape in this task.
+
+## Task 2 — cracked-section stiffness
+
+- Red first: check 2 added to `verify_elastic_foundation.py`, failing with
+  `section_stiffness_mode exists on MDOF_ShearBuilding -- not implemented
+  yet (Task 2)`.
+- `CRACKED_FACTOR_COLUMN = 0.35`, `CRACKED_FACTOR_BEAM = 0.50`,
+  `SECTION_STIFFNESS_PRESETS` (4 presets) and
+  `DEFAULT_SECTION_STIFFNESS_MODE` added to the constants block, with the
+  A2 sourcing note written into the code comment itself.
+- `__init__` gains `section_stiffness_mode` (validated against the preset
+  table, `ValueError` on an unknown key) plus optional
+  `cracked_factor_column`/`cracked_factor_beam` overrides.
+- `_build_matrices()` multiplies the factors onto `column_inertia()` /
+  `beam_inertia()`'s results **there**, not inside those functions.
+
+### Green
+
+```
+[PASS] 1a/1b/1c/1d  (check 1 now passes section_stiffness_mode="gross" explicitly)
+[PASS] 2a. project-default preset is (0.35, 0.50)
+[PASS] 2b. gross preset is (1.0, 1.0) -- the regression toggle
+[PASS] 2c. N=1 condensed K matches the cracked closed form over 12 geometries -- worst rel deviation = 6.087e-16
+[PASS] 2d. axis X: T1_gross=1.062352s  T1_cracked=1.589161s  ratio=1.495890  (naive sqrt(1/0.35)=1.690309, rel diff 11.502%)
+[PASS] 2d. axis Y: T1_gross=0.946466s  T1_cracked=1.428831s  ratio=1.509648  (rel diff 10.688%)
+[PASS] 2e. column_inertia/beam_inertia still return GROSS values
+ALL CHECKS PASSED
+```
+
+The measured ratios (1.496 / 1.510) sit ~11% below the research doc's
+"≈1.7", exactly as spec A3 predicted: scaling `I_c` by 0.35 and `I_b` by
+0.50 shifts ρ by 0.50/0.35 = 1.4286, so `k_story` does not scale by a clean
+0.35. A clean 1.690 would have meant the beams were scaled by the column
+factor — the bug check 2d exists to catch.
+
+### Known, expected, deferred
+
+`verify_frame_furniture.py`'s **last** check now fails —
+`/compute (default params) matches regenerated out/<record>/response_X.csv
+-- abs_disp match=False`. That is correct behaviour, not a regression:
+`/compute` now defaults to cracked sections while the committed `out/` is
+still gross. It resolves when Task 7 regenerates `out/`. Every other check
+in that script still passes, including its closed-form comparisons — which
+is independent confirmation that ruling 2 held and the geometry helpers
+were left alone.
+
+## Task 3 — P-Δ geometric stiffness, gravity guard, k₀, θ
+
+- Red first: checks 3–6 added, failing on `p_delta exists on
+  MDOF_ShearBuilding -- not implemented yet (Task 3)`.
+- New in `mdof_response.py`: `GRAVITY_MS2`,
+  `C_D_DEFLECTION_AMPLIFICATION = 1.0`, `THETA_IGNORE = 0.10`,
+  `THETA_CODE_CAP = 0.25`, `GravityInstabilityError`,
+  `geometric_stiffness_matrix()` (returns `K_G, k_g, P`),
+  `story_stiffness_profile()`, and on the class `_elastic_k0()`,
+  `_weakest_story()`, `_stability_coefficients()`,
+  `_demand_stability_coefficients()`.
+- `_build_matrices()` now keeps `K_no_pdelta`, `K_G`, `k_g`, `P_gravity`
+  and sets `self.K = K_no_pdelta - K_G` under `p_delta=True`. With
+  `p_delta=False` it assigns `K_no_pdelta` **directly** — not via a
+  zero-scaled subtraction — so the regression path stays bit-identical.
+- `_modal_analysis()` checks `eigvals.min() > 0` **before** `np.sqrt`.
+
+### Three real defects found by the checks, none by inspection
+
+1. **`k₀` was using the wrong matrix — the one that mattered.** Spec 10 B4
+   literally writes the pushover as `K_L u = s` with `K_L = K_cracked −
+   K_G`, so that is what was implemented. Check 6's N=1 identity then
+   missed by 7e-6 — because `k_g/k_eff = θ/(1−θ)`, not `θ`. Fixed by taking
+   `k₀` from `K_no_pdelta` (with its own first mode, so toggling `p_delta`
+   does not perturb `k₀` at all). **After the fix the identity is exact:
+   `rel = 0.000e+00`.** B4's `K_L` contradicts B5's own stated meaning of θ
+   ("how much of this story's stiffness gravity has already eaten"), ASCE
+   7's first-order definition, and spec 11's `k_t,i ≤ P_i/h_i`, all three
+   of which want the pre-gravity denominator. **This is a correction to the
+   spec, not just to the code.**
+2. **Check 5's `ρ ≥ 1e6` is too loose for its own 1e-9 tolerance.** It
+   failed at ρ = 1.3e7 with a 1.5e-7 deviation. Not a code error: from the
+   closed form `k/k_∞ = 1 − 3/(2(2+3ρ)) ≈ 1 − 1/(2ρ)`, so the limit is only
+   approached as `1/(2ρ)`. A probe confirmed the measured deviation tracks
+   `1/(2ρ)` to three figures across four decades. `beam_depth = 4000` m
+   gives ρ = 1.3e10 and a 1.5e-10 deviation; conditioning verified clean
+   out to ρ = 1.3e13 (deviation 1.6e-13).
+3. **Check 6's "θ largest at story 1" is false for this model.** θ peaks at
+   story **2**: story 1's columns are fixed at the base while every story
+   above has a rotating joint at both ends, so `k₀,1/k₀,2 = 1.6325` and the
+   ratio `k_g/k₀` peaks one story up. Handled the way the doc itself
+   prescribes for check 5's monotonicity — **reported, not asserted away**.
+   What is asserted instead is the part carrying physical meaning: θ > 0
+   everywhere and monotone decay above the peak.
+
+### Green (full run)
+
+```
+[PASS] 3a. N=1 P-Delta omega_1 matches k_eff = k_story - m*g/h over 16 combinations -- worst rel = 1.323e-16
+[PASS] 3b. K_G is EXACTLY tridiagonal -- max off-band |entry| = 0.000e+00
+[PASS] 3b. K_G symmetric to 1e-15 (max asymmetry 0.000e+00); k_g, diagonal and superdiagonal all match the independent P_i/h_i to 0.000e+00
+[PASS] 3b. k_g largest at the base -- [1.961e7 1.681e7 1.401e7 1.121e7 8.406e6 5.604e6 2.802e6]
+[PASS] 3c. f_1(P-Delta) < f_1(no P-Delta) at all 5 masses x 2 axes
+[PASS] 3c. relative gap widens monotonically: 0.490%/0.397%, 0.982%/0.796%, 1.976%/1.601%, 4.002%/3.234%, 8.217%/6.606%
+[PASS] 4a. m_crit = 3.868234e+05 kg (analytic); stable at 0.90*m_crit, GravityInstabilityError at 1.10*m_crit carrying story=0
+[PASS] 4a. N=7 instability also caught, reporting story 1
+[PASS] 5. N=1/3/7/20: k0 matches the rigid-beam springs, worst 1.535e-10 (rho = 1.301e+10)
+[PASS] 6. theta_stiffness == k_g/k0 to 1e-12 -- [0.03578 0.05007 0.04446 0.03596 0.02704 0.01815 0.0098]
+[PASS] 6. at N=1 the period lengthening == 1/sqrt(1-theta_1) -- rel = 0.000e+00
+[PASS] 6d. theta_demand finite and positive, all 10 records x 2 axes -- largest 0.05283 at KOCAELI_ATK axis X story 2
+ALL CHECKS PASSED
+```
+
+Largest θ_demand anywhere in the dataset is 0.053, below `THETA_IGNORE`
+(0.10) — i.e. at default parameters P-Δ is real but small, which is the
+expected answer for a 7-story frame and means the guard is not firing
+spuriously.
+
+### Rulings
+
+7. **θ's denominator is the elastic stiffness** (defect 1 above) —
+   overrides spec 10 B4's literal `K_L u = s`.
+8. **`k₀` uses `K_no_pdelta`'s own first mode**, not `self.phi[:,0]`, so
+   `k₀` is a pure property of the elastic frame and θ stays comparable
+   across the `p_delta` toggle.
+9. **`_weakest_story()` must never raise.** It runs on the error path,
+   where `self.K` is the indefinite matrix that just failed; it uses the
+   elastic matrix and falls back to `diag(K_no_pdelta)` if even that solve
+   fails, so a diagnostic can never mask the real error.
+10. **θ_demand takes magnitudes of the story shear.** The drift peak and
+    the shear each carry either sign; θ is a ratio of magnitudes. The
+    shear itself comes from `floor_accel_abs`, which `compute_response()`
+    already produces for furniture — **no new time-domain
+    differentiation**, which matters because re-differentiating the
+    trimmed displacement would run it back through the drift-removal
+    filter.
+
+## Task 4 — material strengths and derived capacities
+
+- Red first: check 8 failing on `column_plastic_moment exists`.
+- Constants `F_Y_STEEL`, `F_C_CONCRETE`, `RHO_LONGITUDINAL`,
+  `CONCRETE_COVER`, `PHI_AXIAL`, `AXIAL_CAP_FACTOR`, all marked
+  `TO VERIFY`, all exposed as `MDOF_ShearBuilding` kwargs so spec 18's
+  generator can vary them.
+- New module functions `column_section_for_axis()`,
+  `column_plastic_moment()`, `story_plastic_shear()`,
+  `column_axial_capacity()`. Per-instance profiles `M_p_profile`,
+  `V_p_profile`, `P_cap_profile`, `delta_y_profile` (in
+  `_stability_coefficients()`), and `mu_demand` (in
+  `_demand_stability_coefficients()`, since it needs a solved response).
+- Nothing here touches the elastic solve — check 1 still bit-identical.
+
+### Green
+
+```
+    axis X: b=1.100 m  d=1.050 m  A_s=0.023100 m^2  a=0.345882 m  ->  M_p=8.509225e+06 N*m
+[PASS] 8a. M_p matches the independent derivation, both axes -- rel = 0.000e+00
+[PASS] 8a. M_p in the 1e5-1e7 N*m band -- 8.5092e+06 N*m
+[PASS] 8b. V_p == 8*M_p/h over the 4 corner columns -- 1.944966e+07 N
+    A_g=1.2100 m^2  A_st=0.024200 m^2  P_cap per column=2.100899e+07 N
+[PASS] 8c. P_cap matches independently, and is in the 1e6-1e8 N band -- 8.4036e+07 N
+[PASS] 8d. yield drift ratio per story (%) = [1.0138 1.6551 1.7635 1.7829 1.7878 1.8003 1.943]
+[PASS] 8d. delta_y,i == V_p,i / k0,i -- [0.035485 0.057929 0.061723 0.0624 0.062573 0.063009 0.068005] m
+[PASS] 8e. mu_demand = [0.29099 0.28617 0.26356 0.24457 0.21124 0.15731 0.09487] on KOCAELI_ATK X
+ALL CHECKS PASSED
+```
+
+Yield drift ratios land at 1.0–1.9%, inside check 8d's 0.1–3% band — that
+band is a units-error detector, and a units error here would still animate
+plausibly. μ < 1 on every story of KOCAELI_ATK, i.e. the default building
+stays elastic under the strongest record in the set.
+
+### Rulings
+
+11. **`column_section_for_axis()` is a shared helper, not a second
+    convention.** The capacity formulas need the same (width, bending
+    depth) split `column_inertia()` uses. Factoring it out means the
+    capacity side cannot drift from the stiffness side — which is the
+    exact failure mode ruling 2 was protecting `column_inertia` from in
+    the other direction.
+12. **`story_plastic_shear` keeps the summation form** (`n_columns *
+    (M_p + M_p) / h`) even though identical columns collapse it to
+    `8*M_p/h`, because spec 11 makes the columns differ per story.
+13. **The P-M interaction simplification is named in the docstring**, with
+    its upgrade path (a simplified P-M interaction reusing the `P_i`
+    `geometric_stiffness_matrix()` already computes). `M_p` must not be
+    presented as *the* column capacity without it.
+
+## Task 5 — backend plumbing: profiles, soft-story preset, header keys
+
+- Red first: 5 malformed-profile requests all returned **200 with a binary
+  payload** (silently accepted, different building computed), gravity
+  instability returned **500**, and all 24 new header keys were missing.
+- `server.py`: `ParamError`, `_validate_profile()`, `_y_or_none()`;
+  `_validate_params()` now returns a **dict** (18 values was an unreadable
+  tuple, and it had exactly one caller); `compute()` catches `ParamError`
+  → 400 and `GravityInstabilityError` → 422; header gains the full Part E
+  table.
+- `mdof_response.py`: `SOFT_STORY_HEIGHT_RATIO = 1.6`;
+  `save_building_data()` gains the identical keys and a
+  `soft_ground_story` kwarg; `__main__` reads
+  `SEISMIC_SIM_SECTION_MODE` / `SEISMIC_SIM_P_DELTA` and catches
+  `GravityInstabilityError` per record with `continue` rather than
+  aborting the batch.
+
+### Green
+
+```
+[PASS] 7a. uniform profiles give bit-identical modal results AND an identical binary payload to the scalar path
+[PASS] 7b. length N-1 / N+1 / non-finite / non-positive / wrong-length column profile -> HTTP 400 with a JSON body (all 5)
+[PASS] 4b. gravity-unstable -> HTTP 422, valid JSON, error=gravity_unstable, story=0
+[PASS] 4c. default parameters: every float in the header is finite
+[PASS] 4c. near-unstable (theta_max = 0.85, m = 9.706e+04 kg): every float in the header is finite
+[PASS] E. all 24 new header keys present with the right shape
+[PASS] E. the scalar story_height is retained for pre-spec-10 readers
+[FAIL] 9. out/ IS STALE -- expected until Task 7
+```
+
+### Check 1's end-to-end half, run now
+
+`SEISMIC_SIM_SECTION_MODE=gross SEISMIC_SIM_P_DELTA=0 python mdof_response.py`
+over all 10 records:
+
+```
+10 files changed, 1680 insertions(+)
+   -- all 10 are out/<record>/building_data.json, and the diff is
+      PURELY ADDITIVE: zero deletions, zero changed values.
+```
+
+Every `response_X/Y.csv`, `furniture_response.bin`, `ground_accel.json`
+and `spectrum.json` is **byte-identical**. `out/` was then restored with
+`git checkout -- out/`; Task 7 regenerates it for real.
+
+### Rulings
+
+14. **Check 1's "empty `git diff --stat out/`" cannot survive Part E, and
+    should not.** The spec requires the new keys in `building_data.json`,
+    so that file must diff. The claim is therefore scoped to what it was
+    really protecting — the numerical artifacts — and strengthened: the
+    `building_data.json` diff must be **purely additive** (zero deletions,
+    no changed values), which is checkable and was checked. **This is a
+    correction owed to `verification/10-elastic-foundation.md` check 1.**
+15. **`_validate_params()` returns a dict.** 18 positional values is a
+    readability and mis-ordering hazard; there is exactly one caller.
+16. **An unknown `section_stiffness_mode` falls back to the default rather
+    than 400ing**, unlike a malformed profile. It is a closed vocabulary
+    the client picks from, so a stale client sending an old name should
+    still get a building; a wrong-length profile, by contrast, describes a
+    *different building* and cannot be guessed at.
+17. **An explicit `story_height_profile` beats `soft_ground_story`** — the
+    more specific request wins. The preset itself is resolved
+    **server-side**, so "soft ground story" means one thing in one place
+    and the client never encodes structural meaning.
+18. **`theta_demand_Y` / `peak_drift_ratio_Y` / `mu_demand_Y` are `null`,
+    not X's values, for a record with no second horizontal component.**
+    They need a solved time history and `building_y.compute_response()`
+    never runs there. Mirroring X under a `_Y` key would be worse than
+    reporting nothing.
+19. **Latent spec-8 bug fixed (planned ruling 3):** `save_building_data()`
+    wrote the module constants `PLAN_SPAN_X/Y` instead of
+    `building_x.plan_span_x/y`. Confirmed harmless today — the gross-mode
+    regeneration above shows `plan_span_x/y` among the *unchanged* values.
+
+## Task 6 — frontend: per-floor story heights + soft-ground-story toggle
+
+- Red first: `claude_scripts/check_story_heights.mjs` written against a new
+  `// ---8<--- STORYHEIGHT-HELPERS-BEGIN/END` sentinel block. Helper checks
+  (1–5) passed immediately; the wiring checks (6) failed
+  (`createBuilding calls floorLevels()`, `the old single-height placement
+  formula is gone`) until the viewer was changed.
+- New helpers `normalizeStoryHeights()` / `floorLevels()` in their own
+  sentinel block — a **third** one, deliberately separate from SPECTRUM and
+  TIMEDOMAIN, each of which is extracted verbatim by its own check and
+  breaks silently if reflowed. The check asserts they stay distinct.
+- `createBuilding(numFloors, storyHeights, frame, folderName)` — cumulative
+  levels, returns `storyHeights` alongside `totalHeight`.
+- `currentStoryHeight` (scalar) **removed**, replaced by
+  `currentStoryHeights` (array), set from `createBuilding()`'s own return
+  value so it cannot drift from what was drawn.
+  `frameCameraToFloor()` reads that floor's own height.
+- Both load paths prefer `story_heights` and fall back to the scalar
+  `story_height`.
+- New `#softGroundStoryToggle` checkbox in Building Parameters, added to
+  `buildingParamsAtDefault()` (unchecked = default) and to the `/compute`
+  body; fires `scheduleLiveRecompute()` on `change`.
+- 422 and 400 handling: `showRecomputeError()` puts the message in the
+  recompute overlay's new error state and **keeps the previous building on
+  screen**; cleared at the start of the next request.
+
+### Confirmed, not assumed
+
+- `updateColumnTransforms()` needs **no** change — it derives a column's
+  length from its two endpoints' live world positions (`sourceWorldPos`),
+  so per-floor heights flow through it for free. Read the function to
+  confirm rather than trusting the spec's prediction.
+- `placeFurnitureForFloor()`'s `slabTop` argument is
+  `slabThickness / 2 + 0.01`, a constant independent of story height — no
+  change needed.
+- `repositionInteriorLights(totalHeight)` keeps its signature and receives
+  the new cumulative total.
+
+### The bit-identity trap in the placement math
+
+`floorLevels()` takes the **closed form** `(f+1)*(h+gap)` when every height
+is equal, and the running sum only when they differ. That is not an
+optimisation. A probe over 140 (height, floor) pairs found naive
+accumulation disagrees with the old multiply in **71 of them**, by up to
+`2.84e-14` scene units. Invisible on screen — and "invisible" is exactly
+what makes a regression impossible to notice later, so it is closed off the
+same way Task 1 closed it off in the physics and spec 8 closed it off for
+the footprint. Check 10's item 1 asserts `Object.is` equality over 408
+comparisons.
+
+### Green
+
+```
+[PASS] STORYHEIGHT block does not overlap the SPECTRUM or TIMEDOMAIN blocks
+[PASS] 1. uniform heights reproduce (f+1)*(h+gap) and n*(h+gap) bit-identically over 408 comparisons -- all exact (Object.is)
+[PASS] 2. a scalar height and the equivalent uniform array give identical levels
+[PASS] 3. non-uniform heights give the running cumulative sum; strictly increasing; totalHeight == last level; soft ground story renders taller (ratio 1.5932 including the gap)
+[PASS] 4. the drawn ground-story height equals 1.6x the others to 1e-12 -- 1.600000000000001
+[PASS] 5. all 7 malformed-profile cases throw rather than being silently accepted
+[PASS] 6. createBuilding takes storyHeights / calls floorLevels() / the old formula is gone
+[PASS] 7. every <canvas> has a CSS rule in the stylesheet (spec 9 defect 3)
+ALL CHECKS PASSED
+```
+
+Every other `.mjs` check re-run clean: `check_footprint_area` (14 checks),
+`check_sway_gain`, `check_furniture_gain`, `check_time_domain` (7176
+comparisons), `fft_check`, `check_index_syntax` (parses OK, 171879 chars).
+
+### Rulings
+
+20. **`floorLevels()`'s uniform fast path is a correctness requirement,
+    not an optimisation** — see above.
+21. **`currentStoryHeight` was deleted rather than kept as a mean.** With a
+    soft ground story there is no single "the" story height, and a mean is
+    not bit-stable under summation anyway. Three stale comments referring
+    to it were updated in the same pass.
+22. **`swayBaseline` uses the ground-story height**, not a mean — exactly
+    the old scalar when uniform, and a single well-defined number when not.
+23. **Check 10 item 7 is a standing guard carried forward from spec 9's
+    defect (3):** every `<canvas>` must have a CSS sizing rule, or it lays
+    out at its intrinsic device-pixel attribute size. The symptom is
+    near-invisible on desktop, which is why it needs a check rather than an
+    eyeball.
+
+## Task 7 — regenerate `out/`, full check sweep
+
+### The `out/` diff — expected, and flagged before committing per AGENTS.md
+
+```
+60 files changed, 403348 insertions(+), 401668 deletions(-)
+```
+
+Changed (10 records each): `building_data.json`, `furniture_response.bin`,
+`response_X.csv`, `response_Y.csv`, `response_plot_X.png`,
+`spectrum_plot_X.png`.
+
+**Unchanged, and this is the check that matters:** `ground_accel.json` and
+`spectrum.json` — **zero** of the 20 moved. The ground motion is invariant
+under every Building Parameter, which is precisely what AGENTS.md says and
+what lets `spectrum.json` stay frontend-only and out of the
+`seismic-sim-backend` mirror. Had either moved, something would have been
+reaching into the record.
+
+`response_plot_X.png` and `spectrum_plot_X.png` move because they overlay
+the building's own transfer function, which is what this spec changed.
+
+### T₁, before → after (identical across all 10 records, as expected — the
+building parameters do not vary by record)
+
+| | before | after | change |
+|---|---|---|---|
+| T₁ X | 1.062352 s | **1.621202 s** | +52.6% |
+| T₁ Y | 0.946466 s | **1.452074 s** | +53.4% |
+
+Decomposed: cracked sections alone give 1.589161 s (X) — measured in Task
+2 — so P-Δ contributes the remaining +2.0%, consistent with
+θ_stiffness ≈ 0.036–0.050 at the default build. Both effects lengthen the
+period, both are real, and neither is the naive `sqrt(1/0.35) = 1.69`.
+
+### Full sweep — every check confirmed to have run a real comparison
+
+| Script | Result |
+|---|---|
+| `verify_elastic_foundation.py` | **ALL CHECKS PASSED** — check 9 went green on its own, as designed |
+| `verify_frame_furniture.py` | ALL CHECKS PASSED |
+| `verify_floor_area.py` | ALL CHECKS PASSED (18 checks) |
+| `verify_spectrum.py` | OVERALL: PASS |
+| `verify_synthetic_earthquake.py` | Checks 1–4 PASS *(after a fix — see below)* |
+| `check_quake_continuity.py` | OK — identity rel-err 4.3e-16 |
+| `check_ground_accel_block.py` | ALL CHECKS PASSED — **zero unaccounted trailing bytes**, so no binary block appeared by accident |
+| `fft_check.mjs` + `fft_check_scipy.py` | ALL CHECKS PASS — complex rel_err 3.40e-14 at both lengths |
+| `check_footprint_area.mjs` | ALL CHECKS PASSED (14 checks) |
+| `check_sway_gain.mjs` | OK |
+| `check_furniture_gain.mjs` | OK |
+| `check_time_domain.mjs` | ALL CHECKS PASSED (7176 comparisons) |
+| `check_index_syntax.mjs` | parses OK (171879 chars) |
+| `check_story_heights.mjs` | ALL CHECKS PASSED |
+
+### Pre-existing defect found and fixed: a check that had never run
+
+`claude_scripts/verify_synthetic_earthquake.py` did
+`from mdof_response import ...` with **no `sys.path` setup at all**, and its
+own docstring says to run it as
+`python claude_scripts/verify_synthetic_earthquake.py` from the repo root —
+which puts `claude_scripts/` on `sys.path`, not the root. It raised
+`ModuleNotFoundError` every time. **This is spec 7's check, and it has been
+dead since it was written.** Fixed with the same two lines
+`verify_floor_area.py` and `verify_frame_furniture.py` already carry. It now
+passes all 4 checks, including `/compute` parity at defaults.
+
+This is exactly what Task 7's "each confirmed to have run a real comparison,
+not just exited 0" is for.
+
+### Ruling
+
+24. **`verify_frame_furniture.py` did NOT need parameterising**, contrary to
+    the plan's Task 7 step 2. It passed unchanged, and for a good reason:
+    ruling 2 kept the cracked multiplier out of
+    `column_inertia`/`beam_inertia`/`build_condensed_K`, so its closed-form
+    comparisons still compare gross against gross and remain exactly as
+    strict as before. Cracked-section coverage lives in
+    `verify_elastic_foundation.py` check 2c, which compares against the
+    closed form evaluated with cracked inertias over 12 geometries
+    (worst rel 6.087e-16). Parameterising it as well would have been
+    redundant work whose only effect would be to weaken the separation
+    ruling 2 exists to protect. **Its tolerance was not touched.**
+
+## Task 8 — real-browser behavioural pass (check 12)
+
+Run in the **built-in Browser pane**, as check 12 itself specifies (it can
+resize the viewport; Claude in Chrome could not in specs 6 and 9). Server
+started from inside the worktree. All 8 items driven, not read.
+
+| # | Item | Result |
+|---|---|---|
+| 1 | Longer period visible | **PASS** — T₁ readout **1.62s / 1.45s**, matching the offline `1.621202 / 1.452074` and up from the pre-spec-10 1.06 / 0.95 |
+| 2 | Soft-ground-story toggle | **PASS** — ground floor visibly taller, storeys above unchanged; frame, plates, furniture and lights all follow; T₁ → **1.93s / 1.76s** |
+| 3 | Camera framing | **PASS** — re-frames correctly at N=7 and N=20 with a soft story; returning to full view does not fight per-floor limits |
+| 4 | Fog / lighting / auto-orbit at extreme zoom-out, 20-story soft-ground-story | **PASS** — no fade to darkness (spec 4's shipped fog bug lived exactly here); auto-orbit resumes after idle and lighting stays correct through the rotation |
+| 5 | Gravity-instability message | **PASS** — *"This building cannot stand under its own weight. Story 1 gives way first. Gravity (P-Δ) exceeds the lateral stiffness at these settings — reduce the mass or story height, or increase the column depth."* Previous building stays on screen behind it; recovers cleanly when the sliders come back |
+| 6 | Signals drawer unaffected | **PASS** — both tabs draw; Frequency shows **Input −32.9 dB / Transfer 1.3 dB / Output −37.6 dB**, Time shows **ground peak 1.44e-3 m/s² / relative u(t) peak 1.02e-3 m** — every panel still prints its own peak |
+| 7 | Mobile reflow at 375×812 | **PASS**, and a **real reflow**, not a CSS injection — the new checkbox sits inside Building Parameters in the same `.ctrl-row` layout and does not overflow the bottom sheet |
+| 8 | Zero console errors | **PASS with one note** — see below |
+
+### Item 8, stated precisely
+
+The only console entry across the entire pass is one browser-generated
+network log: `Failed to load resource: the server responded with a status
+of 422 (UNPROCESSABLE ENTITY)`. That is the browser reporting a non-2xx
+HTTP status for the **deliberately** unstable request in item 5, not a
+JavaScript error, and it is unavoidable for any endpoint that legitimately
+returns 422. **Zero JavaScript errors, zero uncaught exceptions, zero
+JSON.parse failures** — which is exactly what spec B3's guard exists to
+prevent.
+
+### A real defect found by this pass, and fixed
+
+**The new checkbox had no accessible name.** The accessibility tree
+reported it as `checkbox "on"` — an unnamed checkbox falls back to its
+default `value` attribute — because its caption was a
+`<span class="panel-label">` with no association to the input. Fixed by
+making it a real `<label for="softGroundStoryToggle">`, which is the native
+solution, needs no JS, and makes the caption text a click target for free.
+Re-verified in the browser: it now reports as
+`checkbox "Soft ground story"`.
+
+**The same gap exists on every other control in the panel** — all ten
+sliders report as unnamed `textbox "<value>"`, and the `<select>`s too.
+That is pre-existing (specs 3–8), out of this spec's scope, and has been
+filed as a separate task rather than widened into this branch.
+
+### One thing that looked like a bug and was not
+
+The Signals drawer appeared absent from screenshots while being fully open
+in the DOM (`is-open`, `getBoundingClientRect()` on-screen at x=1020–1440,
+`elementFromPoint` returning `timeCanvas`). Temporarily hiding the WebGL
+canvas made it render in the screenshot immediately, with all three
+frequency panels correct. **A screenshot/WebGL compositing artifact of the
+Browser pane, not a product defect** — worth recording so the next session
+does not chase it.
+
+## Task 9 — documentation
+
+Tracked files: `README.md`, `Seismic-Sim Math.pdf`.
+Gitignored-but-junctioned (land in the main checkout directly):
+`specs/`, `verification/`, `knowledge/`, `claude_scripts/`, `.claude/`.
+`AGENTS.md` is a *copy* in the worktree and was copied back by hand.
+
+### Corrections written back into the spec and verification docs
+
+These are the record of truth, so they were done first.
+
+- **`specs/10-elastic-foundation.md` B4** — the pushover's matrix changed
+  from `K_L` to the elastic `K`, with the measurement that exposed it.
+- **`verification/10-elastic-foundation.md` check 1** — the "empty
+  `git diff --stat out/`" claim rescoped (it cannot survive Part E) and
+  *strengthened*: byte-identical numerical artifacts plus a purely
+  additive `building_data.json` diff.
+- **check 5** — `ρ ≥ 1e6` corrected to `beam_depth = 4000` (ρ = 1.3e10),
+  with the `1/(2ρ)` derivation.
+- **check 6** — "θ largest at story 1" corrected to "positive everywhere,
+  monotone above its peak, peak reported".
+
+### Everything else
+
+- **README.md** — cracked sections, P-Δ, the gravity-instability result,
+  per-floor properties and capacities in the `mdof_response.py` section;
+  the soft-ground-story checkbox and the 422 behaviour in the
+  `index.html` section; two new Current-state bullets; the environment
+  overrides; and **the stale claim "Per-floor stiffness variation (e.g. a
+  'soft story') isn't supported yet" removed** — it was exactly the kind
+  of line this project's doc philosophy exists to catch.
+- **AGENTS.md** — a spec-10 bullet with the five carry-forward points, and
+  **seven new "Things to know" entries** (`K = K_cracked − K_G`, the
+  tridiagonal-vs-full `K_G`, the gravity guard running before `np.sqrt`,
+  θ's elastic denominator, per-floor profiles rejecting wrong lengths at
+  all three layers, the P-M/ductility caveats, and
+  `column_section_for_axis()` as the shared definition).
+- **Math PDF** — new **Part F** (F1–F6) in
+  `claude_scripts/generate_math_pdf.py` plus 17 new equation assets, and
+  source notes at `claude_scripts/math-pdf-sections-goal10.md`.
+  Regenerated, then **text-searched**, which is the step spec 7 got caught
+  out on: 9/9 new terms present, 4/4 earlier-part terms still present.
+  *Note for next time:* reportlab writes streams as
+  `[ /ASCII85Decode /FlateDecode ]`, so a naive `zlib.decompress` extracts
+  **zero** characters and reports a false MISS on everything. ASCII85 first.
+- **`knowledge/`** — `mdof_response.md`, `server.md`,
+  `data_flow_and_wire_formats.md` (with the full 24-key table),
+  `index_html.md`, and a spec-10 entry in `spec_history.md`.
+- **`specs/README.md`** — row 10 moved to ✅ Done with the measurements
+  and the three doc corrections.
+- **`specs/COURSE-CONCEPTS.md`** — spec 10's row moved into the shipped
+  table, kept honest as **"None"**: this spec adds no signals content. The
+  roadmap row is struck through rather than deleted so the section's own
+  accounting still reads correctly.
+- **`preview-visualization` skill** — one addition, and deliberately not a
+  slider list (the skill is already written to be slider-agnostic, so
+  AGENTS.md's "a spec added a control" trigger needed no list edit). What
+  it did need is the **new failure mode**: a 422 message over the 3D view
+  is a *result*, not a bug, and the accompanying `Failed to load resource:
+  … 422` console line is the browser reporting a status, not a JS error.
+- **`requirements.txt`** — confirmed unchanged (`git diff` empty). No new
+  dependency; `reportlab`/`pypdf` were already listed as docs-build-only.
+- `graphify update .` run.
+
+### check-docs-drift
+
+Run against spec 10: README ✅, math PDF ✅ (verified in the *rendered*
+PDF, not just the generator), AGENTS.md status ✅ accurate (claims
+"on branch", and the branch is 8 commits ahead of `main`, unmerged),
+verification scripts ✅, `knowledge/` ✅ — all 13 new symbols present.
+
+### Ruling
+
+25. **`verify_frame_furniture.py` was left alone** (see Task 7's ruling
+    24), and **`preview-visualization` got a behaviour note rather than a
+    slider list** — the skill already states "don't assume a fixed slider
+    list", which is precisely the timelessness AGENTS.md asks these three
+    skills to keep. Adding the list would have made it stale on the next
+    spec.
