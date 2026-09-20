@@ -1957,3 +1957,38 @@ verification scripts ✅, `knowledge/` ✅ — all 13 new symbols present.
     list", which is precisely the timelessness AGENTS.md asks these three
     skills to keep. Adding the list would have made it stale on the next
     spec.
+
+## Spec 11 — implementation in progress (2026-09-20)
+
+Constitutive prototype, FFT feedback prototype, request validation and explicit browser button are being built on codex/spec11-hftd. Not verified complete.
+
+Verification so far: check_hftd_elastic_baseline.py passes 140 real-record/axis/parameter cases, including bit-identical furniture; check_hysteresis_scalar.py passes 5000 exact scalar/vector steps, scatter mean 0.9999882557627313; check_hysteresis_batch.py passes 6000 yielding real-record samples exactly. Tiny-intensity identity passes with zero pseudo-force and one iteration. API invalid nonlinear boolean/backbone checks and index syntax pass.
+
+Rulings: spec's .10 softening default violates its own continuity constraint; .30 is recorded explicitly in Corrections. The prescribed unloading line cannot generally intersect prescribed pinch point, so add a continuous zero-force-to-pinch connector. Lognormal COV converted to log-sigma, ultimate scatter bounded at plateau onset to preserve continuity.
+
+Unresolved evidence: whole-record 40-step relaxation fails at real KOCAELI_ATK X scale5 (residual 1.868%, ~280 s before history batching). Anderson did not resolve it. A causal-window experiment failed and worsened energy closure, so it was removed. Current model returns to whole-record iteration, testing up to200 with verified batching. Reference time refinement reduces elastic SDOF mismatch but a .001098 RMS floor remains on a cropped record. No numerical acceptance bar has been declared passed or relaxed. No merge/push.
+
+## Spec 11 — verification and documentation checkpoint (2026-09-21)
+
+The nonlinear sampling wrapper now keeps exact native elastic runs and uses
+band-limited 4x sampling only for potentially yielding histories. Saved
+Newmark comparisons pass at NRMS 0.000171, 0.000177 and 0.000244. The unified
+`verify_hftd.py` checks 1-11 passes, including 140 bit-identical elastic cases,
+constitutive boundaries, overlap degradation, determinism, API/wire/error
+contracts and all 15 regressions. The 20-case energy sweep and 400-run IDA
+sweep are preserved and audited rather than recomputed unnecessarily.
+
+Executed IDA evidence corrects the original universal criterion: only 4/20
+record/axis grids yield and 3/20 collapse by intensity 5. Performance remains
+an explicit exception: N=7 is 21.925 s (target <20), improved from 31.654 s;
+N=20 is 66.470 s. Profiling identified the causal predictor as dominant; 1 s
+blocks and a 1e-4 inner seed tolerance preserve the final residual gate and
+all saved-reference/determinism checks. Numerical arithmetic failures now
+return finite JSON HTTP 500 rather than Flask HTML.
+
+The real browser pass confirmed request disabling, cache reuse without a
+second POST, cache invalidation, readable nonconvergence with the previous
+building retained, and zero JavaScript exceptions. The all-record pipeline
+and plots regenerated all 10 records with zero tracked `out/` diff. Public,
+math, course-concept, knowledge, local handoff and skill documentation were
+updated. Branch remains unmerged and unpushed.
