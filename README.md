@@ -675,3 +675,54 @@ explains why it exists and what it contains.
 
 Keep this file — and the math PDF — updated as the project evolves. That's
 the whole point of having them.
+
+## Spec 11: nonlinear FFT response
+
+The optional nonlinear analysis keeps the modal FFT solver and feeds a
+history-dependent pseudo-force back into it. Four parallel column springs
+per story have a trilinear backbone, peak-oriented hysteresis, pinching,
+degraded unloading stiffness and deterministic strength scatter. The
+condensed frame's remaining flexural coupling stays elastic. Material
+variability and the hysteresis constants are assumptions, not calibrated
+component data; torsion and progressive load-path changes are not included.
+
+Open **Building Parameters** and press **Run collapse analysis**. This sends
+one `/compute` request with `nonlinear: true`. Live sliders still run the
+elastic model; changing a parameter or record invalidates the nonlinear
+cache. The result adds a `collapse` JSON header, including convergence,
+per-story criterion times, per-column ultimate-drift times and residual
+drifts. It adds no binary payload blocks or new damage animation. A failed
+iteration reports numerical failure and preserves the previous valid view.
+It never substitutes divergence for a collapse event.
+
+The Python entry point is `compute_response_nonlinear(accel, disp, dt,
+**params)`; `compute_response(..., nonlinear=False)` retains the existing
+elastic arithmetic. The offline pipeline remains elastic. `/compute`
+accepts `intensity_scale`, backbone and pinching parameters,
+`column_strength_cov`, `hftd_relaxation`, `hftd_tolerance`,
+`hftd_max_iterations`, optional `hftd_segment_seconds`, `drift_limit_cp`
+and `collapse_mu_cap`. Inconsistent backbones return HTTP 400.
+
+The default softening slope magnitude is 0.30: 0.10 cannot continuously
+reach the assumed five-percent residual strength by ductility eight.
+Zero softening selects the bilinear model. Default force relaxation is
+0.4, tolerance 1e-4 and outer limit 40. A causal FFT block predictor and
+Anderson mixing aid convergence; predictor iterations are reported
+separately. The final whole-record or overlap-save force residual must
+still pass, including a separate check for periodic tail contamination.
+Holding the pseudo-force tail preserves permanent drift. No filter is
+applied to nonlinear floor displacement.
+
+The public solver first evaluates native-grid elastic demand. If no column
+can yield, it keeps the exact native path; otherwise it band-limits and
+interpolates the input to four times the record sampling rate, performs the
+same FFT pseudo-force solve there, and returns native-time samples. This
+adaptive sampling resolves sharp hysteresis reversals without adding a
+time-stepping production solver or changing the binary wire format.
+
+Drift, ductility and live tangent/gravity thresholds identify modelled
+collapse onset only after convergence. The four-percent drift level is
+descriptive performance guidance from FEMA 356, not a calibrated collapse
+prediction. Everything up to and including collapse onset is simulated;
+how it falls is animated (in the later visual extension). See Part G of
+**Seismic-Sim Math.pdf** for the derivation and limits.

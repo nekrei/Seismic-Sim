@@ -283,6 +283,10 @@
         }
         .view-buttons button.primary:hover { background: rgba(255,215,100,0.25); }
 
+        #runCollapseBtn { white-space: normal; }
+        #runCollapseBtn:active { transform: scale(0.97); }
+        #runCollapseBtn:disabled { opacity: 0.55; cursor: wait; }
+
         /* ---- mobile bottom-sheet reflow ---- */
         /* Collapsed strip: always visible, shows record name + play/pause.
            Expand affordance reveals the full accordion panel as a sheet
@@ -1038,6 +1042,9 @@
                     <input type="checkbox" id="softGroundStoryToggle" />
                     <span class="panel-value" id="softGroundStoryLabel">off</span>
                 </div>
+                <div class="ctrl-row view-buttons">
+                    <button id="runCollapseBtn" type="button" class="primary">Run collapse analysis</button>
+                </div>
                 <!-- Target Period is gone (spec 5): once k comes from real
                      column/beam dimensions, period is an OUTPUT of the
                      model, not an input -- a slider here would either
@@ -1254,6 +1261,7 @@
         const recomputeOverlay = document.getElementById('recomputeOverlay');
         const recomputeError = document.getElementById('recomputeError');
         const softGroundStoryToggle = document.getElementById('softGroundStoryToggle');
+        const runCollapseBtn = document.getElementById('runCollapseBtn');
         const softGroundStoryLabel = document.getElementById('softGroundStoryLabel');
         const sheetStrip = document.getElementById('sheetStrip');
         const stripPlayBtn = document.getElementById('stripPlayBtn');
@@ -3657,8 +3665,19 @@
         // an output, not an input); column_depth_x/y and beam_depth take
         // its place. ---
         let liveAbortController = null;
+        let collapseCache = null;
+        function invalidateCollapseCache() {
+            collapseCache = null;
+            if (liveAbortController) liveAbortController.abort();
+            runCollapseBtn.disabled = false;
+            runCollapseBtn.textContent = 'Run collapse analysis';
+        }
+        runCollapseBtn.addEventListener('click', () => {
+            if (liveDebounceTimer) clearTimeout(liveDebounceTimer);
+            liveRecompute(folderSelect.value, false, true);
+        });
 
-        async function liveRecompute(folder, autoScaleAmplify = false) {
+        async function liveRecompute(folder, autoScaleAmplify = false, nonlinear = false) {
             if (!folder) return;
             if (liveAbortController) liveAbortController.abort();
             liveAbortController = new AbortController();
@@ -3694,10 +3713,15 @@
             // "recomputing..." text line; a superseded (aborted) request
             // simply lets the newer request's own show/hide own the
             // overlay's lifecycle instead of flickering it off here.
+            if (nonlinear) params.nonlinear = true;
+            const cacheKey = JSON.stringify(params);
+            runCollapseBtn.disabled = nonlinear;
             clearRecomputeError();
             recomputeOverlay.classList.add('is-active');
             try {
-                const res = await fetch(COMPUTE_URL, {
+                const res = nonlinear && collapseCache?.key === cacheKey
+                    ? new Response(collapseCache.buffer)
+                    : await fetch(COMPUTE_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(params),
@@ -3733,6 +3757,19 @@
                 const headerLen = view.getUint32(0, true);
                 const headerJson = new TextDecoder().decode(new Uint8Array(buf, 4, headerLen));
                 const header = JSON.parse(headerJson);
+                if (signal.aborted) return;
+                if (nonlinear) {
+                    console.info('Collapse analysis', header.collapse);
+                    if (!header.collapse) {
+                        showRecomputeError('This backend does not support collapse analysis yet.');
+                        return;
+                    }
+                    if (!header.collapse.converged) {
+                        showRecomputeError(header.collapse.reason || 'Collapse analysis did not converge. The previous response is retained.');
+                        return;
+                    }
+                    collapseCache = {key: cacheKey, buffer: buf};
+                }
 
                 // Matches the padding server.py adds so Float32Array's
                 // offset (which must be a multiple of 4) always lands
@@ -3803,6 +3840,7 @@
                     groundAccel,
                 }, autoScaleAmplify);
                 recomputeOverlay.classList.remove('is-active');
+                runCollapseBtn.textContent = nonlinear ? 'Run collapse analysis · cached' : 'Run collapse analysis';
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
             } catch (err) {
                 // A superseded (aborted) request leaves the overlay exactly
@@ -3813,6 +3851,8 @@
                 if (err.name === 'AbortError') return;
                 console.error('❌ Live recompute failed:', err);
                 recomputeOverlay.classList.remove('is-active');
+            } finally {
+                if (!signal.aborted) runCollapseBtn.disabled = false;
             }
         }
 
@@ -3835,6 +3875,7 @@
         // intermediate value -- see specs/03-live-archetypes.md.
         let liveDebounceTimer = null;
         function scheduleLiveRecompute(autoScaleAmplify = false) {
+            invalidateCollapseCache();
             if (liveDebounceTimer) clearTimeout(liveDebounceTimer);
             liveDebounceTimer = setTimeout(() => {
                 liveRecompute(folderSelect.value, autoScaleAmplify);
@@ -4079,6 +4120,7 @@
         }
 
         folderSelect.addEventListener('change', async (e) => {
+            invalidateCollapseCache();
             const folder = e.target.value;
             if (!folder) return;
             stripRecordName.textContent = folder;

@@ -75,6 +75,9 @@ def _y_or_none(has_y, building_y, attr):
     return getattr(building_y, attr).tolist()
 
 
+from mdof_response import HFTD_DEFAULTS, build_backbones
+
+
 class ParamError(ValueError):
     """A request parameter that cannot be clamped into sanity -- it has to
     be rejected. Distinct from the clamping the rest of _validate_params
@@ -107,6 +110,46 @@ def _validate_profile(body, key, num_stories):
                              f"positive, got {v!r}")
         out.append(f)
     return out
+
+
+def _validate_nonlinear(body):
+    nonlinear = body.get('nonlinear', False)
+    if not isinstance(nonlinear, bool):
+        raise ParamError('nonlinear must be a boolean')
+    limits = dict(backbone_hardening=(0,.5), backbone_softening=(0,2),
+        backbone_mu_cap=(1.5,20), backbone_mu_ult=(1.5,50),
+        backbone_residual_frac=(0,.5), unload_degrade_exp=(0,1),
+        pinch_drift_frac=(0,1), pinch_force_frac=(0,1),
+        column_strength_cov=(0,.5), hftd_relaxation=(.05,1),
+        hftd_tolerance=(1e-8,1e-2), hftd_max_iterations=(1,200),
+        drift_limit_cp=(.002,.20), collapse_mu_cap=(1.5,50),
+        intensity_scale=(.05,20))
+    p = {}
+    for name,(low,high) in limits.items():
+        try:
+            value=float(body.get(name,HFTD_DEFAULTS[name]))
+        except (ValueError,TypeError):
+            raise ParamError(f'{name} must be a finite number') from None
+        if not np.isfinite(value):
+            raise ParamError(f'{name} must be finite')
+        p[name]=max(low,min(high,value))
+    p['hftd_max_iterations']=int(p['hftd_max_iterations'])
+    segment=body.get('hftd_segment_seconds')
+    if segment is not None:
+        try:
+            segment=float(segment)
+        except (ValueError,TypeError):
+            raise ParamError('hftd_segment_seconds must be finite or null') from None
+        if not np.isfinite(segment):
+            raise ParamError('hftd_segment_seconds must be finite or null')
+        segment=max(1.,segment)
+    p['hftd_segment_seconds']=segment
+    if p['backbone_mu_ult'] <= p['backbone_mu_cap']:
+        raise ParamError('backbone_mu_ult must exceed backbone_mu_cap')
+    if p['backbone_softening'] and (1+p['backbone_hardening']*(p['backbone_mu_cap']-1)
+            -p['backbone_softening']*(p['backbone_mu_ult']-p['backbone_mu_cap']) > p['backbone_residual_frac']+1e-14):
+        raise ParamError('backbone_softening cannot reach residual strength by mu_ult')
+    return nonlinear,p
 
 
 def _validate_params(body, reference_magnitude=6.0):
@@ -195,7 +238,8 @@ def compute():
     reference_magnitude = ground.get("reference_magnitude", 6.0)
     try:
         p = _validate_params(body, reference_magnitude)
-    except ParamError as e:
+        nonlinear, nonlinear_params = _validate_nonlinear(body)
+    except (ParamError, ValueError, TypeError, OverflowError) as e:
         # 400, never a silently-truncated profile -- see ParamError.
         return jsonify({"error": "invalid_parameter", "detail": str(e)}), 400
 
@@ -269,23 +313,36 @@ def compute():
             reference_magnitude=reference_magnitude,
         )
 
-    accel_x = scaled("X")
-    disp_x = scaled("X_disp")
-    time_arr, gdisp_x, _, abs_x = building_x.compute_response(accel_x, disp_x, dt)
-    furn_x, npts_dec_x, q_x, rate_x = building_x.get_decimated_furniture()
+    def respond(building, acceleration, displacement):
+        if nonlinear:
+            return building.compute_response_nonlinear(acceleration, displacement, dt,
+                record=record, **nonlinear_params)
+        return building.compute_response(acceleration*nonlinear_params['intensity_scale'],
+            displacement*nonlinear_params['intensity_scale'], dt)
 
-    has_y = ground.get("Y") is not None
-    if has_y:
-        accel_y = scaled("Y")
-        disp_y = scaled("Y_disp")
-        _, gdisp_y, _, abs_y = building_y.compute_response(accel_y, disp_y, dt)
-        furn_y, npts_dec_y, q_y, rate_y = building_y.get_decimated_furniture()
-        npts_dec = min(npts_dec_x, npts_dec_y)
-        furn_x = furn_x[:, :, :npts_dec]
-        furn_y = furn_y[:, :, :npts_dec]
-    else:
-        npts_dec = npts_dec_x
-        furn_y = None
+    try:
+        accel_x = scaled("X")
+        disp_x = scaled("X_disp")
+        time_arr, gdisp_x, _, abs_x = respond(building_x, accel_x, disp_x)
+        furn_x, npts_dec_x, q_x, rate_x = building_x.get_decimated_furniture()
+
+        has_y = ground.get("Y") is not None
+        if has_y:
+            accel_y = scaled("Y")
+            disp_y = scaled("Y_disp")
+            _, gdisp_y, _, abs_y = respond(building_y, accel_y, disp_y)
+            furn_y, npts_dec_y, q_y, rate_y = building_y.get_decimated_furniture()
+            npts_dec = min(npts_dec_x, npts_dec_y)
+            furn_x = furn_x[:, :, :npts_dec]
+            furn_y = furn_y[:, :, :npts_dec]
+        else:
+            npts_dec = npts_dec_x
+            furn_y = None
+    except (FloatingPointError, OverflowError, np.linalg.LinAlgError) as e:
+        return jsonify({
+            "error": "numerical_failure",
+            "detail": str(e),
+        }), 500
 
     # The metadata (frequencies, mode shapes, frame geometry) is tiny --
     # JSON is fine for it. The time-series arrays are not: at full
@@ -395,7 +452,18 @@ def compute():
             "decimated_rate_hz": rate_x,
         },
     }
-    header_bytes = json.dumps(header).encode("utf-8")
+    if nonlinear:
+        axes = {'X': building_x.hftd_result.summary,
+                'Y': building_y.hftd_result.summary if has_y else None}
+        summaries = [summary for summary in axes.values() if summary is not None]
+        events = [event for summary in summaries for event in summary['collapse_events']]
+        converged = all(summary['converged'] for summary in summaries)
+        header['collapse'] = dict(axes=axes, converged=converged,
+            iterations=max(summary['iterations'] for summary in summaries),
+            reason='' if converged else 'Collapse analysis did not converge; no collapse is inferred.',
+            collapse_axis=min(events,key=lambda event:event['time'])['axis'] if events and converged else None,
+            collapse_events=events if converged else [])
+    header_bytes = json.dumps(header, allow_nan=False).encode("utf-8")
     # Float32Array requires its byte offset to be a multiple of 4, but the
     # JSON header's length isn't guaranteed to be -- pad with zero bytes so
     # the float data that follows always starts 4-byte aligned. The client
@@ -419,9 +487,9 @@ def compute():
     # Ground acceleration goes at the TAIL, after the furniture blocks, so
     # the format stays append-only (spec 9). len(accel_x) == len(time_arr):
     # compute_response() sets npts = len(acceleration) and time = arange(npts)*dt.
-    parts.append(accel_x.astype(np.float32).tobytes())
+    parts.append(building_x.accel.astype(np.float32).tobytes())
     if has_y:
-        parts.append(accel_y.astype(np.float32).tobytes())
+        parts.append(building_y.accel.astype(np.float32).tobytes())
 
     return Response(b"".join(parts), mimetype="application/octet-stream")
 
