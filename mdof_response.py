@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.fft import fft, ifft, fftfreq
+from scipy.fft import fft, ifft, fftfreq, next_fast_len, rfft, irfft
 from scipy.linalg import eigh as scipy_eigh
 from scipy.signal import butter, filtfilt, decimate
 import csv
@@ -1024,6 +1024,35 @@ def assemble_pseudo_force(s):
     return p
 
 
+from dataclasses import dataclass, field
+
+
+@dataclass
+class HFTDResult:
+    u_rel: np.ndarray
+    u_abs: np.ndarray
+    story_drift: np.ndarray
+    story_shear: np.ndarray
+    k_t_ratio: np.ndarray
+    p_nl: np.ndarray
+    damage_state: np.ndarray
+    column_damage: np.ndarray
+    converged: bool
+    iterations: int
+    residual_history: list
+    energy: dict
+    velocity: np.ndarray
+    acceleration: np.ndarray
+    column_force: np.ndarray
+    column_tangent: np.ndarray
+    backbones: dict
+    dt: float
+    collapse_events: list = field(default_factory=list)
+    summary: dict = field(default_factory=dict)
+    segments: int = 1
+    padding_capped: bool = False
+    reason: str = ''
+
 
 def _hysteresis_history(u, bb, initial_state=None):
     drift = np.diff(u, axis=0, prepend=np.zeros((1,u.shape[1])))
@@ -1074,6 +1103,309 @@ def _hysteresis_history(u, bb, initial_state=None):
     return drift, force, tangent, damage, assemble_pseudo_force(correction), machine
 
 
+def evaluate_collapse_criteria(result, building):
+    """Physical thresholds evaluated only after the fixed point converges.
+
+    Global drift thresholds are descriptive FEMA 356 commentary values;
+    crossing them is a model onset flag, not a validated failure prediction.
+    """
+    r, p, bb = result, result.backbones['params'], result.backbones
+    drift = r.story_drift
+    mu = abs(drift[:,None,:])/bb['dy'][:,:,None]
+    kt = r.column_tangent.sum(axis=1)
+    first = lambda mask: float(np.argmax(mask)*r.dt) if np.any(mask) else None
+    fail = [[first(abs(drift[i]) > bb['du'][i,j]) for j in range(4)] for i in range(building.N)]
+    times, criteria, directions = [], [], []
+    for i in range(building.N):
+        masks = [abs(drift[i])/building.h[i] > p['drift_limit_cp'],
+                 np.max(mu[i],axis=0) > p['collapse_mu_cap'],
+                 kt[i] <= (building.k_g[i] if building.p_delta else 0.)]
+        hits = [(int(np.argmax(m)),name) for m,name in zip(masks,('drift','ductility','gravity')) if np.any(m)] if r.converged else []
+        if hits:
+            t,name = min(hits, key=lambda pair:pair[0])
+            times.append(float(t*r.dt)); criteria.append(name); directions.append(int(np.sign(drift[i,t])))
+            r.collapse_events.append(dict(story=i, time=float(t*r.dt), criterion=name, direction=directions[-1], axis=building.axis))
+        else:
+            times.append(None); criteria.append(None); directions.append(None)
+    r.summary = dict(converged=r.converged, iterations=r.iterations, reason=r.reason,
+        t_fail=fail if r.converged else [[None]*4 for _ in range(building.N)],
+        t_collapse=times, collapse_criterion=criteria, collapse_direction=directions,
+        collapse_axis=building.axis if r.collapse_events else None,
+        residual_drift=drift[:,-1].tolist(), peak_drift_ratio=(np.max(abs(drift),axis=1)/building.h).tolist(),
+        peak_mu=np.max(mu,axis=2).tolist(), k_t_min=np.min(kt,axis=1).tolist(),
+        collapse_events=r.collapse_events, residual_history=r.residual_history,
+        segments=r.segments, padding_capped=r.padding_capped)
+    return r.collapse_events
+
+
+class _HFTDConvolution:
+    """Modal overlap-save convolution of a trial pseudo-force history.
+
+    The leading overlap retains the damped kernel memory. Hysteresis is
+    evaluated once over the saved, joined history, never independently
+    reset at FFT block boundaries. A quiet prefix separates the held
+    residual tail from the start of the physical record.
+    """
+
+    def __init__(self, building, npts, dt, segment_seconds=None,
+                 overlap_seconds=None):
+        self.building = building
+        self.npts = npts
+        settle = 5 / (building.zeta * building.omega_n[0])
+        requested_guard = int(np.ceil(3 * settle / dt))
+        self.guard = min(requested_guard, 200000)
+        overlap_seconds = settle if overlap_seconds is None else overlap_seconds
+        self.overlap = max(0, int(np.ceil(overlap_seconds / dt)))
+        self.block_size = npts if segment_seconds is None else max(1, int(round(segment_seconds / dt)))
+        self.segments = int(np.ceil(npts / self.block_size))
+        window = min(npts, self.block_size + self.overlap)
+        requested_tail = max(self.guard, window)
+        tail = min(requested_tail, 200000)
+        self.length = next_fast_len(self.guard + window + tail)
+        self.padding_capped = requested_guard > self.guard or requested_tail > tail
+        self.omega = 2 * np.pi * fftfreq(self.length, dt)
+        wn = building.omega_n[:, None]
+        self.compliance = 1 / (wn**2 - self.omega**2 + 2j * building.zeta * wn * self.omega)
+
+    def apply(self, force, derivatives=False):
+        b = self.building
+        displacement = np.empty_like(force)
+        velocity = np.empty_like(force) if derivatives else None
+        acceleration = np.empty_like(force) if derivatives else None
+        for start in range(0, self.npts, self.block_size):
+            end = min(start + self.block_size, self.npts)
+            left = max(0, start - self.overlap)
+            size = end - left
+            padded = np.zeros((b.N, self.length))
+            padded[:, self.guard:self.guard + size] = force[:, left:end]
+            padded[:, self.guard + size:] = force[:, end - 1, None]
+            q = self.compliance * (b.phi.T @ fft(padded, axis=1))
+            saved = slice(self.guard + start - left, self.guard + size)
+            displacement[:, start:end] = b.phi @ np.real(ifft(q, axis=1))[:, saved]
+            if derivatives:
+                velocity[:, start:end] = b.phi @ np.real(ifft(1j * self.omega * q, axis=1))[:, saved]
+                acceleration[:, start:end] = b.phi @ np.real(ifft(-self.omega**2 * q, axis=1))[:, saved]
+        return displacement, velocity, acceleration
+
+
+
+def _causal_fft_predictor(building, base, bb, convolution, dt, max_iterations):
+    """Causal block predictor for the whole-record FFT fixed point.
+
+    The positive-time samples of IFFT(H) form a Volterra convolution.
+    Short blocks make its constitutive feedback contractive; completed
+    blocks contribute through FFT convolution, with frozen causal state.
+    This predicts forces only. The requested whole-record/overlap-save
+    operator must still pass its unchanged residual test afterward.
+    """
+    b = building
+    n = base.shape[1]
+    block = max(2, int(1.0 / dt))
+    kernel = np.real(ifft(convolution.compliance, axis=1))[:, :n]
+    length = next_fast_len(n + block - 1)
+    kernel_fft = rfft(kernel, n=length, axis=1)
+    local_length = next_fast_len(2 * block - 1)
+    local_kernel = rfft(kernel[:, :block], n=local_length, axis=1)
+    past, force = np.zeros_like(base), np.zeros_like(base)
+    state = ColumnHysteresis(bb)
+    total_iterations = 0
+    for start in range(0, n, block):
+        end = min(n, start + block)
+        size = end - start
+        trial = np.repeat(force[:, start-1:start], size, axis=1) if start else np.zeros((b.N, size))
+        for _ in range(max_iterations):
+            total_iterations += 1
+            modal = b.phi.T @ trial
+            correction = b.phi @ irfft(local_kernel * rfft(modal, n=local_length, axis=1), n=local_length, axis=1)[:, :size]
+            u = base[:, start:end] + past[:, start:end] + correction
+            _, _, _, _, candidate, next_state = _hysteresis_history(u, bb, state)
+            error = np.linalg.norm(candidate-trial) / max(np.linalg.norm(candidate), 1.)
+            if not np.isfinite(error):
+                return None, total_iterations
+            # This is only a seed for the final whole-record residual test.
+            # Solving predictor blocks more tightly than the production
+            # fixed-point tolerance repeats expensive hysteresis histories
+            # without strengthening the accepted result.
+            if error < 1e-4:
+                break
+            trial = candidate
+        else:
+            return None, total_iterations
+        state = next_state
+        force[:, start:end] = trial
+        modal = b.phi.T @ trial
+        response = b.phi @ irfft(kernel_fft * rfft(modal, n=length, axis=1), n=length, axis=1)[:, :n-start]
+        past[:, end:] += response[:, size:]
+    return force, total_iterations
+
+
+
+def solve_hftd(building, accel, disp, dt, params=None):
+    """Preserve the elastic grid; resolve yielding on a finer FFT grid.
+
+    Hysteresis introduces corners and harmonics above the input bandwidth.
+    Fourfold band-limited input interpolation resolves those transitions;
+    output arrays retain the caller's sample times and wire layout.
+    This is sampling refinement, not a displacement post-filter.
+    """
+    p = {**HFTD_DEFAULTS, **(params or {})}
+    a = np.asarray(accel, dtype=float) * p['intensity_scale']
+    d = np.asarray(disp, dtype=float) * p['intensity_scale']
+    if a.ndim != 1 or d.shape != a.shape or len(a) < 2 or not np.all(np.isfinite(a)) or not np.all(np.isfinite(d)) or not np.isfinite(dt) or dt <= 0:
+        raise ValueError('ground traces must be finite matching 1-D arrays and dt positive')
+    bb = build_backbones(building, **p)
+    building.compute_response(a, d, dt, nonlinear=False)
+    drift = np.diff(building.floor_disp_rel, axis=0, prepend=np.zeros((1, len(a))))
+    if np.all(np.max(abs(drift), axis=1)[:, None] <= bb['dy']):
+        result = _solve_hftd_grid(building, accel, disp, dt, p)
+        result.summary['sampling_factor'] = 1
+        return result
+
+    from scipy.signal import resample
+    factor = 4
+    n = len(a)
+    settle = 5 / (building.zeta * building.omega_n[0])
+    length = min(4*n, n + int(np.ceil(settle/dt)))
+    count = (n-1)*factor + 1
+    fine_a = resample(np.pad(a, (0, length-n)), length*factor)[:count]
+    fine_d = resample(np.pad(d, (0, length-n)), length*factor)[:count]
+    result = _solve_hftd_grid(building, fine_a, fine_d, dt/factor,
+                              {**p, 'intensity_scale': 1.})
+    # Restore the native input/time metadata consumed by furniture and the
+    # server; compute_response_nonlinear installs the returned floor arrays.
+    building.compute_response(a, d, dt, nonlinear=False)
+    for name in ('u_rel', 'u_abs', 'story_drift', 'story_shear', 'k_t_ratio',
+                 'p_nl', 'damage_state', 'column_damage', 'velocity',
+                 'acceleration', 'column_force', 'column_tangent'):
+        setattr(result, name, getattr(result, name)[..., ::factor].copy())
+    result.u_abs = result.u_rel + d[None, :]
+    result.dt = dt
+    result.backbones['params'] = p
+    predictor_iterations = result.summary['predictor_iterations']
+    causality_error = result.summary['causality_error']
+    result.collapse_events = []
+    evaluate_collapse_criteria(result, building)
+    result.summary.update(sampling_factor=factor,
+                          predictor_iterations=predictor_iterations,
+                          causality_error=causality_error)
+    return result
+
+
+def _solve_hftd_grid(building, accel, disp, dt, params=None):
+    """Modal FFT pseudo-force fixed point; no time-marching structural solve.
+
+    The original elastic expression is untouched. Its response is the base
+    solution; an FFT of the constitutive force defect adds the correction.
+    Leading quiet padding prevents a held residual tail wrapping to t=0.
+    The frame's non-story-spring flexural coupling remains elastic.
+    """
+    p = {**HFTD_DEFAULTS, **(params or {})}
+    scale = p['intensity_scale']
+    a, d = np.asarray(accel,dtype=float)*scale, np.asarray(disp,dtype=float)*scale
+    if a.ndim != 1 or d.shape != a.shape or len(a)<2 or not np.all(np.isfinite(a)) or not np.all(np.isfinite(d)) or not np.isfinite(dt) or dt<=0:
+        raise ValueError('ground traces must be finite matching 1-D arrays and dt positive')
+    bb = build_backbones(building, **p)
+    building.compute_response(a,d,dt,nonlinear=False)
+    base = building.floor_disp_rel.copy()
+    base_acc = building.floor_accel_rel.copy()
+    n, N = len(a), building.N
+    settle = 5/(building.zeta*building.omega_n[0])
+    convolution = _HFTDConvolution(building,n,dt,p['hftd_segment_seconds'])
+    # Velocity of the unchanged elastic base on its original frequency grid.
+    old_len = min(4*n,n+int(np.ceil(settle/dt)))
+    old_w = 2*np.pi*fftfreq(old_len,dt)
+    af = fft(a,n=old_len)
+    base_vel=np.zeros_like(base)
+    for i in range(N):
+        old_den=building.omega_n[i]**2-old_w**2+2j*building.zeta*building.omega_n[i]*old_w
+        q=(-building.Gamma[i]/old_den)*af
+        base_vel+=np.outer(building.phi[:,i],np.real(ifft(1j*old_w*q))[:n])
+    force = np.zeros_like(base)
+    history=[]
+    previous_force = previous_residual = None
+    force_steps, residual_steps = [], []
+    converged=False
+    predictor_iterations = 0
+    quiet_prefix = 0
+    causality_error = 0.
+    u=base.copy(); velocity=base_vel.copy(); acceleration=base_acc.copy()
+    for iteration in range(1,int(p['hftd_max_iterations'])+1):
+        if iteration == 3:
+            predicted, predictor_iterations = _causal_fft_predictor(
+                building, base, bb, convolution, dt, int(p['hftd_max_iterations']))
+            if predicted is not None:
+                force = predicted
+                active = np.any(force != 0, axis=0)
+                # Stay away from the first force corner: finite-bandwidth
+                # interpolation has a small local pre-ringing there.
+                quiet_prefix = int(np.argmax(active)) // 2 if np.any(active) else n
+                previous_force = previous_residual = None
+                force_steps, residual_steps = [], []
+        if np.any(force):
+            correction,_,_ = convolution.apply(force)
+            u=base+correction
+        drift, vf, kt, damage, candidate, machine = _hysteresis_history(u,bb)
+        residual = candidate-force
+        change=p['hftd_relaxation']*residual
+        updated=force+change
+        norm=float(np.linalg.norm(change)/max(np.linalg.norm(updated),1e-30))
+        history.append(norm)
+        if not np.isfinite(norm) or not np.all(np.isfinite(u)):
+            break
+        if quiet_prefix:
+            causality_error = float(np.max(abs(u[:, :quiet_prefix]-base[:, :quiet_prefix])) / np.min(bb['dy']))
+            if causality_error > p['hftd_tolerance']:
+                break
+        if norm < p['hftd_tolerance']:
+            converged=True
+            break
+        if iteration < p['hftd_max_iterations']:
+            # Anderson mixing accelerates the same FFT fixed point; it does
+            # not introduce a time integrator or alter the residual test.
+            if previous_force is not None:
+                force_steps.append((force-previous_force).reshape(-1))
+                residual_steps.append((residual-previous_residual).reshape(-1))
+                force_steps, residual_steps = force_steps[-20:], residual_steps[-20:]
+                D = np.stack(residual_steps,axis=1)
+                gram = D.T@D
+                regularizer = max(float(np.trace(gram))*1e-12,1e-30)
+                weights = np.linalg.solve(gram+regularizer*np.eye(len(force_steps)),D.T@residual.reshape(-1))
+                accelerated = updated.reshape(-1)-(np.stack(force_steps,axis=1)+p['hftd_relaxation']*D)@weights
+                if np.all(np.isfinite(accelerated)) and np.linalg.norm(accelerated) <= 10*max(np.linalg.norm(force)+np.linalg.norm(candidate),1e-30):
+                    updated=accelerated.reshape(force.shape)
+            previous_force, previous_residual = force.copy(), residual.copy()
+            force=updated
+    if np.any(force):
+        _,correction_velocity,correction_acceleration=convolution.apply(force,True)
+        velocity=base_vel+correction_velocity
+        acceleration=base_acc+correction_acceleration
+    # Independently integrated work terms. Constitutive work is separated
+    # from recoverable secant spring energy; coupling and gravity stay elastic.
+    B=np.eye(N)-np.eye(N,k=-1)
+    coupling=building.K-B.T@np.diag(building.k0_profile)@B
+    elastic_energy=.5*np.einsum('it,ij,jt->t',u,coupling,u)
+    spring_energy=np.sum(.5*vf*vf/bb['k0'][:,:,None],axis=(0,1))
+    hysteretic_work=float(np.sum(machine.work)-spring_energy[-1])
+    if not np.any(machine.yielded): hysteretic_work=0.
+    modal_velocity=building.phi.T@building.M@velocity
+    damp=float(np.trapezoid(np.sum(2*building.zeta*building.omega_n[:,None]*modal_velocity**2,axis=0),dx=dt))
+    input_energy=float(np.trapezoid(-a*np.sum(building.M@velocity,axis=0),dx=dt))
+    kinetic=float(.5*velocity[:,-1]@building.M@velocity[:,-1])
+    strain=float(elastic_energy[-1]+spring_energy[-1])
+    energy=dict(input=input_energy, kinetic=kinetic,strain=strain,damping=damp,hysteretic=hysteretic_work,
+                closure_error=(kinetic+strain+damp+hysteretic_work-input_energy)/max(abs(input_energy),1e-30))
+    result=HFTDResult(u,u+d[None,:],drift,vf.sum(axis=1),kt.sum(axis=1)/building.k0_profile[:,None],
+        force,np.max(damage,axis=1),damage,converged,iteration,history,energy,velocity,acceleration+a[None,:],vf,kt,bb,dt,
+        segments=convolution.segments, padding_capped=convolution.padding_capped,
+        reason='' if converged else 'Pseudo-force iteration did not converge; no collapse is inferred.')
+    evaluate_collapse_criteria(result,building)
+    if causality_error > p['hftd_tolerance']:
+        result.reason = 'FFT tail dynamic range contaminated the causal prefix; no collapse is inferred.'
+        result.summary['reason'] = result.reason
+    result.summary['causality_error'] = causality_error
+    result.summary['predictor_iterations'] = predictor_iterations
+    return result
+
 
 class MDOF_ShearBuilding:
     """
@@ -1106,7 +1438,12 @@ class MDOF_ShearBuilding:
                  f_y=F_Y_STEEL, f_c=F_C_CONCRETE,
                  rho_longitudinal=RHO_LONGITUDINAL,
                  concrete_cover=CONCRETE_COVER, phi_axial=PHI_AXIAL,
-                 axial_cap_factor=AXIAL_CAP_FACTOR):
+                 axial_cap_factor=AXIAL_CAP_FACTOR, nonlinear=False, **nonlinear_params):
+        unknown = set(nonlinear_params) - set(HFTD_DEFAULTS) - {'record'}
+        if unknown:
+            raise TypeError(f'Unknown nonlinear parameters: {sorted(unknown)}')
+        self.nonlinear = bool(nonlinear)
+        self.nonlinear_params = nonlinear_params
         self.N = num_stories
         self.m = mass_per_floor
         self.zeta = zeta
@@ -1348,10 +1685,12 @@ class MDOF_ShearBuilding:
         for i in range(self.N):
             self.Gamma[i] = np.dot(self.phi[:, i], self.M @ ones)
 
-    def compute_response(self, acceleration, displacement, dt):
+    def compute_response(self, acceleration, displacement, dt, nonlinear=None):
         """
         Compute floor displacement time histories given ground acceleration and displacement.
         """
+        if nonlinear is True or (nonlinear is None and self.nonlinear):
+            return self.compute_response_nonlinear(acceleration, displacement, dt)
         self.accel = acceleration
         self.ground_disp = displacement
         self.dt = dt
@@ -1419,6 +1758,17 @@ class MDOF_ShearBuilding:
 
         self._demand_stability_coefficients()
 
+        return self.time, self.ground_disp, self.floor_disp_rel, self.floor_disp_abs
+
+    def compute_response_nonlinear(self, acceleration, displacement, dt, **params):
+        result = solve_hftd(self, acceleration, displacement, dt,
+                            {**self.nonlinear_params, **params})
+        self.hftd_result = result
+        self.floor_disp_rel = result.u_rel
+        self.floor_disp_abs = result.u_abs
+        self.floor_accel_abs = result.acceleration
+        self.floor_accel_rel = result.acceleration-self.accel[None,:]
+        self._demand_stability_coefficients()
         return self.time, self.ground_disp, self.floor_disp_rel, self.floor_disp_abs
 
     def _demand_stability_coefficients(self):
