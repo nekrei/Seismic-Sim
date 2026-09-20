@@ -1877,3 +1877,83 @@ canvas made it render in the screenshot immediately, with all three
 frequency panels correct. **A screenshot/WebGL compositing artifact of the
 Browser pane, not a product defect** — worth recording so the next session
 does not chase it.
+
+## Task 9 — documentation
+
+Tracked files: `README.md`, `Seismic-Sim Math.pdf`.
+Gitignored-but-junctioned (land in the main checkout directly):
+`specs/`, `verification/`, `knowledge/`, `claude_scripts/`, `.claude/`.
+`AGENTS.md` is a *copy* in the worktree and was copied back by hand.
+
+### Corrections written back into the spec and verification docs
+
+These are the record of truth, so they were done first.
+
+- **`specs/10-elastic-foundation.md` B4** — the pushover's matrix changed
+  from `K_L` to the elastic `K`, with the measurement that exposed it.
+- **`verification/10-elastic-foundation.md` check 1** — the "empty
+  `git diff --stat out/`" claim rescoped (it cannot survive Part E) and
+  *strengthened*: byte-identical numerical artifacts plus a purely
+  additive `building_data.json` diff.
+- **check 5** — `ρ ≥ 1e6` corrected to `beam_depth = 4000` (ρ = 1.3e10),
+  with the `1/(2ρ)` derivation.
+- **check 6** — "θ largest at story 1" corrected to "positive everywhere,
+  monotone above its peak, peak reported".
+
+### Everything else
+
+- **README.md** — cracked sections, P-Δ, the gravity-instability result,
+  per-floor properties and capacities in the `mdof_response.py` section;
+  the soft-ground-story checkbox and the 422 behaviour in the
+  `index.html` section; two new Current-state bullets; the environment
+  overrides; and **the stale claim "Per-floor stiffness variation (e.g. a
+  'soft story') isn't supported yet" removed** — it was exactly the kind
+  of line this project's doc philosophy exists to catch.
+- **AGENTS.md** — a spec-10 bullet with the five carry-forward points, and
+  **seven new "Things to know" entries** (`K = K_cracked − K_G`, the
+  tridiagonal-vs-full `K_G`, the gravity guard running before `np.sqrt`,
+  θ's elastic denominator, per-floor profiles rejecting wrong lengths at
+  all three layers, the P-M/ductility caveats, and
+  `column_section_for_axis()` as the shared definition).
+- **Math PDF** — new **Part F** (F1–F6) in
+  `claude_scripts/generate_math_pdf.py` plus 17 new equation assets, and
+  source notes at `claude_scripts/math-pdf-sections-goal10.md`.
+  Regenerated, then **text-searched**, which is the step spec 7 got caught
+  out on: 9/9 new terms present, 4/4 earlier-part terms still present.
+  *Note for next time:* reportlab writes streams as
+  `[ /ASCII85Decode /FlateDecode ]`, so a naive `zlib.decompress` extracts
+  **zero** characters and reports a false MISS on everything. ASCII85 first.
+- **`knowledge/`** — `mdof_response.md`, `server.md`,
+  `data_flow_and_wire_formats.md` (with the full 24-key table),
+  `index_html.md`, and a spec-10 entry in `spec_history.md`.
+- **`specs/README.md`** — row 10 moved to ✅ Done with the measurements
+  and the three doc corrections.
+- **`specs/COURSE-CONCEPTS.md`** — spec 10's row moved into the shipped
+  table, kept honest as **"None"**: this spec adds no signals content. The
+  roadmap row is struck through rather than deleted so the section's own
+  accounting still reads correctly.
+- **`preview-visualization` skill** — one addition, and deliberately not a
+  slider list (the skill is already written to be slider-agnostic, so
+  AGENTS.md's "a spec added a control" trigger needed no list edit). What
+  it did need is the **new failure mode**: a 422 message over the 3D view
+  is a *result*, not a bug, and the accompanying `Failed to load resource:
+  … 422` console line is the browser reporting a status, not a JS error.
+- **`requirements.txt`** — confirmed unchanged (`git diff` empty). No new
+  dependency; `reportlab`/`pypdf` were already listed as docs-build-only.
+- `graphify update .` run.
+
+### check-docs-drift
+
+Run against spec 10: README ✅, math PDF ✅ (verified in the *rendered*
+PDF, not just the generator), AGENTS.md status ✅ accurate (claims
+"on branch", and the branch is 8 commits ahead of `main`, unmerged),
+verification scripts ✅, `knowledge/` ✅ — all 13 new symbols present.
+
+### Ruling
+
+25. **`verify_frame_furniture.py` was left alone** (see Task 7's ruling
+    24), and **`preview-visualization` got a behaviour note rather than a
+    slider list** — the skill already states "don't assume a fixed slider
+    list", which is precisely the timelessness AGENTS.md asks these three
+    skills to keep. Adding the list would have made it stale on the next
+    spec.
