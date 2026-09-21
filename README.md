@@ -764,8 +764,9 @@ where the centre of rigidity is undefined. `intensity_scale` is clamped to 20.
 
 **Viewer.** Floors yaw by `-θ·scale/u` (the same display gain as sway) about
 their own centre, with column ends rotated about the corner offset and columns
-twisted to match. A **Torsion in collapse** checkbox (default off) beside the
-collapse button sends `torsion` with nonlinear requests. The Transfer panel
+twisted to match. The **Torsion in collapse** checkbox (default off) and the **Run collapse
+analysis** button live in their own collapsible **Collapse Analysis** panel
+section and send `torsion` with nonlinear requests. The Transfer panel
 reads the right DOF block of the 3N modes.
 
 **Open items.** The offline pipeline stays per-axis and `out/` was not
@@ -773,3 +774,11 @@ regenerated (it would only add an all-zero `θ` block and ~1e-16 churn). The
 `t_collapse` agreement criterion against the Newmark reference is vacuous
 (neither side collapses in the checked cases). Whether elastic torsion should
 default on given `θ ≡ 0` there is an open question.
+
+**Messages and toasts.** Any red message on the recompute overlay (unstable
+building, invalid parameters, collapse not converged, unsupported backend) can
+be closed with its × button or Esc. Closing an *unstable building* or *invalid
+parameters* message also snaps the building sliders back to their last
+accepted values, so the panel matches the building still on screen. A new
+collapse result being cached shows a brief green "Successfully Cached" toast
+at the top right; the run button's label never changes.
