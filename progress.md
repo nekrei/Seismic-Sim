@@ -2494,3 +2494,62 @@ byte-identical spec-11 behaviour (check 9).
 45. **The JS↔Python mirror is now actually checked**
     (`check_transfer_mirror.py`); `verify_spectrum.py` only ever covered
     the Python side, contrary to what the spec assumed.
+
+## Spec 12 — Task 7: verification sweep, checks 11 and 13 (2026-09-21)
+
+Check 14 (docs) is deliberately deferred to a separate session at the
+user's request.
+
+### Check 11 — existing checks
+
+- `run_spec11_regressions.py`: all 15 exit 0 (incl. verify_frame_furniture,
+  verify_elastic_foundation, verify_spectrum, verify_floor_area,
+  verify_synthetic_earthquake — confirmed executing — check_quake_continuity,
+  check_ground_accel_block with section 9, and every JS check).
+- `verify_hftd.py`: **first run exit 1** — `check_hysteresis_batch.py`
+  still called `_hysteresis_history` with Task 3's retired signature
+  (floor displacement in, 6-tuple out). Fixed to the new API with the same
+  broadcast story drift `_per_axis_constitutive` uses; re-run exit 0.
+  Latent since Task 3 because verify_hftd.py is not in the 15-script runner.
+- `verify_torsion.py` 1–8 PASS (run after Task 5; Task 6 touched no Python).
+- `check_transfer_mirror.py`, `check_floor_rotation.mjs`: PASS.
+
+### Check 13 — real browser (Claude in Chrome, server.py from the worktree)
+
+Demo case: KOCAELI_AYD, 3 stories, columns 0.9×0.7 m, Magnitude 8.8,
+"Torsion in collapse" on, Run collapse analysis (real checkbox + button).
+
+1. Symmetric (cov = 0, injected into the request by a temporary fetch
+   wrapper — no UI control exists): columns yield (μ 1.15) yet θ is 0.0
+   exactly and both eccentricity envelopes are 0; top view shows the roof
+   square to the ground slab. PASS.
+2. Scatter on: converged, μ 1.36, roof θ peak 5.2e-4 rad at t = 83.5 s,
+   ground-story e_y = −3.94 m. Roof-θ RMS by record quarter: 2.2e-18 →
+   1.06e-4 → 6.5e-5 → 2.1e-5 — zero until yielding, then emergent twist that
+   decays with the shaking (residual ~1e-6 rad), not monotone growth. PASS
+   as emergence; "grows over the record" holds from first yield to peak.
+3. Top view at the peak: roof plate visibly yawed (~10° at display gain)
+   against the ground slab, column tips on the rotated corners. PASS
+   (θ = 0.3 rad geometry proven numerically by check 10).
+4. 20-story soft-ground-story at maximum zoom-out: fully lit, not fogged,
+   soft story visible; camera/fog/lighting code untouched by the branch. PASS.
+5. Signals drawer, Frequency tab, 7 stories, column Y 0.85: X and Y give
+   different transfer curves, every panel prints its own peak (X −5.9 dB,
+   Y −5.0 dB). DOF-block correctness proven by check_transfer_mirror.py on
+   this exact page code. PASS.
+6. 375×812: Chrome's window could not be resized (maximized), so the
+   built-in Browser pane's mobile emulation was used. scrollWidth 375 (no
+   horizontal overflow); torsion row at x 17–359, hit-test returns its
+   label; row aligned with the soft-ground-story row. PASS.
+7. Zero console errors in both browsers, including a fresh page load. PASS.
+
+### Task 7 rulings
+
+46. **`check_hysteresis_batch.py` updated to the generalised API**, keeping
+    what it tests (batched history == stepped machine, bit-exact over 6000
+    yielding samples). A test-script fix, not a physics change.
+47. **Check 13 item 6 ran in the built-in Browser pane**, the only browser
+    here that could emulate 375×812.
+48. **Item 2's twist is not monotone over the record** — it appears at
+    first yield, peaks, and decays. That is the physics of an unconverged-
+    to-collapse, converged run; recorded rather than read as a failure.
