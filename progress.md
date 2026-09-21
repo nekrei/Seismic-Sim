@@ -2780,3 +2780,41 @@ Bug found by check 1's negative case and fixed: the builder read
     1.6e-3 at dt/8.
   That ~4× is Newmark converging onto the closed form. The check asserts
   at dt/8, with tolerances unchanged.
+
+### Task 6 — server + payload, check 8 (2026-09-22)
+
+`server.py`:
+- Nonlinear requests go through `solve_with_detachment` on both paths.
+  The per-axis path now solves X and Y together (C-4 joint restart).
+- `header['collapse']` gains `handoff_header(...)`: `handoff_version`,
+  `detachment_events`, `cap_reached`, `surviving_stories`.
+- The binary layout is unchanged. The hold is in abs_x / abs_y / theta_z.
+- `respond()` is now elastic-only.
+
+**Bug found and fixed (R14).** A detaching request returned HTTP 500 with
+`inf` in `theta_demand_X`:
+- `_demand_stability_coefficients` recomputed a detached story's drift from
+  `floor_disp_rel`, i.e. held floor minus moving survivor.
+- Its peak landed after t_d, where the held floors' acceleration (and so
+  the story shear) is 0, giving θ = P·δ/(V·h) = inf.
+- Fix: the driver sets `held_from` (per-story t_detach sample) on each
+  axis building. The shared method holds that story's drift from there,
+  like its HFTD histories. It is one guard, and 3N goes through it via
+  `_install_axis_views`.
+- Remaining latent issue (pre-existing, not spec 13): `theta_demand` maps
+  a zero story shear to inf, which the JSON header cannot carry.
+
+`check_ground_accel_block.py` section 10 (the server's intensity cap is
+20, so a KOCAELI_AYD, M 8.0 (≈×3.1 RMS), ×20, N=4 request with story 3 at
+0.7 m was used; it detaches at 80.54 s):
+- a no-detachment nonlinear payload's floats are byte-identical to main,
+  and its header is identical apart from the 4 hand-off keys;
+- the elastic default payload is byte-identical to main;
+- detaching per-axis and has_floor_rotation requests: 200, zero trailing
+  bytes, 550,400 / 638,464 float32 all finite, floors ≥ 3 held
+  bit-for-bit in abs_x / abs_y (/ theta_z).
+
+Section 9 was stale since spec 12 merged: `main`'s elastic default is now
+torsion on. The reference now asks `main` for torsion=false. Both elastic
+payloads were confirmed byte-identical to `main` separately. ALL CHECKS
+PASSED, exit 0.

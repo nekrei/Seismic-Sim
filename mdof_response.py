@@ -2623,6 +2623,12 @@ def solve_with_detachment(building, accel_x, disp_x, accel_y=None, disp_y=None,
                                      backbones=v.backbones)) for a, _, v, _, _ in per]
         hit = _find_detachment(views, kg_hist, p_delta, story, k)
 
+    held = [None] * N
+    for e in info['events']:
+        for i in range(e['story'], N):
+            held[i] = e['k'] if held[i] is None else held[i]
+    for _, b, _, _, _ in per:
+        b.held_from = held
     # Package: the stitched histories replace the first pass on each view,
     # and spec 11's criteria are re-evaluated on them with the P/h in force.
     results = {}
@@ -3197,6 +3203,15 @@ class MDOF_ShearBuilding:
         drift[0, :] = u[0, :]
         if self.N > 1:
             drift[1:, :] = u[1:, :] - u[:-1, :]
+        # Spec 13: a detached story stops being structural at its t_detach
+        # sample (set by solve_with_detachment). Past it, its drift is held
+        # floor minus moving survivor, and the held floors carry zero
+        # acceleration, so a peak landing there would divide by a zero
+        # story shear. Its drift is held at that sample, like its HFTD
+        # story histories.
+        for i, k in enumerate(getattr(self, 'held_from', None) or ()):
+            if k is not None:
+                drift[i, k + 1:] = drift[i, k]
         self.story_drift = drift
 
         t_star = np.argmax(np.abs(drift), axis=1)
