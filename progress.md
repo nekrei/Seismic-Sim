@@ -2643,3 +2643,62 @@ Verification:
 - `check_hftd_elastic_baseline` (140 cases), `check_hftd_contracts`,
   `check_hftd_sampling_wrapper`, `check_hftd_convolution` and
   `verify_torsion 1 2 3 4` all exit 0.
+
+### Task 3 — driver, detection, stitching, hold + COST GATE (2026-09-22)
+
+`solve_with_detachment` (per-axis X[+Y], or the 3N building):
+- **First pass:** exactly `compute_response_nonlinear`. A run with no
+  detachment is returned untouched.
+- **Detection:** `_find_detachment` runs on the stitched history, in global
+  time. A story detaches when all 4 columns have failed and kt ≤ P/h in
+  force at that sample. Ties go to the lowest story.
+- **Restart:** a joint restart of both axes on `survivor_building`. State
+  is recovered by `_state_at`, which re-runs the law on the retained
+  solve-grid history. Survivor segments always run on the 4× grid, with
+  the first pass's fine traces.
+- **R7 hold:** absolute position (and θ) is held, absolute velocity and
+  acceleration are zero, and the detached stories' per-story histories
+  freeze.
+- **Criteria:** spec-11 criteria are re-evaluated with a per-sample k_g
+  history (`evaluate_collapse_criteria(k_g=)`).
+- **Stop:** when no further detachment is found, story 1 detaches, or
+  `MAX_DETACHMENT_EVENTS = 4` binds (`cap_reached`).
+
+**Ruling R12 — convergence fix for the restart.** The survivor's
+causal-predictor seed missed the restart operator by ~1e-3, and the
+coupled 3N outer iteration stalled there (N=7 3N: 200 iterations, not
+converged).
+- **Fix:** a change of variables. u(0)=u0 exactly and the frozen state are
+  both known, so the pseudo-force at τ=0 (p0) is determined. The survivor
+  solves for g = p − p0. The operator's τ=0 zero-input term then drops to
+  1.3e-6 relative (measured on captured restart inputs).
+- **What remains:** a 1.9e-4 seed miss, identical under the plain
+  convolution. So it is the shared predictor's own accuracy, not the
+  restart.
+- **Shared-code change:** `_hftd_fixed_point(offset=)` keeps the
+  convergence norm relative to the total pseudo-force. With the default
+  None it is bit-identical.
+- **Result:** N=7 3N now converges in 102 iterations. The spec-12 coupled
+  map still contracts slowly after the seed.
+
+**Detaching real-record cases** (KOCAELI_AYD) needed a spec-10 per-floor
+weak story. With the default uniform columns:
+- intensity 40: no column fails;
+- intensity 80: story 1 detaches at 95.37 s, so there is no survivor;
+- intensity ≥ 150: does not converge.
+
+**Cost gate (V-9), wall clock, sequential runs, commit `755e893`:**
+
+| config | first pass | restart(s) | total | ratio |
+|---|---|---|---|---|
+| N=7 per-axis X+Y, ×60, story 4 = 0.8 m | 101.7 s | 37.5 s (X 16 it, Y 3 it) | 139.3 s | 1.37 |
+| N=7 3N, same | 208.4 s | 244.5 s (102 it) | 453.0 s | 2.17 |
+| N=20 per-axis X+Y, ×40, story 11 = 0.8 m | 182.8 s | 62.7 s (3+3 it) | 245.8 s | 1.34 |
+| N=20 3N, same (cascade: story 11 at 71.37 s, then story 1 at 84.47 s) | 277.0 s | 111.7 s (3 it) | 389.1 s | 1.40 |
+
+Profile (N=20 per-axis): ~95 % of the restart time is the shared
+`_causal_fft_predictor` walking the survivor suffix, not the restart
+machinery.
+
+`t_detach` (80.62 s) is well after `t_collapse` (40.07 s) in the N=7 case.
+That strict-inequality case is for check 1.
