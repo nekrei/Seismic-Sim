@@ -2173,3 +2173,173 @@ files were copied into `out/` rather than doing a full regeneration.
 6. **Gate A passed:** coupled vs per-axis elastic, `KOCAELI_AYD` at
    intensity 40, best of 3 — N=7 `0.0870 s` vs `0.0740 s` (1.175×), N=20
    `0.3133 s` vs `0.3927 s` (**0.798×, faster**). Sub-second either way.
+
+## Spec 12 (torsion) — Task 3: per-column drift and the 3N pseudo-force assembly
+
+**Commit:** see `goal/12-torsion`. Gate B measured and reported.
+
+### What changed
+
+`mdof_response.py`:
+- `column_drift_3N(u, positions)` — B2. Every column gets its OWN drift,
+  `δ_x,ij = [u_x,i − y_j·θ_i] − [u_x,i−1 − y_j·θ_i−1]` and the Y form.
+  Spec 11 A4's "a rigid diaphragm forces every column to share the same
+  drift" was true of a one-lateral-DOF-per-floor model and is false here.
+- `assemble_pseudo_force_3N(s_x, s_y, positions)` — B3.
+  `p_NL = Σ_ij T_ijᵀ[k₀,ij·δ_ij − V_ij]`. `Bᵀ` factors out of the sum
+  over `j`, so spec 11's `assemble_pseudo_force` is reused verbatim on
+  three placed sums rather than reimplemented.
+- `_hysteresis_history(drift, bb, initial_state)` — now takes per-column
+  drift `(N, 4, npts)` and returns the RAW per-column defect instead of a
+  placed pseudo-force, because the 3N path must sum both bending axes
+  before placing. The per-axis path passes its story drift broadcast
+  across the column axis, which is a view rather than arithmetic, so its
+  numbers are unchanged bit for bit.
+- `_per_axis_constitutive` / `_torsion_constitutive` — the two
+  constitutive laws as callables, and `HysteresisAux` carrying the state
+  a resumed block needs.
+- `_hftd_fixed_point(...)` — the Anderson-mixed, causally-seeded fixed
+  point extracted from `_solve_hftd_grid` and made DOF-agnostic. The
+  per-axis and coupled paths now differ ONLY in the constitutive callable
+  and in result packaging, never in the iteration.
+- `_causal_fft_predictor` — takes the constitutive callable, and its block
+  length is now adaptive (see ruling 26).
+- `_HFTDConvolution.ndof` — `building.phi.shape[0]`, not `building.N`.
+- `evaluate_collapse_criteria` — ductility and fracture now index the
+  per-column drift; the story-level thresholds and the reported residual
+  stay on the centre-of-mass story drift, so the per-axis summary shape is
+  unchanged.
+- `HFTDResult.column_drift`, `HFTD3NResult`, `_column_spring_stiffness_3N`,
+  `_solve_hftd_grid_3N`, `solve_hftd_3N`,
+  `MDOF_Building3N.compute_response_nonlinear`.
+- `MDOF_Building3N.compute_response` now also stores `floor_vel_rel` and
+  the full 3N `floor_disp_rel` / `floor_accel_rel`.
+
+`claude_scripts/verify_torsion.py`: checks 5 and 6, check 2's nonlinear
+transpose half (run inside check 6 per V-4), and check 8's deferred `θ_z`
+half. `claude_scripts/performance_torsion_nonlinear.py`: Gate B.
+
+### Task 3 rulings
+
+24. **`_hysteresis_history` was generalised, not forked.** Passing the
+    per-axis story drift broadcast to `(N, 4, npts)` is exact, and the
+    segment-cut reduction over both the story and column axes reduces to
+    the old story-only expression (`any_j(peak_i > dy_ij)` is
+    `peak_i > min_j dy_ij`). Confirmed by
+    `check_hftd_elastic_baseline.py` (140 cases bit-identical) and
+    `check_hftd_sampling_wrapper.py` reproducing all three saved
+    nonlinear NRMS references exactly.
+25. **The fixed point is shared, the packaging is not.** Unifying the
+    energy balance and result shape as well would have meant one function
+    with per-axis and 3N branches throughout; instead `HFTD3NResult`
+    holds two ordinary `HFTDResult` views and
+    `evaluate_collapse_criteria` runs on them unchanged, because drift
+    limits, ductility and the gravity tangent test are genuinely per-axis
+    quantities.
+26. **The causal predictor's block length is now adaptive** (V-20). The
+    coupled map contracts more slowly than the per-axis one and was
+    exhausting the 40-iteration budget, after which the predictor returned
+    `None` and the solve stalled at a residual near 0.6 forever. A block
+    that exhausts its budget now halves and retries that block. No new
+    tuning constant; completed blocks stay valid; the per-axis path never
+    halves.
+27. **Biaxial interaction is deliberately absent.** One hysteresis state
+    machine per (story, column, axis), named in
+    `_torsion_constitutive`'s docstring as unconservative for a column
+    driven hard on both axes at once. A circular/elliptical interaction
+    surface is research-grade and out of scope (B2).
+28. **`nonlinear=True` on `MDOF_Building3N.compute_response` now
+    dispatches** to `compute_response_nonlinear` instead of raising
+    `NotImplementedError` (ruling 19 is superseded).
+29. **Check 5's exactness claim moved from `θ_z` to the pseudo-moment**
+    (V-14), check 5 now selects the axes that actually yielded (V-15),
+    and its `cov = 0` case runs at its own higher intensity (V-16).
+30. **Check 6 reaches the elastic branch through the demand, not the
+    material** (V-17): `f_y = 1e13` drives `column_plastic_moment`'s
+    compression block negative and returns `nan`.
+31. **Divergence at over-driven intensities is pre-existing** (V-19).
+    `PARK2004_HOG` at intensity 20 diverges in the per-axis kernel too
+    (`causality_error` 3.46e+31 / 4.01e+33 against the coupled 1.21e+53),
+    and all three report `converged = false` with the modeled reason
+    rather than inferring collapse. At intensity 4 all three converge and
+    the coupled peak displacement (2.572e-01) sits between the two
+    per-axis ones (2.688e-01, 2.317e-01).
+
+### Verification output
+
+`claude_scripts/verify_torsion.py 6` (check 6 + check 2's nonlinear half):
+
+```
+  unreachable strengths: max|p_NL| = 0.0, 1 iteration, vs linear 3N 0.000e+00 relative
+  adjoint identity <s,delta(u)> = <T^T s,u>: -7.212693370e+01 vs -7.212693370e+01
+  weak column at (+a/2,+b/2), +X push: p_theta = -1.500000e+07 (hand -1.500000e+07),
+    so theta < 0 and the weak +y side drifts further
+```
+
+`claude_scripts/verify_torsion.py 5`:
+
+```
+  first yield at sample 4052 (t=40.5200s); first nonzero eccentricity at 4052; equal: True
+  p_theta before first yield: exactly 0.0; theta_z there is 7.625e-09 of peak
+    (FFT tail leak, causality_error 3.161e-08)
+  peak |theta_z| = 2.307301e-03 rad
+  X columns stayed elastic: e_x is 0.0 and its drift ratio is 1.0 by construction
+  Y: eccentricity sign matches the psi scatter on all 3 stories; peak |e| = 3.9553 m
+  Y story 0: weak column 3 (psi=0.8502) vs strong 2 (psi=1.1189); cumulative drift
+    ratio from first yield ['1.0000', '1.0081', '1.1092', '1.1092', '1.1092', '1.1092']
+  column_strength_cov=0.0 at intensity 55.0, yielding on Y: theta_z, e_x, e_y and the
+    theta pseudo-moment are all exactly 0.0
+  uniform defect on one axis cancels on theta exactly; on both axes it leaves
+    1.509e-16 relative, i.e. rounding
+```
+
+`claude_scripts/verify_torsion.py 8` (the deferred `θ_z` half):
+
+```
+  nonlinear, components swapped: theta_z changes by 105.44% RMS
+    (peak |theta_z| 3.3781e-03 vs 1.3152e-03 rad)
+```
+
+Spec 11 regressions, all exit 0: the 15 in
+`run_spec11_regressions.py`, plus `check_hftd_api.py`,
+`check_hftd_contracts.py`, `check_hftd_convolution.py`,
+`check_hftd_elastic_baseline.py` (140 bit-identical cases),
+`check_hftd_numerical_failure.py`, `check_hftd_sampling_wrapper.py`
+(saved references NRMS 0.000170806008 / 0.000176518585 / 0.000243836441,
+unchanged), `verify_hftd_determinism.py`,
+`verify_hftd_segments_columns.py`, `verify_hftd_energy_scaling.py`.
+
+### GATE B — nonlinear performance (C-3 / check 12 / V-9)
+
+`claude_scripts/performance_torsion_nonlinear.py`, KOCAELI_AYD @ intensity
+40, whole record (22016 samples), both sides re-measured on this machine
+in the same run:
+
+| N | per-axis X | per-axis Y | both axes | coupled 3N | total ratio | per-iteration ratio |
+|---|---|---|---|---|---|---|
+| 7 | 23.067 s | 28.211 s | 51.278 s | **74.362 s** | 1.45× | **2.90×** |
+| 20 | 58.368 s | 73.036 s | 131.404 s | **202.695 s** | 1.54× | **3.09×** |
+
+Spec 11's stored per-axis numbers (21.925 s and 66.470 s, i.e. 43.85 s and
+132.94 s for both axes) reproduce closely enough on this machine that the
+freshly measured both-axes column is the fair reference; it is what the
+ratios above use.
+
+All six runs converged in 3 iterations. The coupled N=7 run reports
+`causality_error` 7.6e-08 and peak rotation 6.70e-03 rad with 6 collapse
+events; N=20 reports 1.15e-06 and 2.21e-02 rad with 14.
+
+**Check 12's diagnostic is satisfied.** Per-iteration cost is 2.90× and
+3.09× the both-axes cost — right at the ~3× a 3N-versus-2×N solve should
+cost, not "far above" it. `K_3N`, `Φ` and `ω_n` are built once in the
+constructor and are not re-formed inside the loop.
+
+**Finding to decide on (C-3/C-5): N=20 coupled nonlinear is 202.7 s.**
+That is above the ~133 s the existing both-axes path already costs, and
+`AGENTS.md`'s handoff already records that a two-axis nonlinear request
+"can exceed two minutes and needs an adequate deployment timeout or must
+remain disabled". Ruling recorded for Task 5 to implement, subject to the
+user's decision: **`torsion` defaults true for the elastic path and false
+for the nonlinear path on the live `/compute` endpoint**, with nonlinear
+torsion available explicitly. Nothing about `torsion = false` changes:
+byte-identical spec-11 behaviour (check 9).
