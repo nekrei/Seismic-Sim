@@ -1042,6 +1042,16 @@
                     <input type="checkbox" id="softGroundStoryToggle" />
                     <span class="panel-value" id="softGroundStoryLabel">off</span>
                 </div>
+                <!-- Spec 12: couple u_x, u_y and floor rotation in the collapse
+                     solve, so asymmetric column damage can twist the floors.
+                     Off by default: the coupled nonlinear solve costs ~1.5x
+                     the two per-axis ones. Same <label for> pattern as the
+                     soft-ground-story row, for the same accessibility reason. -->
+                <div class="ctrl-row">
+                    <label class="panel-label" for="torsionToggle">Torsion in collapse</label>
+                    <input type="checkbox" id="torsionToggle" />
+                    <span class="panel-value" id="torsionLabel">off</span>
+                </div>
                 <div class="ctrl-row view-buttons">
                     <button id="runCollapseBtn" type="button" class="primary">Run collapse analysis</button>
                 </div>
@@ -1263,6 +1273,8 @@
         const softGroundStoryToggle = document.getElementById('softGroundStoryToggle');
         const runCollapseBtn = document.getElementById('runCollapseBtn');
         const softGroundStoryLabel = document.getElementById('softGroundStoryLabel');
+        const torsionToggle = document.getElementById('torsionToggle');
+        const torsionLabel = document.getElementById('torsionLabel');
         const sheetStrip = document.getElementById('sheetStrip');
         const stripPlayBtn = document.getElementById('stripPlayBtn');
         const stripRecordName = document.getElementById('stripRecordName');
@@ -1494,6 +1506,9 @@
             groundYData = [];
         let floorXData = [],
             floorYData = [];
+        // Spec 12: per-floor rotation about +Z (radians), or null when the
+        // payload carries none (static out/, torsion off, stale backend).
+        let floorRotData = null;
         // Furniture (spec 5, Part B): furnitureData[axis]['table'|'chair'|'fan'][floorIndex] is a
         // decimated Float32Array of that class's relative-sway response for that floor, on that axis.
         // furnitureRate/furnitureNpts describe the decimated sample grid; furnitureItems holds the
@@ -2026,6 +2041,7 @@
 
         const UP_VECTOR = new THREE.Vector3(0, 1, 0);
         const _dirVec = new THREE.Vector3();
+        const _twistQuat = new THREE.Quaternion();
 
         // --- Building creation (spec 5, Part A/C -- open-cutaway frame) ---
         // Structure: opaque thin floor SLABS (furniture needs something to
@@ -2104,6 +2120,42 @@
             return { y, totalHeight: acc };
         }
         // ---8<--- STORYHEIGHT-HELPERS-END
+
+        // ---8<--- ROTATION-HELPERS-BEGIN
+        // Spec 12 floor rotation. Its own sentinel block, extracted verbatim
+        // by claude_scripts/check_floor_rotation.mjs -- keep it separate from
+        // the SPECTRUM/TIMEDOMAIN/STORYHEIGHT blocks.
+        //
+        // Physics theta is right-handed about +Z (x east, y north). The
+        // scene maps physics y onto scene +Z, which flips handedness, so the
+        // floor group's rotation.y is -theta. The same display gain the
+        // translation gets (`scale` is metres -> displayed scene units) is
+        // applied, so a corner's twist is exaggerated by exactly the factor
+        // its sway is and the two stay in physical proportion.
+        function displayYaw(thetaRad, scale, sceneUnitsPerMetre) {
+            return -thetaRad * scale / sceneUnitsPerMetre;
+        }
+
+        // A plan offset (cx, cz) carried by a level rotated by `yaw` about
+        // scene +Y -- three.js's own Ry(yaw) applied to (cx, 0, cz).
+        function rotateOffset(cx, cz, yaw) {
+            const c = Math.cos(yaw), s = Math.sin(yaw);
+            return { x: cx * c + cz * s, z: -cx * s + cz * c };
+        }
+
+        // World position of a column's end at plan corner (cx, cz) of a level
+        // `lvl` = {x, y, z, yaw}. The corner offset is ROTATED FIRST, then
+        // added: adding it in world space (the pre-spec-12 `b.x + cornerX`)
+        // detaches every column from a twisting floor, and at small angles
+        // it looks almost right (spec 12 C2). The unrotated case keeps the
+        // pre-spec-12 expression itself: the rotated one agrees in value but
+        // can turn a -0 into +0, and "bit-identical" means bit-identical.
+        function columnEndpoint(lvl, cx, cz) {
+            if (lvl.yaw === 0) return { x: lvl.x + cx, y: lvl.y, z: lvl.z + cz };
+            const o = rotateOffset(cx, cz, lvl.yaw);
+            return { x: lvl.x + o.x, y: lvl.y, z: lvl.z + o.z };
+        }
+        // ---8<--- ROTATION-HELPERS-END
 
         function createBuilding(numFloors, storyHeights, frame, folderName) {
             for (const obj of sceneObjects) scene.remove(obj);
@@ -2311,30 +2363,40 @@
         // endpoints' CURRENT world positions (already updated for this
         // frame by the floor-group position loop in animate()), not stored
         // directly, since a column spans two independently-swaying levels. ---
+        // A level's rotation travels with its position (spec 12): the ground
+        // translates but never spins, so its yaw is 0.
         function sourceWorldPos(source) {
             if (source.type === 'ground') {
                 return {
                     x: foundationSlab ? foundationSlab.position.x : 0,
                     y: 0,
                     z: foundationSlab ? foundationSlab.position.z : 0,
+                    yaw: 0,
                 };
             }
             const g = buildingGroups[source.index];
-            return { x: g.position.x, y: g.position.y, z: g.position.z };
+            return { x: g.position.x, y: g.position.y, z: g.position.z, yaw: g.rotation.y };
         }
 
         function updateColumnTransforms() {
             for (const c of columnMeshes) {
-                const b = sourceWorldPos(c.bottomSource);
-                const t = sourceWorldPos(c.topSource);
-                const bx = b.x + c.cornerX, by = b.y, bz = b.z + c.cornerZ;
-                const tx = t.x + c.cornerX, ty = t.y, tz = t.z + c.cornerZ;
+                const lb = sourceWorldPos(c.bottomSource), lt = sourceWorldPos(c.topSource);
+                const b = columnEndpoint(lb, c.cornerX, c.cornerZ);
+                const t = columnEndpoint(lt, c.cornerX, c.cornerZ);
+                const bx = b.x, by = b.y, bz = b.z;
+                const tx = t.x, ty = t.y, tz = t.z;
                 const dx = tx - bx, dy = ty - by, dz = tz - bz;
                 const length = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
                 c.mesh.position.set((bx + tx) / 2, (by + ty) / 2, (bz + tz) / 2);
                 c.mesh.scale.set(c.thicknessX, length, c.thicknessZ);
                 _dirVec.set(dx, dy, dz).normalize();
                 c.mesh.quaternion.setFromUnitVectors(UP_VECTOR, _dirVec);
+                // A rectangular section turns with the floors it joins; the
+                // mean of its two ends' yaw keeps its faces flush with both
+                // slab corners. Skipped at zero so the untwisted path is the
+                // pre-spec-12 one exactly.
+                const twist = (lb.yaw + lt.yaw) / 2;
+                if (twist !== 0) c.mesh.quaternion.multiply(_twistQuat.setFromAxisAngle(UP_VECTOR, twist));
             }
         }
 
@@ -2564,6 +2626,25 @@
         // missing, so callers only need one guard (`if (!modalData) ...`),
         // same defensive-gating pattern as furniture/frame above.
         function normalizeModal(raw) {
+            // Spec 12 B4: a torsion payload carries the full 3N modal set.
+            // X and Y then share every mode and differ only in which DOF
+            // block of phi they read and which Gamma they use -- the
+            // Frequency tab's X/Y toggle selects a block of ONE solve, the
+            // same `dof_offset` mdof_response.transfer_function() takes.
+            if (raw && raw.mode_shapes && raw.natural_frequencies_Hz
+                && raw.participation_factors_x && raw.damping_ratio != null) {
+                return {
+                    freqsX: raw.natural_frequencies_Hz,
+                    freqsY: raw.natural_frequencies_Hz,
+                    phiX: raw.mode_shapes,
+                    phiY: raw.mode_shapes,
+                    gammaX: raw.participation_factors_x,
+                    gammaY: raw.participation_factors_y || null,
+                    zeta: raw.damping_ratio,
+                    dofOffsetX: 0,
+                    dofOffsetY: raw.num_stories,
+                };
+            }
             if (!raw || !raw.natural_frequencies_Hz_X || !raw.mode_shapes_X
                 || !raw.participation_factors_X || raw.damping_ratio == null) {
                 return null;
@@ -2662,7 +2743,10 @@
             const freqs = axis === 'Y' ? modal.freqsY : modal.freqsX;
             const phi = axis === 'Y' ? modal.phiY : modal.phiX;
             const gamma = axis === 'Y' ? modal.gammaY : modal.gammaX;
-            if (!freqs || !phi || !gamma || !phi[floorIndex]) return null;
+            // Row of phi for this floor in this axis's DOF block (0 for the
+            // per-axis modal sets, which hold one block each).
+            const row = floorIndex + ((axis === 'Y' ? modal.dofOffsetY : modal.dofOffsetX) || 0);
+            if (!freqs || !phi || !gamma || !phi[row]) return null;
             const zeta = modal.zeta;
             const nModes = freqs.length;
             const nBins = fHz.length;
@@ -2671,7 +2755,7 @@
             const perMode = [];
             for (let j = 0; j < nModes; j++) {
                 const wj = 2 * Math.PI * freqs[j];
-                const coeff = -(phi[floorIndex][j] ?? 0) * gamma[j];
+                const coeff = -(phi[row][j] ?? 0) * gamma[j];
                 const modeMag = new Float64Array(nBins);
                 for (let k = 0; k < nBins; k++) {
                     const w = 2 * Math.PI * fHz[k];
@@ -2940,7 +3024,13 @@
             drawSpectrumSubplot(ctx, plotX, topM + panelH + gap, plotW, panelH,
                 `Transfer |T(jω)| · ${floorLabel}`,
                 [
-                    ...tf.perMode.map(m => ({ f: gSpec.fHz, mag: m, color: 'rgba(255,215,100,0.5)', width: 1 })),
+                    // A mode that never rises into the panel's fixed 70 dB
+                    // window cannot be drawn, only smeared along its floor --
+                    // which the 3N set's other-axis and torsional modes do
+                    // (their share of this DOF block is ~0).
+                    ...tf.perMode
+                        .filter(m => Math.max(...m) > Math.max(...tf.total) * 10 ** (-70 / 20))
+                        .map(m => ({ f: gSpec.fHz, mag: m, color: 'rgba(255,215,100,0.5)', width: 1 })),
                     { f: gSpec.fHz, mag: tf.total, color: '#ffd764', width: 2 },
                 ],
                 gSpec.nyquist_Hz);
@@ -3506,6 +3596,7 @@
             furnitureData = furniture;
             furnitureRateHz = furnitureRate || 0;
             modalData = extra.modal ?? null; // spec 6 -- null-safe; the drawer degrades to a disabled note if this or groundSpectrum is missing
+            floorRotData = extra.floorRot ?? null; // spec 12 -- absent on every path that has no rotation block
             groundAccelData = extra.groundAccel ?? null; // spec 9 -- null-safe the same way; whichever path loaded it, the time panel reads only this
 
             periodReadout.textContent = (periodX != null && periodY != null)
@@ -3713,7 +3804,13 @@
             // "recomputing..." text line; a superseded (aborted) request
             // simply lets the newer request's own show/hide own the
             // overlay's lifecycle instead of flickering it off here.
-            if (nonlinear) params.nonlinear = true;
+            if (nonlinear) {
+                params.nonlinear = true;
+                // Sent only with collapse analysis: an elastic request leaves
+                // it to the server's default, and elastic twist is exactly
+                // zero for this symmetric plan anyway.
+                params.torsion = torsionToggle.checked;
+            }
             const cacheKey = JSON.stringify(params);
             runCollapseBtn.disabled = nonlinear;
             clearRecomputeError();
@@ -3828,6 +3925,15 @@
                     groundAccel = { X: gaX, Y: header.has_y ? Array.from(takeFloats(npts)) : null };
                 }
 
+                // Floor rotation (spec 12), after everything else and gated
+                // the same way: a backend without torsion simply never sets
+                // the flag, and the floors stay unrotated.
+                let floorRot = null;
+                if (header.has_floor_rotation) {
+                    floorRot = [];
+                    for (let f = 0; f < N; f++) floorRot.push(Array.from(takeFloats(npts)));
+                }
+
                 applyLoadedData(header.num_stories, header.story_heights || header.story_height, time, groundX, groundY, floorX, floorY, {
                     frame: normalizeFrame(header),
                     furniture,
@@ -3838,6 +3944,7 @@
                     modal: normalizeModal(header),
                     referenceMagnitude: header.reference_magnitude,
                     groundAccel,
+                    floorRot,
                 }, autoScaleAmplify);
                 recomputeOverlay.classList.remove('is-active');
                 runCollapseBtn.textContent = nonlinear ? 'Run collapse analysis · cached' : 'Run collapse analysis';
@@ -4017,6 +4124,9 @@
                 const fy = (floorYData[f]?.[idx] || 0) * scale;
                 group.position.x = fx;
                 group.position.z = fy;
+                group.rotation.y = floorRotData
+                    ? displayYaw(floorRotData[f]?.[idx] || 0, scale, SCENE_UNITS_PER_METRE)
+                    : 0;
             }
 
             // Columns span two differently-displaced levels, so their
@@ -4316,6 +4426,12 @@
         // 'change', not 'input' -- a checkbox fires exactly once either
         // way, and a soft ground story is a whole-building rebuild, not a
         // value being dragged through.
+        // Affects only the collapse request, so it drops the cached collapse
+        // result rather than triggering an elastic recompute.
+        torsionToggle.addEventListener('change', (e) => {
+            torsionLabel.textContent = e.target.checked ? 'on' : 'off';
+            invalidateCollapseCache();
+        });
         softGroundStoryToggle.addEventListener('change', (e) => {
             softGroundStoryLabel.textContent = e.target.checked ? 'on' : 'off';
             scheduleLiveRecompute();

@@ -2446,3 +2446,51 @@ byte-identical spec-11 behaviour (check 9).
     five C-9 pairing keys from every `ground_accel.json`. Happened once
     during Task 5 and was reverted with `git checkout -- out/`. Its exit 0 is
     not a regression result.
+
+## Spec 12 — Task 6: frontend (2026-09-21)
+
+### What changed (`index.html`)
+
+- New `ROTATION-HELPERS` sentinel block: `displayYaw(θ, scale, u)` =
+  `-θ·scale/u`, `rotateOffset`, `columnEndpoint` (rotate the corner offset,
+  THEN add; explicit `yaw === 0` fast path keeps the old expression).
+- `sourceWorldPos()` returns the level's `yaw` (ground 0);
+  `updateColumnTransforms()` uses `columnEndpoint` and twists each column's
+  section by the mean yaw of its ends (skipped at zero).
+- `animate()` sets `group.rotation.y` from `floorRotData`; payload parser
+  reads the `theta_z` block when `has_floor_rotation`; `applyLoadedData`
+  stores it (null on the static path).
+- `#torsionToggle` ("Torsion in collapse", default off) beside the collapse
+  button; sent as `torsion` only with nonlinear requests; change drops the
+  collapse cache.
+- B4: `normalizeModal()` maps a 3N header to one modal set with
+  `dofOffsetX = 0`, `dofOffsetY = N`; `transferFunctionForFloor()` reads row
+  `floor + offset` — the JS form of `transfer_function(dof_offset=...)`.
+  Per-mode curves that never reach the Transfer panel's 70 dB window are
+  not drawn (the 3N set's other-block modes would smear along its floor).
+
+### Verification output
+
+- `check_floor_rotation.mjs` (check 10, new): ALL PASS — θ=0 endpoints
+  bit-identical over 6561 cases incl. signed zeros; θ=0.3 rad matches an
+  independent polar rotation to 4.4e-16 while the world-space trap is off
+  by 0.514 scene units; +θ moves an east corner to scene +z; twist gain ==
+  sway gain to sin(yaw)/yaw; `placeFurnitureForFloor`/
+  `updateFurnitureOffsets` byte-unchanged; furniture parented to the
+  rotated group.
+- `check_transfer_mirror.py` (new, B4): JS vs Python |T| max rel err
+  8.5e-16 (3N, DOF offsets) and 9.5e-16 (per-axis); per-mode 2.8e-16.
+- All 7 existing JS checks exit 0, each confirmed to compare something.
+
+### Task 6 rulings
+
+42. **Twist display gain = sway display gain** (`yaw = -θ·scale/u`), so a
+    corner's rotational shift is exaggerated by exactly the factor its
+    translation is. Un-gained θ (~5e-4 rad) would be invisible.
+43. **Columns twist about their own axis** by the mean end yaw; a
+    rectangular section would otherwise visibly misalign with the slab.
+44. **Torsion toggle defaults OFF** and applies to collapse only, matching
+    the GATE B server default; elastic requests omit it (elastic θ ≡ 0).
+45. **The JS↔Python mirror is now actually checked**
+    (`check_transfer_mirror.py`); `verify_spectrum.py` only ever covered
+    the Python side, contrary to what the spec assumed.
