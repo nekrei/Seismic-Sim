@@ -2857,3 +2857,29 @@ collapse analysis.
   and the scrubbing. An earlier session's 8 errors were all from my own
   first wrapper (it parsed a 422 JSON body as binary), which was then
   fixed.
+
+### Final whole-branch pass (2026-09-22)
+
+On the final code:
+- `verify_handoff.py` (all checks): 2, restart, 1, 3, 4, 5, 6, 7 and 9
+  PASS, exit 0, 8 min 53 s.
+- Check-10 sweep, all exit 0:
+  - spec 10: verify_frame_furniture, verify_elastic_foundation,
+    verify_floor_area, verify_spectrum, verify_synthetic_earthquake,
+    check_quake_continuity, fft_check_scipy;
+  - spec 11: check_hysteresis, check_hftd_{elastic_baseline, contracts,
+    sampling_wrapper, convolution}, and verify_hftd checks 1–11 (525 s);
+  - spec 12: verify_torsion checks 1–8 (538 s), check_transfer_mirror;
+  - `.mjs`: check_story_heights, check_index_syntax, fft_check,
+    check_time_domain, check_footprint_area, check_sway_gain,
+    check_furniture_gain, check_floor_rotation.
+- `check_ground_accel_block.py`: ALL CHECKS PASSED.
+- `graphify update .` done.
+
+Test-fixture fix in the V-2 (b) yielding case. That case's fixed point
+stalls near 6e-5 (identically on main), and `hftd_tolerance` doubles as
+spec 11's causality-guard threshold (1.1e-7 here), so its 1e-9
+tolerance stopped both solves early. It now uses the production 1e-4:
+both converge at iteration 3 on the same trajectory, and the difference
+after removing the from-rest t=0 artifact is 1.5e-10. The reference's
+behaviour was confirmed identical at `ab06d2c`, at `main` and at HEAD.
