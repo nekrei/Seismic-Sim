@@ -1930,6 +1930,22 @@ class HFTD3NResult:
         return self.u_rel[2 * (self.u_rel.shape[0] // 3):]
 
 
+def tangent_eccentricity(result):
+    """Tangent centre-of-rigidity offset per story, (2, N, npts) (spec A3).
+
+    e_x,i(t) = sum_j kt_x,ij*y_j / sum_j kt_x,ij  -- the offset, along y, of
+    the centre that resists X-sway; e_y,i(t) is its x-offset counterpart.
+    `build_backbones` gives all four columns k0/4 exactly, so before any
+    yielding every kt is equal and both are 0.0 exactly -- that is a
+    property of the code, not a hope (verification correction V-3).
+    """
+    x, y = result.positions[:, 0], result.positions[:, 1]
+    out = []
+    for kt, coord in ((result.x.column_tangent, y), (result.y.column_tangent, x)):
+        out.append(np.einsum('ijt,j->it', kt, coord) / kt.sum(axis=1))
+    return np.array(out)
+
+
 def _solve_hftd_grid_3N(building, ax, dx, ay, dy, dt, params=None):
     """Spec 12 B2/B3: the pseudo-force fixed point on the coupled 3N system.
 
@@ -3046,8 +3062,32 @@ class MDOF_Building3N:
         self.floor_accel_abs_x = self.floor_accel_rel_x + self.accel_x
         self.floor_accel_abs_y = self.floor_accel_rel_y + self.accel_y
 
+        self._install_axis_views()
         return (self.time, self.floor_disp_rel_x, self.floor_disp_rel_y,
                 self.floor_rot)
+
+    def _install_axis_views(self, hftd=None):
+        """Hand each held per-axis building its DOF block of the 3N solve.
+
+        Furniture (`get_decimated_furniture`) and spec 10's response-
+        dependent keys (`theta_demand`, `peak_drift_ratio`, `mu_demand`) are
+        per-axis quantities that already live on `MDOF_ShearBuilding`.
+        Installing the coupled histories there reuses those methods instead
+        of growing a second copy of them here. They see the floor-CENTRE
+        drift and acceleration; per-column drift is what the hysteresis
+        sees, and those stay on `hftd_result.x/.y`.
+        """
+        for b, s in ((self.bx, "x"), (self.by, "y")):
+            b.accel = getattr(self, f"accel_{s}")
+            b.ground_disp = getattr(self, f"ground_disp_{s}")
+            b.dt, b.npts, b.time = self.dt, self.npts, self.time
+            b.floor_disp_rel = getattr(self, f"floor_disp_rel_{s}")
+            b.floor_disp_abs = getattr(self, f"floor_disp_abs_{s}")
+            b.floor_accel_abs = getattr(self, f"floor_accel_abs_{s}")
+            b.floor_accel_rel = getattr(self, f"floor_accel_rel_{s}")
+            if hftd is not None:
+                b.hftd_result = getattr(hftd, s)
+            b._demand_stability_coefficients()
 
     def compute_response_nonlinear(self, accel_x, disp_x, accel_y, disp_y, dt,
                                    **params):
@@ -3074,6 +3114,7 @@ class MDOF_Building3N:
         self.floor_accel_rel_x = result.x.acceleration - self.accel_x[None,:]
         self.floor_accel_rel_y = result.y.acceleration - self.accel_y[None,:]
         self.floor_rot_accel = result.acceleration[2*N:]
+        self._install_axis_views(result)
         return (self.time, self.floor_disp_rel_x, self.floor_disp_rel_y,
                 self.floor_rot)
 
