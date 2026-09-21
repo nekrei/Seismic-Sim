@@ -2744,3 +2744,39 @@ Fast detaching fixtures (KOCAELI_AYD, N=4, ×60, windowed samples): `mid`
 
 Bug found by check 1's negative case and fixed: the builder read
 `info['ground']` when there were no events.
+
+### Task 5 — physics validation, checks 3/4/5 (2026-09-22)
+
+`claude_scripts/verify_handoff.py`:
+- **Check 3** PASS (mid, cascade, mid-3N):
+  - u(0⁺)−u0 and v(0⁺)−v0 are 0.0 (≤3e-16 on 3N).
+  - jω velocity vs an independent FD4 of the displacement, interior with
+    1 s margins: 7.6e-7 to 1.0e-6 RMS.
+  - V-3: the handed-over hysteresis state equals a fresh machine stepped
+    sample by sample over the retained solve-grid history (12,236–12,308
+    samples), bit-exact. Frozen k0/dy/du/Vy are bit-exact.
+  - Ground velocity (jω) vs FD4 of the displacement: 2.8e-5 / 2.6e-5 RMS.
+    floor_state v = relative + ground velocity, and `ground_state` is
+    present.
+- **Ruling R13 (V-3 comparison).** Two fields are excluded from the
+  bit-exact state comparison, both inert:
+  - spec 11's batched history does not track `direction` for a column
+    that has never yielded. Only reversal detection reads it, and that
+    requires `yielded`; the next nonzero step recomputes it.
+  - `work` is a summation-order diagnostic that never enters a force
+    (3.5e-15, or 4.2e-12 where the elastic shortcut set it).
+- **Check 4** PASS: E_surv(0⁺) − (E_full(t_d⁻) − KE_block) runs from −15 %
+  to −51 % of E_full over all five restarts. The detached story's spring
+  energy leaves with the block. Reduced-P gravity energy moves the balance
+  up (e.g. −2.6e5 J → −2.7e3 J), but that is dominated by the departing
+  spring energy.
+- **Check 5** PASS. `newmark_reference.py` gained `backbones=`/`machine=`
+  overrides and `solve_reference_with_detachment` (shared `_newmark` core;
+  default paths unchanged). Survivor after t_d vs HFTD:
+  - cascade u_x: NRMS 5.5e-4 (dt/4), 4.6e-4 (dt/8);
+  - 3N u_x / u_y: 4.6e-4 / 1.8e-4 (dt/8);
+  - 3N θ: 6.6e-3 at dt/4 (the survivor is elastic, so θ is pure torsional
+    free vibration and Newmark's period error accumulates), dropping to
+    1.6e-3 at dt/8.
+  That ~4× is Newmark converging onto the closed form. The check asserts
+  at dt/8, with tolerances unchanged.
