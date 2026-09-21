@@ -2343,3 +2343,41 @@ user's decision: **`torsion` defaults true for the elastic path and false
 for the nonlinear path on the live `/compute` endpoint**, with nonlinear
 torsion available explicitly. Nothing about `torsion = false` changes:
 byte-identical spec-11 behaviour (check 9).
+
+## Spec 12 (torsion) — Task 4: Newmark 3N reference and check 7
+
+### What changed
+
+- `claude_scripts/newmark_reference.py` (gitignored tooling): the
+  average-acceleration Newton loop extracted into `_newmark(M, C,
+  coupling, load, internal, machine, dt, u0, v0, a0)`; `solve_reference`
+  (per-axis) and new `solve_reference_3N` are thin front-ends. The 3N one
+  uses TOTAL spring forces `T^T V` (via `assemble_pseudo_force_3N`, which
+  is linear) and Newton tangent `_column_spring_stiffness_3N(kt_x, kt_y)`,
+  with `coupling = K_3N − springs`, two `ColumnHysteresis` machines (one
+  per bending axis), forcing `−M(ι_x a_x + ι_y a_y)`.
+- `claude_scripts/verify_torsion.py`: check 7, two cases (straight ×40,
+  swapped ×50), per-block u_x / u_y / θ_z tolerances printed separately,
+  elastic-vs-reference gap printed beside each, assertion that both axes
+  yield across the cases.
+- No tracked source changed; `mdof_response.py` untouched by this task.
+
+### Verification output
+
+- Per-axis refactor bit-identical to the old file (yielding, μ 2.1, both
+  initial-state branches): `identical True` ×2.
+- `verify_torsion.py 7`: PASS — full table in verification V-21. θ_z NRMS
+  1.08e-03 (straight) and 4.18e-03 (swapped); every peak error ≤ 3.7e-03;
+  every residual/peak ≤ 9.7e-05; no collapse on either side. ~6 min.
+
+### Task 4 rulings
+
+32. **Check 7 runs two cases, not one** (V-21): the straight ordering
+    never yields X, so its u_x row only tested elastic coupling.
+33. **"Per-story" for θ_z is inter-story twist θ_i − θ_{i−1}**, the
+    rotational counterpart of drift; RMS is on the full floor-θ trace.
+34. **Newmark at dt/4** from the FFT solution's own t=0 state (the FFT
+    response is periodic over the padded window, so t=0 is not rest) —
+    matching the HFTD kernel's own 4× refinement once anything yields.
+35. **`t_collapse` is vacuous here** — no collapse on either side; not
+    chased further because over-driven cases diverge (V-19).
