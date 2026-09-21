@@ -2440,3 +2440,9 @@ byte-identical spec-11 behaviour (check 9).
 40. **`/compute` clamps `intensity_scale` to ≤ 20** (spec 11); the torsion
     checks ran at 40 via the Python API. A live torsion demo needs a weaker
     building (e.g. 0.9×0.7 m columns at ×20). Relevant to Task 6.
+41. **Never run `claude_scripts/spec11_elastic_oracle.py` as a script.**
+    It is a frozen spec-11 copy of `mdof_response.py`, `__main__` and all:
+    running it regenerates `out/` with spec-11 code and silently strips the
+    five C-9 pairing keys from every `ground_accel.json`. Happened once
+    during Task 5 and was reverted with `git checkout -- out/`. Its exit 0 is
+    not a regression result.
