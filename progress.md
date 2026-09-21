@@ -2553,3 +2553,21 @@ Demo case: KOCAELI_AYD, 3 stories, columns 0.9×0.7 m, Magnitude 8.8,
 48. **Item 2's twist is not monotone over the record** — it appears at
     first yield, peaks, and decays. That is the physics of a converged run that never
     approaches collapse; recorded rather than read as a failure.
+
+### Check 14 — documentation (2026-09-21)
+
+Updated: `README.md` (new "Spec 12: torsion" section; spec 11 section no
+longer says torsion is excluded), math PDF Part H (H1–H6: transformation
+assembly, rotational inertia with BOTH radii side by side, still
+real-symmetric/classically dampable, centre of rigidity + emergence,
+per-column drift; Part G3/G11 cross-referenced) regenerated to 37 pages and
+text-searched for "torsion", "centre of rigidity", "rotational inertia";
+`AGENTS.md` (both copies); `knowledge/` (`mdof_response`, `server`,
+`data_flow_and_wire_formats`, `index_html`, `spec_history`);
+`specs/11-hftd-nonlinear.md` A4 correction; `specs/README.md` row 12;
+`specs/COURSE-CONCEPTS.md`.
+
+Open items stated in the docs: elastic θ ≡ 0 and the still-open elastic
+torsion-default question (ruling 37); offline `__main__` stays per-axis and
+`out/` not regenerated (ruling 38); `t_collapse` criterion vacuous (ruling
+35).

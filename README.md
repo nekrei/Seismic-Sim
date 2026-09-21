@@ -684,7 +684,8 @@ per story have a trilinear backbone, peak-oriented hysteresis, pinching,
 degraded unloading stiffness and deterministic strength scatter. The
 condensed frame's remaining flexural coupling stays elastic. Material
 variability and the hysteresis constants are assumptions, not calibrated
-component data; torsion and progressive load-path changes are not included.
+component data; progressive load-path changes are not included, and torsion
+is opt-in (see Spec 12 below).
 
 Open **Building Parameters** and press **Run collapse analysis**. This sends
 one `/compute` request with `nonlinear: true`. Live sliders still run the
@@ -726,3 +727,49 @@ descriptive performance guidance from FEMA 356, not a calibrated collapse
 prediction. Everything up to and including collapse onset is simulated;
 how it falls is animated (in the later visual extension). See Part G of
 **Seismic-Sim Math.pdf** for the derivation and limits.
+
+## Spec 12: torsion
+
+Each floor can now also **rotate** about the vertical axis. The 3N model has
+degrees of freedom `[u_x,1..N, u_y,1..N, θ_1..N]` and is assembled as
+`K_3N = Σ_f T_fᵀ K_f T_f` from the four condensed planar frames placed at
+their plan positions (not from scalar per-column formulas), with rotational
+inertia `m(a²+b²)/12`. Its gravity term uses the *corner-column* radius
+`(a²+b²)/4`, not `/12`; the two look like a typo of each other and are not
+(Part H of **Seismic-Sim Math.pdf** explains why). The system is still
+real-symmetric and classically dampable, so the same modal FFT kernel solves
+it, now with both PEER components applied at once.
+`MDOF_Building3N` in `mdof_response.py` is the class; per-column drift
+(`column_drift_3N`) replaces the shared story drift, which also corrects
+spec 11's "every column shares one drift" statement.
+
+**What it does and does not show.** Twist is *emergent*: nothing puts an
+eccentricity in by hand. With the elastic stiffness the plan is symmetric, so
+elastic `θ` is exactly `0.0` for every building this model can describe.
+Twist appears only after the seeded strength scatter makes one column yield
+before its neighbours moves the centre of rigidity. No biaxial interaction
+surface is modelled (unconservative for a column driven hard on both axes).
+
+**Request and payload.** `/compute` accepts a strict-boolean `torsion`,
+default `true` for elastic and `false` for nonlinear (the coupled N=20
+nonlinear solve takes ~203 s, above the ~133 s the two-axis path already
+costs). If the cached ground record cannot be paired (missing Y component,
+unassigned orientation, or unequal `dt`) it falls back to the per-axis path
+and reports `torsion_fallback_reason`. `torsion=false` is byte-identical to
+spec 11. When on, the header gains torsion keys (`torsion_enabled`,
+`has_floor_rotation`, `plan_a/_b`, `eccentricity_x/_y`,
+`omega_theta_over_omega_x`, 3N modal keys) and a `theta_z` float32 block
+`(N, npts)` is appended after `gaccel_y`. The eccentricity envelope is `null`
+where the centre of rigidity is undefined. `intensity_scale` is clamped to 20.
+
+**Viewer.** Floors yaw by `-θ·scale/u` (the same display gain as sway) about
+their own centre, with column ends rotated about the corner offset and columns
+twisted to match. A **Torsion in collapse** checkbox (default off) beside the
+collapse button sends `torsion` with nonlinear requests. The Transfer panel
+reads the right DOF block of the 3N modes.
+
+**Open items.** The offline pipeline stays per-axis and `out/` was not
+regenerated (it would only add an all-zero `θ` block and ~1e-16 churn). The
+`t_collapse` agreement criterion against the Newmark reference is vacuous
+(neither side collapses in the checked cases). Whether elastic torsion should
+default on given `θ ≡ 0` there is an open question.
