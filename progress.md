@@ -2571,3 +2571,26 @@ Open items stated in the docs: elastic θ ≡ 0 and the still-open elastic
 torsion-default question (ruling 37); offline `__main__` stays per-axis and
 `out/` not regenerated (ruling 38); `t_collapse` criterion vacuous (ruling
 35).
+
+## Spec 13 — post-detachment re-solve and hand-off contract
+
+Plan: `claude_scripts/plans/2026-09-22-13-post-detachment-handoff.md`
+(rulings R1–R10 there). Branch `goal/13-post-detachment-handoff`.
+
+### Task 1 — building blocks (2026-09-22)
+
+Added to `mdof_response.py`: `free_vibration` (closed-form modal zero-input,
+both building classes), `ground_velocity` (jω on an evenly extended trace,
+R8), `survivor_building` (slices per-floor arrays and RE-ASSEMBLES; frozen
+`k0_profile` override, R9), `slice_backbones`, `slice_hysteresis_state`.
+`claude_scripts/verify_handoff.py 2` passes:
+- |K_surv − K[:m−1,:m−1]|_F at N=7 default geometry: 61.55 % (m=2),
+  31.57 % (m=4), 20.07 % (m=7) per axis; 58.38 / 29.69 / 19.35 % on 3N.
+  The slice is badly wrong, so re-assembly matters.
+- K_surv is bit-equal to `build_condensed_K(m−1,…)` and to `assemble_K3N`.
+- M_surv is (m−1)² (3N: (3(m−1))²), eigenvalues are finite and positive,
+  and reduced P_i equals g·Σm to 1e-14, strictly below the old values.
+- The coupling matrix is symmetric.
+- free_vibration: EOM residual 1.4e-15 / 6.4e-16. FD(u) vs v: 3e-6 / 8e-6
+  (dt = 1e-4).
+- ground_velocity vs analytic: 2.4e-7.

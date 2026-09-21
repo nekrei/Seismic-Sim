@@ -2120,6 +2120,102 @@ def solve_hftd_3N(building, ax, dx, ay, dy, dt, params=None):
     return result
 
 
+# --- Spec 13: post-detachment re-solve --------------------------------------
+#
+# Story indices below are 0-based, like every spec-11 array. The 1-based
+# `story` of the hand-off contract is produced once, in its builder.
+
+def free_vibration(building, u0, v0, tau):
+    """Closed-form zero-input response of each mode (spec 13 C-3).
+
+        q_n(tau) = e^{-zeta w_n tau} [q_n(0) cos w_d tau
+                   + (q'_n(0) + zeta w_n q_n(0))/w_d sin w_d tau]
+
+    with q_n(0) = phi_n^T M u0 and q'_n(0) = phi_n^T M v0 (phi mass-
+    normalised). Returns physical (u, v, a), each (ndof, len(tau)), on the
+    building's own DOF ordering -- one function for both building classes.
+    """
+    z = building.zeta
+    if not 0 <= z < 1:
+        raise ValueError('free_vibration needs an underdamped modal set')
+    w = building.omega_n[:, None]
+    wd = w * np.sqrt(1 - z * z)
+    q0 = (building.phi.T @ (building.M @ np.asarray(u0, dtype=float)))[:, None]
+    qd0 = (building.phi.T @ (building.M @ np.asarray(v0, dtype=float)))[:, None]
+    t = np.asarray(tau, dtype=float)[None, :]
+    e, c, s = np.exp(-z * w * t), np.cos(wd * t), np.sin(wd * t)
+    q = e * (q0 * c + (qd0 + z * w * q0) / wd * s)
+    qd = e * (qd0 * c - (w * w * q0 + z * w * qd0) / wd * s)
+    qdd = -2 * z * w * qd - w * w * q
+    return building.phi @ q, building.phi @ qd, building.phi @ qdd
+
+
+def ground_velocity(disp, dt):
+    """Ground velocity as j*omega times the transform of the displacement.
+
+    The trace is extended evenly (d, reversed d) first, so the periodic
+    signal the DFT sees has no jump at the wrap. Never a time-domain
+    difference of the displacement (spec 13 C-2, AGENTS.md).
+    """
+    d = np.asarray(disp, dtype=float)
+    ext = np.concatenate([d, d[::-1]])
+    w = 2 * np.pi * fftfreq(len(ext), dt)
+    return np.real(ifft(1j * w * fft(ext)))[:len(d)]
+
+
+def survivor_building(building, stories):
+    """The building with only its lowest `stories` stories, RE-ASSEMBLED.
+
+    Every per-floor array is sliced and the frame is condensed again from
+    geometry; `K` is never sliced -- the original condensation baked the
+    removed stories' restraint into the rows below (spec 13 A2). Mass and
+    P-Delta loads follow from the sliced masses, so gravity is reduced.
+    `k0_profile` is overridden to the original rows: surviving columns keep
+    their frozen backbone, and the energy/coupling split must use the same
+    k0 as the pseudo-force (C-5). Works for both building classes.
+    """
+    s = int(stories)
+    if not 1 <= s < building.N:
+        raise ValueError(f'survivor needs 1..{building.N - 1} stories, got {s}')
+    src = building.bx if isinstance(building, MDOF_Building3N) else building
+    m = np.asarray(building.m, dtype=float)
+    kw = dict(mass_per_floor=m if m.ndim == 0 else m[:s].copy(), zeta=building.zeta,
+              story_height=src.h[:s], column_depth_x=src.column_depth_x[:s],
+              column_depth_y=src.column_depth_y[:s], beam_depth=src.beam_depth[:s],
+              E=src.E, plan_span_x=src.plan_span_x, plan_span_y=src.plan_span_y,
+              section_stiffness_mode=src.section_stiffness_mode,
+              cracked_factor_column=src.cracked_factor_column,
+              cracked_factor_beam=src.cracked_factor_beam, p_delta=src.p_delta,
+              f_y=src.f_y, f_c=src.f_c, rho_longitudinal=src.rho_longitudinal,
+              concrete_cover=src.concrete_cover, phi_axial=src.phi_axial,
+              axial_cap_factor=src.axial_cap_factor)
+    if isinstance(building, MDOF_Building3N):
+        out = MDOF_Building3N(s, **kw)
+        out.bx.k0_profile = building.bx.k0_profile[:s].copy()
+        out.by.k0_profile = building.by.k0_profile[:s].copy()
+        out.k0_profile_x, out.k0_profile_y = out.bx.k0_profile, out.by.k0_profile
+    else:
+        out = MDOF_ShearBuilding(s, axis=building.axis, **kw)
+        out.k0_profile = building.k0_profile[:s].copy()
+    return out
+
+
+def slice_backbones(bb, stories):
+    """Row slice of every (N, 4) backbone array -- the frozen backbone."""
+    return {k: (v[:stories].copy() if isinstance(v, np.ndarray) else v)
+            for k, v in bb.items()}
+
+
+def slice_hysteresis_state(machine, stories):
+    """Row slice of a ColumnHysteresis state; peaks and slopes untouched."""
+    out = copy.copy(machine)
+    for key, value in vars(machine).items():
+        if isinstance(value, np.ndarray):
+            setattr(out, key, value[:stories].copy())
+    out.bb = slice_backbones(machine.bb, stories)
+    return out
+
+
 class MDOF_ShearBuilding:
     """
     Multi-degree-of-freedom building model: one translational DOF per
