@@ -421,7 +421,25 @@
             text-align: center;
             pointer-events: auto;
         }
-        .recompute-overlay.is-error .recompute-error { display: block; }
+        .recompute-overlay.is-error .recompute-error { display: block; position: relative; padding-right: 44px; }
+        .recompute-error-close {
+            position: absolute; top: 6px; right: 8px;
+            width: 28px; height: 28px; padding: 0;
+            border: 0; border-radius: 6px; background: transparent;
+            color: #ffd9d9; font-size: 1.4rem; line-height: 1; cursor: pointer;
+        }
+        .recompute-error-close:hover { background: rgba(255,255,255,0.12); }
+        /* Slide-in toast, top right (left of the Signals button). */
+        .toast {
+            position: fixed; top: 16px; right: 84px; z-index: 30;
+            padding: 12px 18px; border-radius: 10px;
+            border: 1px solid rgba(120,220,150,0.5);
+            background: rgba(14,60,32,0.92); color: #d9ffe6;
+            font-size: 0.95rem; pointer-events: none;
+            transform: translateX(calc(100% + 100px));
+            transition: transform 0.35s ease;
+        }
+        .toast.is-shown { transform: translateX(0); }
         .recompute-stack {
             display: flex;
             flex-direction: column-reverse;
@@ -934,8 +952,13 @@
              the current sliders -- a physically meaningful RESULT, so it
              reads as one. The previous building stays on screen behind
              this. -->
-        <div class="recompute-error" id="recomputeError"></div>
+        <div class="recompute-error" id="recomputeErrorBox">
+            <span id="recomputeError"></span>
+            <button type="button" class="recompute-error-close" id="recomputeErrorClose" aria-label="Dismiss message" title="Dismiss (Esc)">&times;</button>
+        </div>
     </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
     <div id="controls">
         <!-- Collapsed strip: only shown/used under the mobile bottom-sheet
@@ -1042,19 +1065,6 @@
                     <input type="checkbox" id="softGroundStoryToggle" />
                     <span class="panel-value" id="softGroundStoryLabel">off</span>
                 </div>
-                <!-- Spec 12: couple u_x, u_y and floor rotation in the collapse
-                     solve, so asymmetric column damage can twist the floors.
-                     Off by default: the coupled nonlinear solve costs ~1.5x
-                     the two per-axis ones. Same <label for> pattern as the
-                     soft-ground-story row, for the same accessibility reason. -->
-                <div class="ctrl-row">
-                    <label class="panel-label" for="torsionToggle">Torsion in collapse</label>
-                    <input type="checkbox" id="torsionToggle" />
-                    <span class="panel-value" id="torsionLabel">off</span>
-                </div>
-                <div class="ctrl-row view-buttons">
-                    <button id="runCollapseBtn" type="button" class="primary">Run collapse analysis</button>
-                </div>
                 <!-- Target Period is gone (spec 5): once k comes from real
                      column/beam dimensions, period is an OUTPUT of the
                      model, not an input -- a slider here would either
@@ -1107,6 +1117,31 @@
                      is a fixed viewport overlay, not inside this panel --
                      it must stay visible whether this section is open or
                      collapsed. See its markup near #progress. -->
+            </div>
+        </details>
+
+        <!-- Collapse Analysis: collapsed by default. Holds the nonlinear
+             (spec 11) run button and the spec 12 torsion switch, which used
+             to sit at the bottom of Building Parameters. -->
+        <details>
+            <summary>
+                <span class="panel-header">Collapse Analysis</span>
+                <span class="chevron">▶</span>
+            </summary>
+            <div class="details-body">
+                <!-- Spec 12: couple u_x, u_y and floor rotation in the collapse
+                     solve, so asymmetric column damage can twist the floors.
+                     Off by default: the coupled nonlinear solve costs ~1.5x
+                     the two per-axis ones. Same <label for> pattern as the
+                     soft-ground-story row, for the same accessibility reason. -->
+                <div class="ctrl-row">
+                    <label class="panel-label" for="torsionToggle">Torsion in collapse</label>
+                    <input type="checkbox" id="torsionToggle" />
+                    <span class="panel-value" id="torsionLabel">off</span>
+                </div>
+                <div class="ctrl-row view-buttons">
+                    <button id="runCollapseBtn" type="button" class="primary">Run collapse analysis</button>
+                </div>
             </div>
         </details>
 
@@ -1270,6 +1305,14 @@
         const backToFullViewBtn = document.getElementById('backToFullViewBtn');
         const recomputeOverlay = document.getElementById('recomputeOverlay');
         const recomputeError = document.getElementById('recomputeError');
+        const toastEl = document.getElementById('toast');
+        let toastTimer = null;
+        function showToast(message) {
+            toastEl.textContent = message;
+            toastEl.classList.add('is-shown');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toastEl.classList.remove('is-shown'), 2200);
+        }
         const softGroundStoryToggle = document.getElementById('softGroundStoryToggle');
         const runCollapseBtn = document.getElementById('runCollapseBtn');
         const softGroundStoryLabel = document.getElementById('softGroundStoryLabel');
@@ -3865,6 +3908,7 @@
                         showRecomputeError(header.collapse.reason || 'Collapse analysis did not converge. The previous response is retained.');
                         return;
                     }
+                    if (collapseCache?.key !== cacheKey) showToast('Successfully Cached');
                     collapseCache = {key: cacheKey, buffer: buf};
                 }
 
@@ -3947,7 +3991,6 @@
                     floorRot,
                 }, autoScaleAmplify);
                 recomputeOverlay.classList.remove('is-active');
-                runCollapseBtn.textContent = nonlinear ? 'Run collapse analysis · cached' : 'Run collapse analysis';
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
             } catch (err) {
                 // A superseded (aborted) request leaves the overlay exactly
@@ -3971,6 +4014,17 @@
             recomputeError.textContent = message;
             recomputeOverlay.classList.add('is-active', 'is-error');
         }
+
+        // Any message can be closed: the x button, or Esc. Hides the whole
+        // overlay (an error state is never mid-request) and leaves the
+        // previous valid building as it was.
+        function dismissRecomputeError() {
+            if (!recomputeOverlay.classList.contains('is-error')) return;
+            clearRecomputeError();
+            recomputeOverlay.classList.remove('is-active');
+        }
+        document.getElementById('recomputeErrorClose').addEventListener('click', dismissRecomputeError);
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissRecomputeError(); });
 
         function clearRecomputeError() {
             recomputeOverlay.classList.remove('is-error');
