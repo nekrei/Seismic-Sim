@@ -2551,5 +2551,5 @@ Demo case: KOCAELI_AYD, 3 stories, columns 0.9×0.7 m, Magnitude 8.8,
 47. **Check 13 item 6 ran in the built-in Browser pane**, the only browser
     here that could emulate 375×812.
 48. **Item 2's twist is not monotone over the record** — it appears at
-    first yield, peaks, and decays. That is the physics of an unconverged-
-    to-collapse, converged run; recorded rather than read as a failure.
+    first yield, peaks, and decays. That is the physics of a converged run that never
+    approaches collapse; recorded rather than read as a failure.
