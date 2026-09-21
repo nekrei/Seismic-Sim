@@ -26,6 +26,8 @@ from mdof_response import (
     DEFAULT_EPICENTER_DISTANCE_KM, DEFAULT_EPICENTER_DEPTH_KM,
     SECTION_STIFFNESS_PRESETS, DEFAULT_SECTION_STIFFNESS_MODE,
     SOFT_STORY_HEIGHT_RATIO, GravityInstabilityError,
+    MDOF_Building3N, pair_components, ComponentPairingError,
+    tangent_eccentricity,
 )
 
 # Frame-geometry defaults -- MUST match mdof_response.py's __main__
@@ -144,6 +146,14 @@ def _validate_nonlinear(body):
             raise ParamError('hftd_segment_seconds must be finite or null')
         segment=max(1.,segment)
     p['hftd_segment_seconds']=segment
+    # Spec 12: default ON for elastic, OFF for nonlinear. The coupled
+    # nonlinear solve is ~1.5x the both-axes cost (N=20: 203 s against
+    # 131 s, GATE B), past a deploy timeout the per-axis path already
+    # strains; elastic 3N is sub-second either way (Gate A).
+    torsion = body.get('torsion', not nonlinear)
+    if not isinstance(torsion, bool):
+        raise ParamError('torsion must be a boolean')
+    p['torsion'] = torsion
     if p['backbone_mu_ult'] <= p['backbone_mu_cap']:
         raise ParamError('backbone_mu_ult must exceed backbone_mu_cap')
     if p['backbone_softening'] and (1+p['backbone_hardening']*(p['backbone_mu_cap']-1)
@@ -266,9 +276,32 @@ def compute():
         section_stiffness_mode=p["section_stiffness_mode"],
         p_delta=p["p_delta"],
     )
+    torsion = nonlinear_params.pop('torsion')
+    has_y = ground.get("Y") is not None
+    b3 = None
+    torsion_fallback = None
     try:
-        building_x = MDOF_ShearBuilding(num_stories, axis="X", **common)
-        building_y = MDOF_ShearBuilding(num_stories, axis="Y", **common)
+        if torsion:
+            # Spec 12 B5: pair_components() is the one place the pairing
+            # rules live. A cache written before spec 12 carries no
+            # orientation keys and is rejected here, falling back to the
+            # per-axis path, rather than guessed.
+            try:
+                pair_components(ground["X"], ground["X_disp"], dt,
+                                ground.get("Y"), ground.get("Y_disp"), dt,
+                                x_orient=ground.get("x_orient_deg"),
+                                y_orient=ground.get("y_orient_deg"))
+                b3 = MDOF_Building3N(num_stories, **common)
+            except ComponentPairingError as e:
+                torsion_fallback = str(e)
+        if b3 is not None:
+            # The per-axis buildings the 3N class holds get their DOF block
+            # of the coupled solve installed on them, so everything below
+            # that reads building_x/_y stays one code path.
+            building_x, building_y = b3.bx, b3.by
+        else:
+            building_x = MDOF_ShearBuilding(num_stories, axis="X", **common)
+            building_y = MDOF_ShearBuilding(num_stories, axis="Y", **common)
     except GravityInstabilityError as e:
         # 422: the parameters are well-formed, the building just cannot
         # stand up under its own weight. A physically meaningful result,
@@ -323,14 +356,34 @@ def compute():
     try:
         accel_x = scaled("X")
         disp_x = scaled("X_disp")
-        time_arr, gdisp_x, _, abs_x = respond(building_x, accel_x, disp_x)
+        if b3 is not None:
+            # Scaling happens before pairing: the filter is linear and per
+            # component, and pairing only zero-pads from sample 0.
+            pc = pair_components(accel_x, disp_x, dt,
+                                 scaled("Y"), scaled("Y_disp"), dt,
+                                 x_orient=ground["x_orient_deg"],
+                                 y_orient=ground["y_orient_deg"])
+            scale = nonlinear_params['intensity_scale']
+            if nonlinear:
+                b3.compute_response_nonlinear(pc.accel_x, pc.disp_x,
+                    pc.accel_y, pc.disp_y, dt, record=record,
+                    **nonlinear_params)
+            else:
+                b3.compute_response(pc.accel_x*scale, pc.disp_x*scale,
+                                    pc.accel_y*scale, pc.disp_y*scale, dt)
+            time_arr = b3.time
+            gdisp_x, abs_x = building_x.ground_disp, building_x.floor_disp_abs
+        else:
+            time_arr, gdisp_x, _, abs_x = respond(building_x, accel_x, disp_x)
         furn_x, npts_dec_x, q_x, rate_x = building_x.get_decimated_furniture()
 
-        has_y = ground.get("Y") is not None
         if has_y:
-            accel_y = scaled("Y")
-            disp_y = scaled("Y_disp")
-            _, gdisp_y, _, abs_y = respond(building_y, accel_y, disp_y)
+            if b3 is not None:
+                gdisp_y, abs_y = building_y.ground_disp, building_y.floor_disp_abs
+            else:
+                accel_y = scaled("Y")
+                disp_y = scaled("Y_disp")
+                _, gdisp_y, _, abs_y = respond(building_y, accel_y, disp_y)
             furn_y, npts_dec_y, q_y, rate_y = building_y.get_decimated_furniture()
             npts_dec = min(npts_dec_x, npts_dec_y)
             furn_x = furn_x[:, :, :npts_dec]
@@ -463,6 +516,66 @@ def compute():
             reason='' if converged else 'Collapse analysis did not converge; no collapse is inferred.',
             collapse_axis=min(events,key=lambda event:event['time'])['axis'] if events and converged else None,
             collapse_events=events if converged else [])
+    # Spec 12 C1. Every new key is emitted ONLY when torsion was requested,
+    # so a torsion=false payload is byte-identical to spec 11's, header and
+    # pad included (verification check 9, correction V-7) -- not merely
+    # identical from the first float block onward.
+    if torsion:
+        header["torsion_enabled"] = True
+        header["has_floor_rotation"] = b3 is not None
+        if b3 is None:
+            header["torsion_fallback_reason"] = torsion_fallback
+    if b3 is not None:
+        N = num_stories
+        freqs = b3.omega_n / (2 * np.pi)
+        dominant = np.argmax(b3.modal_block_share, axis=0)
+        if nonlinear:
+            r = b3.hftd_result
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ecc = tangent_eccentricity(r)                # (2, N, npts)
+            # The centre of rigidity is a weighted average of the column
+            # positions -- and so inside the plan -- only while every
+            # tangent is >= 0 with a positive sum. A fully plateaued story
+            # gives 0/0, a softening one can put it anywhere; neither is a
+            # centre of anything, so those samples are left out, and a story
+            # with none left reports null.
+            kt = np.stack([r.x.column_tangent, r.y.column_tangent])
+            defined = np.all(kt >= 0, axis=2) & (kt.sum(axis=2) > 0)
+            masked = np.where(defined, np.abs(ecc), -1.0)
+            peak = np.argmax(masked, axis=2)
+            ecc = np.take_along_axis(ecc, peak[..., None], axis=2)[..., 0]
+            ecc = np.where(np.any(defined, axis=2), ecc, np.nan)
+            ecc = [[None if np.isnan(v) else float(v) for v in row] for row in ecc]
+        else:
+            # Elastic columns all carry k0/4 at symmetric corners, so the
+            # centre of rigidity IS the centre of mass: exactly zero.
+            ecc = np.zeros((2, N)).tolist()
+        header.update({
+            "plan_a": plan_span_x,
+            "plan_b": plan_span_y,
+            # Signed value at each story's peak |e| -- the sign says which
+            # side degraded, which a bare magnitude envelope would drop.
+            "eccentricity_x": ecc[0],
+            "eccentricity_y": ecc[1],
+            "omega_theta_over_omega_x": b3.frequency_ratio("X"),
+            # The 3N modal set, DOF ordering [u_x, u_y, theta].
+            "natural_frequencies_Hz": freqs.tolist(),
+            "mode_shapes": b3.phi.tolist(),
+            "participation_factors_x": b3.Gamma_x.tolist(),
+            "participation_factors_y": b3.Gamma_y.tolist(),
+        })
+        # The old per-axis keys, repopulated from the modes each DOF block
+        # dominates, so a reader that only knows _X/_Y still gets this
+        # solve's modes rather than a separate per-axis eigensolve's.
+        # ponytail: argmax partition; if the X and Y frequencies ever
+        # coincide exactly, eigh may mix the degenerate pair and the split
+        # becomes arbitrary -- the 3N keys above stay correct regardless.
+        for k, axis, gamma in ((0, "X", b3.Gamma_x), (1, "Y", b3.Gamma_y)):
+            sel = dominant == k
+            header[f"natural_frequencies_Hz_{axis}"] = freqs[sel].tolist()
+            header[f"mode_shapes_{axis}"] = b3.phi[k*N:(k+1)*N][:, sel].tolist()
+            header[f"fundamental_period_s_{axis}"] = float(1 / freqs[sel][0])
+            header[f"participation_factors_{axis}"] = gamma[sel].tolist()
     header_bytes = json.dumps(header, allow_nan=False).encode("utf-8")
     # Float32Array requires its byte offset to be a multiple of 4, but the
     # JSON header's length isn't guaranteed to be -- pad with zero bytes so
@@ -490,6 +603,10 @@ def compute():
     parts.append(building_x.accel.astype(np.float32).tobytes())
     if has_y:
         parts.append(building_y.accel.astype(np.float32).tobytes())
+    # Spec 12: floor rotation about +Z, radians, (num_stories, npts)
+    # floor-major -- after everything else, gated by has_floor_rotation.
+    if b3 is not None:
+        parts.append(b3.floor_rot.astype(np.float32).tobytes())
 
     return Response(b"".join(parts), mimetype="application/octet-stream")
 

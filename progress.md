@@ -2381,3 +2381,62 @@ byte-identical spec-11 behaviour (check 9).
     matching the HFTD kernel's own 4× refinement once anything yields.
 35. **`t_collapse` is vacuous here** — no collapse on either side; not
     chased further because over-driven cases diverge (V-19).
+
+## Spec 12 — Task 5: payload and server (2026-09-21)
+
+### What changed
+
+- `server.py`: `/compute` takes a strict-boolean `torsion` (default
+  `not nonlinear`). When requested, `pair_components()` decides
+  eligibility from the cached `ground_accel.json` (orientation keys, both
+  components, one `dt`); ineligible → per-axis path plus
+  `torsion_fallback_reason`. Eligible → one `MDOF_Building3N` solve (elastic
+  or HFTD), whose held `bx`/`by` carry that solve's DOF blocks so the
+  furniture, spec-10 and collapse code below stays one path. New header keys
+  (`torsion_enabled`, `has_floor_rotation`, `plan_a/_b`,
+  `eccentricity_x/_y`, `omega_theta_over_omega_x`, 3N
+  `natural_frequencies_Hz` / `mode_shapes` / `participation_factors_x/_y`;
+  old `_X/_Y` modal keys repopulated from the modes each DOF block
+  dominates). `theta_z` float32 `(N, npts)` block appended after
+  `gaccel_y`, gated by `has_floor_rotation`.
+- `mdof_response.py`: `tangent_eccentricity()` moved in from
+  `verify_torsion.py` (which now aliases it); `MDOF_Building3N.
+  _install_axis_views()` called at the end of both response methods.
+- `claude_scripts/check_ground_accel_block.py`: section 9 (spec 12 check 9);
+  3a/3b now post `torsion=False` explicitly.
+
+### Verification output
+
+- `check_ground_accel_block.py`: ALL CHECKS PASSED (3a, 3b, 9 — 17 new
+  assertions). torsion=false payload == main checkout's spec-11 payload,
+  3148520 bytes each; float-region offsets unchanged (3141632 B); surplus
+  for a flag-ignoring reader is exactly the theta block (745472 B); elastic
+  theta is 0.0 exactly; nonlinear (KOCAELI_AYD, N=3, 0.9×0.7 m, ×20)
+  converged, max|θ| 5.343e-04 rad, bit-equal to a direct 3N solve;
+  eccentricity envelope max 3.939 m (< a/2 = 4.2 m); stale-cache fallback
+  float payload == torsion=false; `torsion="yes"` → 400.
+- `run_spec11_regressions.py`: all 15 exit 0 (with the torsion default on).
+- `verify_torsion.py` (all): checks 1–8 PASS.
+
+### Task 5 rulings
+
+36. **Check 9: new header keys are gated behind `torsion`** (V-7), so
+    `torsion=false` is byte-identical including header and pad — the
+    stronger option, and cheaper than rescoping the check.
+37. **Elastic θ_z is exactly 0.0 for every building this model can
+    describe** (all four columns share a section, so the plan is always
+    symmetric and K_3N's u–θ blocks are exactly 0.0, V-1). Elastic
+    torsion-on therefore only adds a zero block; twist is a nonlinear
+    phenomenon here, whose default is off (GATE B). Flagged to the user.
+38. **Offline `__main__` stays per-axis; out/ is not regenerated.** For the
+    same reason as 37 the static artifacts would gain an all-zero θ block
+    and a ~1e-16 churn in every response file (V-10). The plan listed
+    `__main__` for this task; recorded as a deliberate deviation.
+39. **Eccentricity envelope** = signed value at each story's peak |e|,
+    over samples where every column tangent is ≥ 0 with positive sum
+    (only there is the rigidity centre a weighted average of the column
+    positions). Found by a real crash: a fully plateaued story gave 0/0 →
+    NaN → `json.dumps(allow_nan=False)` 500. Story never defined → null.
+40. **`/compute` clamps `intensity_scale` to ≤ 20** (spec 11); the torsion
+    checks ran at 40 via the Python API. A live torsion demo needs a weaker
+    building (e.g. 0.9×0.7 m columns at ×20). Relevant to Task 6.
