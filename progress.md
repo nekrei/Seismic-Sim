@@ -2001,3 +2001,93 @@ verification record. Optimizing the shared hysteresis/FFT hot path is deferred
 until spec 12's coupled 3N prototype can be measured, avoiding work against a
 solver shape that spec 12 immediately changes. Spec 11 is approved for local
 merge; no push or backend mirror was authorized.
+
+## Spec 12 — Torsion: a 3N kernel (branch `goal/12-torsion`)
+
+### Task 1 — 3N assembly, mass, corrected `K_G`, modal analysis (2026-09-21)
+
+Added the 3N kernel's static half to `mdof_response.py`, plus
+`claude_scripts/verify_torsion.py` carrying checks 1–4. Written test-first:
+all four checks failed on `AttributeError` before the implementation existed.
+
+New module-level functions beside the frame math, with the DOF ordering
+`[u_x,1..N, u_y,1..N, theta_1..N]` stated once at the top of the block:
+
+- `column_plan_positions` — pins column index `j` to a plan position
+  (counter-clockwise from `+x,+y`) and fixes the right-handed sign
+  convention for the whole spec. Spec 11's strength seed
+  `f'{record}#{axis}#{i}#{j}'` is deliberately left byte-for-byte unchanged.
+- `frame_transform` — the `N x 3N` kinematic transform,
+  `d_x = u_x − y_f·θ`, `d_y = u_y + x_f·θ`.
+- `building_frames` — spec 5's `N_PARALLEL_FRAMES` structure *placed*
+  (two X frames at `y = ±b/2`, two Y frames at `x = ±a/2`) rather than counted.
+- `assemble_K3N` — `Σ_f T_fᵀ K_f T_f` over those four frames, with `K_f` the
+  single-frame condensed matrix (`build_condensed_K` minus its
+  `N_PARALLEL_FRAMES` factor, which would otherwise double-count).
+- `geometric_stiffness_3N`, `mass_matrix_3N`.
+- `MDOF_Building3N` — holds `self.bx`/`self.by` per C-2, does not mutate
+  `MDOF_ShearBuilding`.
+
+**Ruling: `_relative_drift_matrix` factored out of
+`geometric_stiffness_matrix`.** The rotational `K_G` block needs the identical
+shear-building topology with a different spring, so the assembly is now one
+function with two callers instead of a copy that can drift. The arithmetic is
+expression-for-expression the old inline loop, so the existing output is
+unchanged bit for bit — confirmed by `verify_elastic_foundation.py`, which
+still matches `claude_scripts/fixtures/pre_spec10_baseline.npz`.
+
+**Ruling: spec A4's rotational `K_G` was wrong by a factor of 3, and the code
+implements the corrected form.** Check 3 re-derives
+`k_gθ,i = (1/h_i)·Σ_j P_ij(x_j²+y_j²) = (P_i/h_i)(a²+b²)/4` from the column
+plan positions independently (not by restating C-1), and prints spec A4's
+`(a²+b²)/12` beside it: hand `7.464261600e+07` vs A4's `2.488087200e+07`,
+ratio exactly 3.0000. Per check 3's own rule, the record is that **the spec
+was wrong, not the code**. `I_m = m(a²+b²)/12` is unaffected — mass is the
+distributed plate, the gravity torque acts through the corner columns. Both
+radii must appear side by side in the math PDF (Task 7) or a later reader
+will "fix" the discrepancy.
+
+**Ruling: `Γ^θ` is defined as the rotational share of the load vector under
+translational base excitation**, i.e. `φ_rotᵀ·(M ι_x + M ι_y)_rot`. It is
+identically zero by construction, which is the point: a nonzero value means
+the mass matrix picked up spurious `u–θ` coupling or an influence vector was
+built with 1s in the `θ` block. Measured `0.000e+00`.
+
+`MDOF_Building3N._modal_analysis` keeps the pre-`np.sqrt` gravity guard, and
+its message now names which DOF block the failing mode is dominantly in —
+the 3N system can go unstable torsionally as well as laterally.
+
+Verification output (`python claude_scripts/verify_torsion.py`, all pass):
+
+- **Check 1** — `p_delta` both **off and on**: `K`, `M` and `K_no_pdelta` all
+  have `u_x`/`u_y` sub-blocks **bit-identical** to the per-axis `K_X`/`K_Y`,
+  and all six coupling blocks are `0.0` **exactly**, asserted entry by entry
+  with `np.argwhere(block != 0.0)`. The `T_fᵀ K_f T_f` form turned out to be
+  exact as predicted: the `u_x` block sums to `K_f + K_f == 2*K_f`, and the
+  `u_x–θ` block to two exact negations. The lateral `K_G` blocks come from
+  `geometric_stiffness_matrix()` verbatim, which V-1 flagged as load-bearing
+  for the `p_delta=True` case.
+- **Check 2** — plan positions and kinematics asserted; one-story asymmetric
+  push (stiff frame at `+y`) gives `u_x = 2.730627e-03 m`,
+  `θ = +1.537515e-04 rad`, matching the hand solution `+1.537515e-04` to
+  ≤1e-12 relative, with the largest drift at the column furthest from
+  `y_cr = +1.5000 m`. The nonlinear half of check 2 belongs to Task 3 and
+  must run in the same pass as check 6 (V-4).
+- **Check 3** — rel diff `0.00e+00` against the independent hand derivation;
+  lateral blocks confirmed verbatim; first torsional mode softens from
+  `14.608309` to `14.479518 rad/s` (−0.882%) when P-Δ is enabled;
+  `p_delta=False` assigns `K_no_pdelta` directly (bit-identical).
+- **Check 4** — `ΦᵀMΦ = I` to `4.877e-16`; `ΦᵀKΦ` off-diagonal `1.435e-16`
+  relative; 12 real positive frequencies at N=4;
+  `max |Γ^θ| = 0.000e+00`; `Ω = ω_θ1/ω_x1 = 1.673233`;
+  `GravityInstabilityError` still raised on a wildly unstable 3N parameter set.
+
+Response-level assertions deferred to Task 2 as the plan specifies: check 1's
+`u_x(t)`/`u_y(t)` bit-identity over all 10 records and `theta_z(t) == 0.0`,
+and check 4's modal-sum-vs-direct-solve. The script prints a NOTE at each
+point rather than leaving the gap silent.
+
+Existing regressions re-run after the shared-code refactor:
+`verify_frame_furniture.py`, `verify_elastic_foundation.py` and
+`verify_floor_area.py` all report ALL CHECKS PASSED, including the
+`/compute`-vs-`out/` parity checks and the pre-spec-10 baseline fixture.
