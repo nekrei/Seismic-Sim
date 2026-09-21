@@ -2594,3 +2594,52 @@ R8), `survivor_building` (slices per-floor arrays and RE-ASSEMBLES; frozen
 - free_vibration: EOM residual 1.4e-15 / 6.4e-16. FD(u) vs v: 3e-6 / 8e-6
   (dt = 1e-4).
 - ground_velocity vs analytic: 2.4e-7.
+
+### Task 2 — restart-capable segment solve (2026-09-22)
+
+**Ruling R11 (refines the plan's Task 2 / C-3 mechanics).** A zero-state
+FFT solve that starts from rest at t_d, with the forcing cut off there,
+half-counts the first sample. The DFT sees it as a band-limited pulse
+centred on τ=0, so the solve is not at rest at τ=0:
+- displacement error ≈ a0·dt²/π², velocity error ≈ a0·dt/2;
+- the pseudo-force term is worse, because near failure it is ~10× the
+  ground term;
+- check 3's 1e-6 velocity continuity would miss by ~3 orders of magnitude.
+
+The survivor is therefore solved as follows.
+- **Particular (zero-state) part, over the full record:** the survivor's
+  elastic response to the full refined ground traces, plus the
+  convolution of the surviving columns' actual pseudo-force before t_d as
+  a fixed prefix. Both are continuous at t_d, so nothing is truncated.
+- **Zero-input part:** the closed-form free vibration of the survivor's
+  modes carries the state difference at t_d.
+- `_RestartConvolution` builds that correction into the convolution
+  operator, so every fixed-point iterate starts exactly from (u0, v0).
+- Restricted to τ ≥ 0, this is exactly "free vibration from (u0, v0) +
+  convolution of the forcing after t_d": C-3's LTI decomposition,
+  evaluated without Gibbs ringing.
+- Cost: the convolution runs over the full record length. Hysteresis runs
+  on the suffix only.
+
+Code:
+- `_per_axis_constitutive` / `_torsion_constitutive` take `initial=`.
+- `_refine_traces`, `_base_velocity` and `_solve_grid` were extracted.
+- Both results keep `solve_grid`, i.e. references to the
+  pre-downsampling histories plus the fine traces.
+- Added `_RestartConvolution`, `_restart_solve`, `_restart_axis` and
+  `_restart_3N`.
+
+Verification:
+- `verify_handoff.py restart`, V-2 split cases:
+  - (a) zero forcing + ICs, elastic: |u − FV| = |v − FV| = 0.0, per-axis
+    and 3N.
+  - (b) u0 = v0 = 0 from sample 0: the restart differs from the from-rest
+    solve by 1.2e-5 of peak (elastic) and 5.6e-5 (yielding). That is the
+    from-rest solve's own t=0 artifact. With FV(−u_ref(0), −v_ref(0))
+    removed the difference is 0.0 elastic and 1.5e-10 yielding (both at
+    hftd_tolerance 1e-9).
+- Bit-identity against `main`: yielding N=3 solves (X factor 1, Y factor
+  4, 3N factor 4), 21 arrays + summaries, ALL BIT-IDENTICAL.
+- `check_hftd_elastic_baseline` (140 cases), `check_hftd_contracts`,
+  `check_hftd_sampling_wrapper`, `check_hftd_convolution` and
+  `verify_torsion 1 2 3 4` all exit 0.
