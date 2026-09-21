@@ -3856,6 +3856,7 @@
             }
             const cacheKey = JSON.stringify(params);
             runCollapseBtn.disabled = nonlinear;
+            revertOnDismiss = false;
             clearRecomputeError();
             recomputeOverlay.classList.add('is-active');
             try {
@@ -3877,6 +3878,7 @@
                     const info = await res.json().catch(() => ({}));
                     const where = Number.isInteger(info.story)
                         ? ` Story ${info.story + 1} gives way first.` : '';
+                    revertOnDismiss = true;
                     showRecomputeError(
                         `This building cannot stand under its own weight.${where} ` +
                         `Gravity (P-Δ) exceeds the lateral stiffness at these ` +
@@ -3886,6 +3888,7 @@
                 }
                 if (res.status === 400) {
                     const info = await res.json().catch(() => ({}));
+                    revertOnDismiss = true;
                     showRecomputeError(
                         `Invalid building parameters: ${info.detail || 'request rejected'}.`);
                     return;
@@ -3991,6 +3994,7 @@
                     floorRot,
                 }, autoScaleAmplify);
                 recomputeOverlay.classList.remove('is-active');
+                snapshotBuildingParams();
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
             } catch (err) {
                 // A superseded (aborted) request leaves the overlay exactly
@@ -4018,8 +4022,40 @@
         // Any message can be closed: the x button, or Esc. Hides the whole
         // overlay (an error state is never mid-request) and leaves the
         // previous valid building as it was.
+        // Last building-slider values that /compute accepted. Closing a
+        // "cannot stand / invalid parameters" message snaps the sliders back
+        // to these, so the panel matches the building still on screen.
+        // Restored silently (no input event), so it triggers no recompute.
+        const BUILDING_SLIDERS = [
+            [storiesSlider, storiesLabel, v => v],
+            [massSlider, massLabel, v => (parseFloat(v) / 1000).toFixed(0) + 't'],
+            [zetaSlider, zetaLabel, v => (parseFloat(v) * 100).toFixed(1) + '%'],
+            [columnXSlider, columnXLabel, v => parseFloat(v).toFixed(2) + 'm'],
+            [columnYSlider, columnYLabel, v => parseFloat(v).toFixed(2) + 'm'],
+            [beamSlider, beamLabel, v => parseFloat(v).toFixed(2) + 'm'],
+            [areaSlider, areaLabel, v => Math.round(parseFloat(v)) + ' sq ft'],
+        ];
+        let lastValidBuilding = null;
+        function snapshotBuildingParams() {
+            lastValidBuilding = {
+                sliders: BUILDING_SLIDERS.map(([el]) => el.value),
+                soft: softGroundStoryToggle.checked,
+            };
+        }
+        function restoreBuildingParams() {
+            if (!lastValidBuilding) return;
+            BUILDING_SLIDERS.forEach(([el, label, fmt], i) => {
+                el.value = lastValidBuilding.sliders[i];
+                label.textContent = fmt(el.value);
+            });
+            softGroundStoryToggle.checked = lastValidBuilding.soft;
+            softGroundStoryLabel.textContent = lastValidBuilding.soft ? 'on' : 'off';
+        }
+        let revertOnDismiss = false;
         function dismissRecomputeError() {
             if (!recomputeOverlay.classList.contains('is-error')) return;
+            if (revertOnDismiss) restoreBuildingParams();
+            revertOnDismiss = false;
             clearRecomputeError();
             recomputeOverlay.classList.remove('is-active');
         }
@@ -4490,6 +4526,8 @@
             softGroundStoryLabel.textContent = e.target.checked ? 'on' : 'off';
             scheduleLiveRecompute();
         });
+
+        snapshotBuildingParams();
 
         seekSlider.addEventListener('input', (e) => {
             isSeeking = true;
