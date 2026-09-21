@@ -2702,3 +2702,45 @@ machinery.
 
 `t_detach` (80.62 s) is well after `t_collapse` (40.07 s) in the N=7 case.
 That strict-inequality case is for check 1.
+
+**Gate decision (user, 2026-09-22):** nonlinear collapse stays DISABLED on
+the deployed backend (an open item for the docs and the mirror step).
+`MAX_DETACHMENT_EVENTS` stays 4.
+
+### Task 4 — hand-off contract (2026-09-22)
+
+Code:
+- `HANDOFF_VERSION = 1`, `HANDOFF_EVENT_FIELDS`, `build_detachment_events`
+  (the single 0-based → 1-based conversion), `handoff_header` (the
+  `collapse.*` keys) and `validate_handoff` (the reference consumer;
+  refuses an unknown version).
+- `upper_cm_height` is measured from the failure plane (top of floor m−1).
+- `floor_state` is absolute, with `ground_state` beside it.
+- R3: `surviving_columns` is `[]` by definition. `hinge_column` is the
+  last column to fail on the tripped axis. Per-axis `t_fail_x` / `t_fail_y`
+  are null where that axis had not failed by `t_d`.
+
+Fast detaching fixtures (KOCAELI_AYD, N=4, ×60, windowed samples): `mid`
+(story 3 at 0.7 m), `cascade` (+ story 1 at 0.82 m, 50 s window), `story1`
+(story 1 at 0.8 m).
+
+`verify_handoff.py` results:
+- **Check 1** PASS: t_detach vs t_collapse for mid 30.59 vs 1.15 s,
+  cascade 30.77 vs 1.25 s and 38.83 vs 11.87 s, story1 29.04 vs 8.46 s,
+  all strict. Negative case: story 3 column 0 with du×1e3 still gives
+  onset (t_collapse 1.15 s) but no detachment.
+- **Check 6** PASS: cascade story 3 (X, 30.77 s) → story 1 (Y, 38.83 s).
+  max_events=1 gives 1 event and cap_reached. story1 gives
+  surviving_stories 0, all floors held. V-5: an X-only trip holds X and Y
+  bit-for-bit from the same k.
+- **Check 7** PASS: mid / cascade / story1 / mid-3N. Finiteness walk
+  (nulls only where allowed); upper_mass / h_cm / J recomputed to ≤1e-12;
+  unit sanity (max floor offset from ground 1.76 m); columns partition
+  {0..3}; P_cap_below = P_cap[m−2]; V-6 (1-based story vs 0-based
+  collapse_events, z = 0, θ = ω = 0 off 3N); version 2 refused.
+- **Check 9** PASS: 5 in-process + 3 fresh processes bit-identical
+  (sha256 aa6bd9397ad38d6e). t_detach is identical (exact) with
+  hftd_segment_seconds 10 and 20.
+
+Bug found by check 1's negative case and fixed: the builder read
+`info['ground']` when there were no events.

@@ -2653,6 +2653,145 @@ def solve_with_detachment(building, accel_x, disp_x, accel_y=None, disp_y=None,
     return info
 
 
+HANDOFF_VERSION = 1
+
+HANDOFF_EVENT_FIELDS = (
+    'story', 't_detach', 'axis', 'axes_tripped', 'direction', 'criterion',
+    'failed_columns', 'surviving_columns', 'hinge_column', 'floor_state_frame',
+    'floor_state', 'ground_state', 'upper_mass', 'upper_cm_height',
+    'upper_inertia_cm', 'story_height_at_failure', 'P_cap_below',
+    'residual_drift_below', 'surviving_stories')
+
+
+def build_detachment_events(building, building_y=None):
+    """The versioned hand-off contract, one dict per event (spec 13 C2).
+
+    Everything the animation may use, in metres / seconds / radians in the
+    physics frame (never scene units). This is the ONE place where 0-based
+    story indices become the contract's 1-based `story` / `floor`; `column`
+    stays 0-based, indexing `column_plan_positions()` (CCW from +x,+y).
+
+    - `floor_state` is ABSOLUTE (`floor_state_frame`), matching the payload's
+      floor arrays; `ground_state` beside it lets a consumer change frame.
+      `z` is 0.0 (no vertical DOF); `theta_z`/`omega_z` are 0.0 off the
+      torsional path.
+    - `surviving_columns` is empty by definition: detachment requires every
+      column of the story to have failed (A1). What the simulation does
+      determine is failure ORDER, so `hinge_column` names the column that
+      failed last on the tripped axis (held longest), and each failed
+      column carries `t_fail_x`/`t_fail_y` (null where that axis had not
+      failed by `t_detach`).
+    - `upper_cm_height` is measured from the failure plane (the top of floor
+      m-1, where the block lands after dropping `story_height_at_failure`).
+    - `P_cap_below` / `residual_drift_below` are null only for story 1.
+    """
+    info = getattr(building, 'detachment', None)
+    if not info or not info['converged'] or not info['events']:
+        return []
+    torsional = isinstance(building, MDOF_Building3N)
+    N = building.N
+    if torsional:
+        r = building.hftd_result
+        views, src = {'X': r.x, 'Y': r.y}, building.bx
+        theta, omega = r.theta, r.velocity[2 * N:]
+    else:
+        views, src = {'X': building.hftd_result}, building
+        if building_y is not None:
+            views['Y'] = building_y.hftd_result
+        theta = omega = None
+    ground = info['ground']
+    h = np.asarray(src.h, dtype=float)
+    z = np.cumsum(h)
+    m = np.broadcast_to(np.asarray(building.m, dtype=float), (N,))
+    a, b = float(src.plan_span_x), float(src.plan_span_y)
+    positions = column_plan_positions(a, b)
+    P_cap = np.broadcast_to(np.asarray(src.P_cap_profile, dtype=float), (N,))
+    events = []
+    for e in info['events']:
+        s, k, t_d, ax = e['story'], e['k'], e['time'], e['axis']
+        v = views[ax]
+        tf = {A: views[A].summary['t_fail'][s] for A in views}
+
+        def by_detach(t):
+            return None if t is None or t > t_d else float(t)
+
+        failed = [dict(story=s + 1, column=j, t_fail=float(tf[ax][j]),
+                       t_fail_x=by_detach(tf['X'][j]),
+                       t_fail_y=by_detach(tf['Y'][j]) if 'Y' in tf else None,
+                       plan_x=float(positions[j, 0]), plan_y=float(positions[j, 1]))
+                  for j in range(4)]
+        hinge = max(range(4), key=lambda j: (tf[ax][j], -j))
+        heights = z[s:] - (z[s - 1] if s else 0.0)
+        mass = float(m[s:].sum())
+        h_cm = float((m[s:] * heights).sum() / mass)
+
+        def lateral(A, f):
+            if A not in views:
+                return 0.0, 0.0
+            V = views[A]
+            return float(V.u_abs[f, k]), float(V.velocity[f, k] + ground[A]['v'][k])
+
+        floors = []
+        for f in range(s, N):
+            x, vx = lateral('X', f)
+            y, vy = lateral('Y', f)
+            floors.append(dict(floor=f + 1, x=x, y=y, z=0.0,
+                               theta_z=float(theta[f, k]) if torsional else 0.0,
+                               vx=vx, vy=vy,
+                               omega_z=float(omega[f, k]) if torsional else 0.0))
+        gs = {q: 0.0 for q in ('x', 'y', 'vx', 'vy')}
+        for A, key in (('X', 'x'), ('Y', 'y')):
+            if A in ground:
+                gs[key] = float(ground[A]['d'][k])
+                gs['v' + key] = float(ground[A]['v'][k])
+        residual = None
+        if s:
+            residual = {A.lower(): float(views[A].story_drift[s - 1, -1]) if A in views else 0.0
+                        for A in ('X', 'Y')}
+        drift = v.story_drift[s, k]
+        events.append(dict(
+            story=s + 1, t_detach=float(t_d), axis=ax, axes_tripped=list(e['axes_tripped']),
+            direction=1 if drift >= 0 else -1, criterion=v.summary['collapse_criterion'][s],
+            failed_columns=failed, surviving_columns=[], hinge_column=hinge,
+            floor_state_frame='absolute', floor_state=floors, ground_state=gs,
+            upper_mass=mass, upper_cm_height=h_cm,
+            upper_inertia_cm=float((m[s:] * ((a * a + b * b) / 12 + (heights - h_cm) ** 2)).sum()),
+            story_height_at_failure=float(h[s]),
+            P_cap_below=float(P_cap[s - 1]) if s else None,
+            residual_drift_below=residual, surviving_stories=s))
+    return events
+
+
+def handoff_header(building, building_y=None):
+    """The `collapse.*` keys spec 13 adds to the /compute header."""
+    info = getattr(building, 'detachment', None) or {}
+    ok = info.get('converged', False)
+    return dict(handoff_version=HANDOFF_VERSION,
+                detachment_events=build_detachment_events(building, building_y),
+                cap_reached=bool(info.get('cap_reached', False)) and ok,
+                surviving_stories=int(info.get('surviving_stories', building.N)) if ok else building.N)
+
+
+def validate_handoff(collapse):
+    """Reference consumer: refuse an unknown version rather than guess.
+
+    Spec 15's JavaScript mirrors this. Raises ValueError on a version it
+    does not know or a missing field; returns the event list otherwise.
+    """
+    version = collapse.get('handoff_version')
+    if version != HANDOFF_VERSION:
+        raise ValueError(f'unknown handoff_version {version!r}; this consumer reads '
+                         f'version {HANDOFF_VERSION} only')
+    for key in ('detachment_events', 'cap_reached', 'surviving_stories'):
+        if key not in collapse:
+            raise ValueError(f'hand-off contract is missing {key!r}')
+    for event in collapse['detachment_events']:
+        missing = [key for key in HANDOFF_EVENT_FIELDS if key not in event]
+        if missing:
+            raise ValueError(f'detachment event is missing {missing}')
+    return collapse['detachment_events']
+
+
 def slice_hysteresis_state(machine, stories):
     """Row slice of a ColumnHysteresis state; peaks and slopes untouched."""
     out = copy.copy(machine)
