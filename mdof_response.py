@@ -3291,6 +3291,20 @@ def save_ground_spectrum(filename, accel_x, accel_y, dt, n_bins=400):
         json.dump(data, f)
 
 
+def finite_or_none(values):
+    """A per-story list for JSON: a non-finite entry becomes None (null).
+
+    theta_demand is inf for a story whose shear at its drift peak is
+    exactly zero -- undefined, not huge -- and json.dumps would write a
+    bare `Infinity` that JSON.parse rejects (or, with allow_nan=False,
+    raise and turn /compute into an HTTP 500). The model keeps the inf;
+    only the wire encoding changes, the same null convention as
+    eccentricity_x/y.
+    """
+    return [float(v) if np.isfinite(v) else None
+            for v in np.asarray(values, dtype=float)]
+
+
 def save_building_data(filename, building_x, building_y, furniture_meta=None,
                         reference_magnitude=6.0, soft_ground_story=False):
     """
@@ -3343,8 +3357,8 @@ def save_building_data(filename, building_x, building_y, furniture_meta=None,
         "k0_per_story_N_per_m_Y": building_y.k0_profile.tolist(),
         "theta_stiffness_X": building_x.theta_stiffness.tolist(),
         "theta_stiffness_Y": building_y.theta_stiffness.tolist(),
-        "theta_demand_X": building_x.theta_demand.tolist(),
-        "theta_demand_Y": (building_y.theta_demand.tolist()
+        "theta_demand_X": finite_or_none(building_x.theta_demand),
+        "theta_demand_Y": (finite_or_none(building_y.theta_demand)
                            if hasattr(building_y, "theta_demand") else None),
         "peak_drift_ratio_X": building_x.peak_drift_ratio.tolist(),
         "peak_drift_ratio_Y": (building_y.peak_drift_ratio.tolist()
