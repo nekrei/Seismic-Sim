@@ -8,6 +8,7 @@ import re
 import os
 import sys
 import copy
+from collections import namedtuple
 
 # Constants
 G_TO_MS2 = 9.80665
@@ -549,14 +550,201 @@ def geometric_stiffness_matrix(N, m_per_floor, h, g=GRAVITY_MS2):
     P = g * np.cumsum(m_arr[::-1])[::-1]
     k_g = P / h_arr
 
-    K_G = np.zeros((N, N))
+    return _relative_drift_matrix(k_g), k_g, P
+
+
+def _relative_drift_matrix(k):
+    """Shear-building (relative-drift) assembly of per-story springs `k`.
+
+    Story i contributes k_i * b_i b_i^T with b_i = e_i - e_{i-1} and e_0
+    dropped at the fixed base:
+
+        K[i,i]   = k_i + k_{i+1}     (k_{N+1} == 0)
+        K[i,i+1] = K[i+1,i] = -k_{i+1}
+
+    Factored out because spec 12's rotational geometric stiffness uses the
+    *same* topology on the theta block with a different spring -- one
+    assembly, two callers, rather than a copy that can drift. The
+    arithmetic is expression-for-expression what geometric_stiffness_matrix
+    did inline before spec 12, so its output is unchanged bit for bit.
+    """
+    N = len(k)
+    K = np.zeros((N, N))
     for i in range(N):
-        k_above = k_g[i + 1] if i + 1 < N else 0.0
-        K_G[i, i] = k_g[i] + k_above
+        k_above = k[i + 1] if i + 1 < N else 0.0
+        K[i, i] = k[i] + k_above
         if i + 1 < N:
-            K_G[i, i + 1] = -k_g[i + 1]
-            K_G[i + 1, i] = -k_g[i + 1]
-    return K_G, k_g, P
+            K[i, i + 1] = -k[i + 1]
+            K[i + 1, i] = -k[i + 1]
+    return K
+
+
+# --- Spec 12: the 3N torsional kernel -------------------------------------
+#
+# DOF ordering, stated once and never varied:  [u_x,1..N, u_y,1..N, theta_1..N]
+#
+# A silent ordering mismatch between the assembler, the pseudo-force
+# assembly and the payload writer is the most likely bug in this spec, so
+# every function below indexes through that one ordering and nothing
+# re-derives it.
+
+def column_plan_positions(plan_span_x, plan_span_y):
+    """Plan positions (x_j, y_j) of the four corner columns, j = 0..3.
+
+    **This pins column index `j` to a physical plan position, once, for the
+    whole project.** Before spec 12 `j` was an anonymous slot in spec 11's
+    (N, 4) per-column arrays; it now has a location, and the strength
+    scatter seeded `f'{record}#{axis}#{i}#{j}'` acquires a geometric
+    meaning it did not have. That seed string is deliberately left
+    byte-for-byte unchanged -- changing it would break spec 11's
+    determinism checks and column_strength_scatter's bit-match with the
+    viewer's FNV/mulberry32 (spec correction C-1 item 6).
+
+    Counter-clockwise from the +x,+y corner, with a = plan_span_x along X
+    and b = plan_span_y along Y:
+
+        j = 0 -> (+a/2, +b/2)
+        j = 1 -> (-a/2, +b/2)
+        j = 2 -> (-a/2, -b/2)
+        j = 3 -> (+a/2, -b/2)
+
+    Sign convention for the whole spec, fixed here: a right-handed frame
+    with theta measured about +Z, so a floor rotation theta displaces a
+    point at (x, y) by (-y*theta, +x*theta). Verification check 2 asserts
+    both this table and that convention.
+    """
+    a = float(plan_span_x) / 2.0
+    b = float(plan_span_y) / 2.0
+    return np.array([[+a, +b], [-a, +b], [-a, -b], [+a, -b]])
+
+
+def frame_transform(N, offset, kind):
+    """The N x 3N kinematic transform T_f mapping floor DOFs to one planar
+    frame's in-plane drift (spec 12, A1).
+
+    Following column_plan_positions' right-handed convention:
+
+        frame resisting X-sway at plan offset y_f:  d_i = u_x,i - y_f*theta_i
+        frame resisting Y-sway at plan offset x_f:  d_i = u_y,i + x_f*theta_i
+
+    `kind` is "X" or "Y" -- the sway direction the frame resists, not the
+    axis its offset is measured along.
+    """
+    T = np.zeros((N, 3 * N))
+    eye = np.eye(N)
+    if kind == "X":
+        T[:, :N] = eye
+        T[:, 2 * N:] = -float(offset) * eye
+    elif kind == "Y":
+        T[:, N:2 * N] = eye
+        T[:, 2 * N:] = +float(offset) * eye
+    else:
+        raise ValueError(f"kind must be 'X' or 'Y', got {kind!r}")
+    return T
+
+
+def building_frames(plan_span_x, plan_span_y):
+    """The four planar frames as (offset, kind) pairs -- two resisting
+    X-sway at y = +-b/2, two resisting Y-sway at x = +-a/2.
+
+    This is spec 5's N_PARALLEL_FRAMES structure *placed* rather than
+    merely counted. build_condensed_K's factor of N_PARALLEL_FRAMES is
+    therefore removed here and replaced by explicit placement -- applying
+    both would double-count every frame.
+    """
+    a = float(plan_span_x) / 2.0
+    b = float(plan_span_y) / 2.0
+    return ((+b, "X"), (-b, "X"), (+a, "Y"), (-a, "Y"))
+
+
+def assemble_K3N(N, E, I_c_x, I_c_y, I_b, h, plan_span_x, plan_span_y):
+    """K_3N = sum_f T_f^T K_f T_f over the four placed planar frames.
+
+    `K_f` is ONE frame's condensed N x N matrix -- assemble_frame_stiffness
+    followed by condense_rotations, i.e. build_condensed_K *without* its
+    N_PARALLEL_FRAMES factor (see building_frames).
+
+    Do NOT substitute the research document's scalar per-column spring
+    formulas (spec A1). They assume each column is an independent lateral
+    spring, which throws away the beams' rotational restraint that spec 5's
+    condensation bakes into a full N x N matrix.
+
+    This reduces to the per-axis result **bit-identically** for a symmetric
+    plan, which is verification check 1 and the gate on the whole spec:
+    the u_x block sums to K_f + K_f and IEEE-754 gives x + x == 2*x
+    exactly; the u_x-theta block sums to (-b/2)K_f + (+b/2)K_f, two exact
+    negations, so it is 0.0 exactly rather than merely small.
+    """
+    K_x = condense_rotations(
+        assemble_frame_stiffness(N, E, I_c_x, I_b, h,
+                                 frame_span("X", plan_span_x, plan_span_y)), N)
+    K_y = condense_rotations(
+        assemble_frame_stiffness(N, E, I_c_y, I_b, h,
+                                 frame_span("Y", plan_span_x, plan_span_y)), N)
+
+    K3 = np.zeros((3 * N, 3 * N))
+    for offset, kind in building_frames(plan_span_x, plan_span_y):
+        T = frame_transform(N, offset, kind)
+        K3 += T.T @ (K_x if kind == "X" else K_y) @ T
+    return K3
+
+
+def geometric_stiffness_3N(N, m_per_floor, h, plan_span_x, plan_span_y,
+                           g=GRAVITY_MS2):
+    """Linearised P-Delta geometric stiffness for the 3N system.
+
+    The two lateral blocks are geometric_stiffness_matrix()'s output
+    **verbatim**, and that is load-bearing rather than a convenience: the
+    per-column placement sum computes 4*((P_i/4)/h_i) where the existing
+    code computes P_i/h_i, and those are not bit-identical in IEEE-754.
+    Verification check 1 demands bit-identity with p_delta on.
+
+    The rotational block uses the same relative-drift topology with
+
+        k_gtheta,i = (1/h_i) * sum_j P_ij (x_j^2 + y_j^2)
+                   = (P_i/h_i) * (a^2 + b^2)/4
+
+    for four equal corner columns. **This is NOT the (a^2+b^2)/12 of the
+    rotational mass**, and the difference is not a typo in either place.
+    Mass is the distributed floor plate, so its radius of gyration is the
+    plate's. The destabilising gravity torque acts through the axial load,
+    and in this model the axial load sits in the four corner columns at
+    (+-a/2, +-b/2) -- the same assumption column_axial_capacity() already
+    makes. The corner radius is a factor of 3 larger, which makes torsional
+    gravity instability *more* likely, not less. Spec A4 originally wrote
+    /12 here; spec correction C-1 item 2 records the derivation and
+    verification check 3 re-derives it independently.
+
+    Returns (K_G3, k_g, P) with `k_g`/`P` the per-story lateral quantities,
+    unchanged in meaning from geometric_stiffness_matrix.
+    """
+    K_G_lat, k_g, P = geometric_stiffness_matrix(N, m_per_floor, h, g=g)
+
+    pos = column_plan_positions(plan_span_x, plan_span_y)
+    r_sq = float(np.mean(pos[:, 0] ** 2 + pos[:, 1] ** 2))
+    K_G_rot = _relative_drift_matrix(k_g * r_sq)
+
+    K_G3 = np.zeros((3 * N, 3 * N))
+    K_G3[:N, :N] = K_G_lat
+    K_G3[N:2 * N, N:2 * N] = K_G_lat
+    K_G3[2 * N:, 2 * N:] = K_G_rot
+    return K_G3, k_g, P
+
+
+def mass_matrix_3N(N, m_per_floor, plan_span_x, plan_span_y):
+    """diag(m_i, m_i, I_m,i) per floor, with I_m,i = m_i(a^2 + b^2)/12.
+
+    The rigid diaphragm is a uniformly distributed plate of plan a x b, so
+    the rotational inertia keeps the plate's radius of gyration -- unlike
+    the gravity torque in geometric_stiffness_3N, which acts through the
+    corner columns. Both radii are correct; see that docstring.
+
+    `a`, `b` come from spec 8's plan_span_x/y, so I_m tracks the Area
+    slider for free.
+    """
+    m = np.broadcast_to(np.asarray(m_per_floor, dtype=float), (N,))
+    I_m = m * (float(plan_span_x) ** 2 + float(plan_span_y) ** 2) / 12.0
+    return np.diag(np.concatenate([m, m, I_m]))
 
 
 def story_stiffness_profile(K_L, M, phi1):
@@ -707,6 +895,108 @@ def get_orientation_from_filename(filename):
     # If we still can't determine, log and return None
     print(f"Warning: Could not parse orientation for {filename}. Skipping.")
     return None
+
+
+class ComponentPairingError(ValueError):
+    """The two horizontal components cannot drive one coupled 3N solve.
+
+    Raised rather than patched over: spec 12 B5 makes component pairing a
+    correctness issue, because a swapped or mis-timed pairing produces a
+    plausible-looking but wrong twist. Every caller's response is the same
+    -- fall back to the per-axis elastic path for that record.
+    """
+
+
+def assign_component_axes(orients):
+    """(x_orient, y_orient) from a record's horizontal azimuths.
+
+    X is the LOWER azimuth. That is a heuristic, not a compass direction
+    (spec correction C-4): it is the sort that decides, not the filename
+    parser, so the assignment is recorded in the header by
+    `pair_components` and stays detectable after the fact.
+    """
+    ordered = sorted(orients)
+    if len(ordered) < 2:
+        raise ComponentPairingError(
+            f"a record needs two horizontal components, got {ordered}")
+    return ordered[0], ordered[1]
+
+
+class PairedComponents:
+    """Two horizontal components on one time base, plus what was done."""
+
+    __slots__ = ("accel_x", "disp_x", "accel_y", "disp_y", "dt",
+                 "npts", "pad_x", "pad_y", "header")
+
+    def __init__(self, accel_x, disp_x, accel_y, disp_y, dt,
+                 npts, pad_x, pad_y, header):
+        self.accel_x = accel_x
+        self.disp_x = disp_x
+        self.accel_y = accel_y
+        self.disp_y = disp_y
+        self.dt = dt
+        self.npts = npts
+        self.pad_x = pad_x
+        self.pad_y = pad_y
+        self.header = header
+
+
+def pair_components(accel_x, disp_x, dt_x, accel_y, disp_y, dt_y,
+                    x_orient=None, y_orient=None, label=""):
+    """Align a record's two horizontal components for one 3N solve.
+
+    The two `.AT2` files are simultaneous recordings of the same event, so
+    they are aligned on sample index 0 and zero-**padded** to a common
+    length -- never resampled, which would shift phase and quietly
+    invent a different earthquake. Spec 12 B5, verification check 8.
+
+    Raises `ComponentPairingError` (caller falls back to the per-axis
+    path) when there is no Y component, when either orientation could not
+    be assigned, or when the two components were sampled at different
+    rates. That last guard is new: `load_component` returned each
+    component's own `dt` and the offline caller discarded Y's, so a
+    mismatched pair would have been solved as though it were simultaneous
+    (spec correction C-4). Latent while every shipped record has one
+    shared `dt`; a correctness defect the moment both components drive one
+    solve.
+    """
+    tag = f"{label}: " if label else ""
+    if accel_y is None or disp_y is None:
+        raise ComponentPairingError(
+            f"{tag}no Y component -- rejected for torsion, use the per-axis "
+            f"path")
+    if x_orient is None or y_orient is None:
+        raise ComponentPairingError(
+            f"{tag}orientation could not be assigned (x={x_orient}, "
+            f"y={y_orient}) -- rejected for torsion rather than guessed")
+    if dt_y != dt_x:
+        raise ComponentPairingError(
+            f"{tag}the two components were sampled at different rates "
+            f"(dt_x={dt_x}, dt_y={dt_y}); they cannot be treated as "
+            f"simultaneous -- rejected for torsion")
+
+    arrays = [np.asarray(a, dtype=float)
+              for a in (accel_x, disp_x, accel_y, disp_y)]
+    npts = max(len(a) for a in arrays)
+
+    def padded(a):
+        if len(a) == npts:
+            return a
+        out = np.zeros(npts)
+        out[:len(a)] = a
+        return out
+
+    pad_x = npts - min(len(arrays[0]), len(arrays[1]))
+    pad_y = npts - min(len(arrays[2]), len(arrays[3]))
+    if pad_x or pad_y:
+        print(f"  {tag}component length mismatch -- zero-padding X by "
+              f"{pad_x} and Y by {pad_y} samples to {npts} (not resampled).")
+
+    return PairedComponents(
+        *[padded(a) for a in arrays], dt_x, npts, pad_x, pad_y,
+        {"x_orient_deg": x_orient, "y_orient_deg": y_orient,
+         "component_pad_x": pad_x, "component_pad_y": pad_y})
+
 
 def parse_peer_file(filename, convert_to_ms2=True):
     """Parse a PEER .AT2 acceleration file. Returns (acceleration, dt) in m/s²."""
@@ -1024,6 +1314,66 @@ def assemble_pseudo_force(s):
     return p
 
 
+def assemble_pseudo_force_3N(s_x, s_y, positions):
+    """Spec 12 B3: p_NL = sum_ij T_ij^T [k0,ij*delta_ij - V_ij].
+
+    `s_x`, `s_y` are the per-column constitutive defects, each (N, 4, npts),
+    for the two bending axes. `T_ij` is the row of `frame_transform` that
+    produced that column's drift, so its transpose places the defect on all
+    three DOFs of floors i and i-1:
+
+        u_x block:    sum_j s_x,ij
+        u_y block:    sum_j s_y,ij
+        theta block:  sum_j [ -y_j*s_x,ij + x_j*s_y,ij ]
+
+    each then carried across the story boundary by the SAME B^T that spec
+    11's `assemble_pseudo_force` applies -- B^T factors out of the sum over
+    j because every column of story i shares the b_i = e_i - e_{i-1} row.
+    Spec 11's tidy `p_i = s_i - s_{i+1}` is this with one more index, and
+    the sign here is the single most likely place for the spec to break
+    silently: a wrong transpose leaves the ELASTIC defect identically zero,
+    so verification check 6 still passes. Check 2's known-direction case is
+    what actually exercises it (verification correction V-4).
+    """
+    x = positions[:, 0][None, :, None]
+    y = positions[:, 1][None, :, None]
+    N, _, npts = s_x.shape
+    p = np.empty((3 * N, npts))
+    p[:N] = assemble_pseudo_force(s_x.sum(axis=1))
+    p[N:2 * N] = assemble_pseudo_force(s_y.sum(axis=1))
+    p[2 * N:] = assemble_pseudo_force((-y * s_x + x * s_y).sum(axis=1))
+    return p
+
+
+def column_drift_3N(u, positions):
+    """Spec 12 B2: per-column story drift from the 3N displacement history.
+
+        delta_x,ij = [u_x,i - y_j*theta_i] - [u_x,i-1 - y_j*theta_i-1]
+        delta_y,ij = [u_y,i + x_j*theta_i] - [u_y,i-1 + x_j*theta_i-1]
+
+    Every column now has its OWN drift. Spec 11 A4's "a rigid diaphragm
+    forces every column to share the same drift" was true of a
+    one-lateral-DOF-per-floor model and is false here: the diaphragm is
+    rigid *in plane*, which is exactly what permits rotation.
+
+    `u` is (3N, npts) in the `[u_x, u_y, theta]` ordering; returns two
+    (N, 4, npts) arrays. The bracketed quantity is the column's own lateral
+    displacement, i.e. `frame_transform` evaluated at that column's plan
+    position, and the drift is its first difference up the building -- so
+    this and `assemble_pseudo_force_3N` are one transform and its
+    transpose, not two independently written sign conventions.
+    """
+    N = u.shape[0] // 3
+    u_x, u_y, theta = u[:N], u[N:2 * N], u[2 * N:]
+    x = positions[:, 0][None, :, None]
+    y = positions[:, 1][None, :, None]
+    col_x = u_x[:, None, :] - y * theta[:, None, :]
+    col_y = u_y[:, None, :] + x * theta[:, None, :]
+    zero = np.zeros((1, *col_x.shape[1:]))
+    return (np.diff(col_x, axis=0, prepend=zero),
+            np.diff(col_y, axis=0, prepend=zero))
+
+
 from dataclasses import dataclass, field
 
 
@@ -1047,6 +1397,9 @@ class HFTDResult:
     column_tangent: np.ndarray
     backbones: dict
     dt: float
+    # (N, 4, npts). Equal to `story_drift` broadcast on the per-axis path;
+    # genuinely per-column once theta is free (spec 12 B2).
+    column_drift: np.ndarray = None
     collapse_events: list = field(default_factory=list)
     summary: dict = field(default_factory=dict)
     segments: int = 1
@@ -1054,29 +1407,46 @@ class HFTDResult:
     reason: str = ''
 
 
-def _hysteresis_history(u, bb, initial_state=None):
-    drift = np.diff(u, axis=0, prepend=np.zeros((1,u.shape[1])))
+def _hysteresis_history(drift, bb, initial_state=None):
+    """Per-column drift history -> column forces, tangents and the defect.
+
+    `drift` is (N, 4, npts): spec 12 B2 gives every column its own drift.
+    The pre-spec-12 one-drift-per-story case is that same story drift
+    broadcast across the column axis, which is exact rather than merely
+    close, so the per-axis path stays bit-identical (verification check 11).
+
+    The returned defect `k0*delta - V` is the RAW per-column array, not
+    placed on the structural DOFs. Placement is the caller's, because the
+    3N path must sum both bending axes before applying `T_ij^T` -- see
+    `assemble_pseudo_force_3N`.
+    """
+    npts = drift.shape[-1]
     machine = ColumnHysteresis(bb) if initial_state is None else copy.deepcopy(initial_state)
-    shape = (*bb['k0'].shape, u.shape[1])
+    shape = (*bb['k0'].shape, npts)
     force, tangent = np.empty(shape), np.empty(shape)
     damage = np.empty(shape, dtype=np.int8)
-    correction = np.zeros_like(drift)
-    if not np.any(machine.yielded) and np.all(np.max(abs(drift),axis=1)[:,None] <= bb['dy']):
-        force = bb['k0'][:,:,None]*drift[:,None,:]
+    correction = np.zeros(shape)
+    peak = np.max(abs(drift),axis=-1)
+    if not np.any(machine.yielded) and np.all(peak <= bb['dy']):
+        force = bb['k0'][:,:,None]*drift
         tangent = np.broadcast_to(bb['k0'][:,:,None],shape).copy()
         damage.fill(ColumnHysteresis.ELASTIC)
-        machine.step(drift[:,-1])
-        machine.work = .5*bb['k0']*drift[:,-1,None]**2
-        return drift,force,tangent,damage,correction,machine
+        machine.step(drift[:,:,-1])
+        machine.work = .5*bb['k0']*drift[:,:,-1]**2
+        return force,tangent,damage,correction,machine
     # Within a monotonic stretch each sample lies on the same path from
     # the committed reversal. Evaluate those samples as an extra NumPy
-    # dimension, then commit only the final state. Split whenever ANY story
-    # reverses, preserving vectorisation across every story and column.
-    increments=np.diff(drift,axis=1,prepend=machine.delta[:,0,None])
+    # dimension, then commit only the final state. Split whenever ANY
+    # column reverses, preserving vectorisation across every story and
+    # column. Reducing over both axes rather than over stories alone is
+    # what keeps this exact for the broadcast per-axis case: direction
+    # changes are then common to the four columns, and `any` over j of
+    # `peak_i > dy_ij` is `peak_i > min_j dy_ij`, the old expression.
+    increments=np.diff(drift,axis=-1,prepend=machine.delta[:,:,None])
     directions=np.sign(increments)
-    active_stories=np.any(machine.yielded,axis=1) | (np.max(abs(drift),axis=1)>np.min(bb['dy'],axis=1))
-    cuts=np.flatnonzero(np.any((directions[:,1:] != directions[:,:-1]) & active_stories[:,None],axis=0))+1
-    boundaries=np.r_[0,cuts,u.shape[1]]
+    active=machine.yielded | (peak>bb['dy'])
+    cuts=np.flatnonzero(np.any((directions[...,1:] != directions[...,:-1]) & active[...,None],axis=(0,1)))+1
+    boundaries=np.r_[0,cuts,npts]
     for start,end in zip(boundaries[:-1],boundaries[1:]):
         trial=copy.copy(machine)
         trial.bb={key:(value[:,:,None] if isinstance(value,np.ndarray) else value)
@@ -1084,23 +1454,67 @@ def _hysteresis_history(u, bb, initial_state=None):
         for key,value in vars(machine).items():
             if isinstance(value,np.ndarray):
                 setattr(trial,key,np.broadcast_to(value[:,:,None],(*value.shape,end-start)).copy())
-        values,slopes=trial.step(drift[:,None,start:end])
+        values,slopes=trial.step(drift[:,:,start:end])
         force[:,:,start:end]=values
         tangent[:,:,start:end]=slopes
         damage[:,:,start:end]=trial.branch
-        defects=bb['k0'][:,:,None]*drift[:,None,start:end]-values
+        defects=bb['k0'][:,:,None]*drift[:,:,start:end]-values
         defects[~trial.yielded]=0.
-        correction[:,start:end]=defects.sum(axis=1)
+        correction[:,:,start:end]=defects
         previous_force=machine.force.copy()
         previous_delta=machine.delta.copy()
         old_work=machine.work.copy()
         for key,value in vars(trial).items():
             if isinstance(value,np.ndarray):
                 setattr(machine,key,value[:,:,-1].copy())
-        delta_steps=np.diff(np.broadcast_to(drift[:,None,start:end],values.shape),axis=2,prepend=previous_delta[:,:,None])
+        delta_steps=np.diff(np.broadcast_to(drift[:,:,start:end],values.shape),axis=2,prepend=previous_delta[:,:,None])
         left_values=np.concatenate((previous_force[:,:,None],values[:,:,:-1]),axis=2)
         machine.work=old_work+np.sum(.5*(left_values+values)*delta_steps,axis=2)
-    return drift, force, tangent, damage, assemble_pseudo_force(correction), machine
+    return force, tangent, damage, correction, machine
+
+
+HysteresisAux = namedtuple(
+    'HysteresisAux', 'state story_drift column_drift force tangent damage')
+
+
+def _per_axis_constitutive(bb):
+    """Spec 11's one-drift-per-story constitutive law, as a callable.
+
+    The drift broadcast across the column axis is a view, not arithmetic,
+    so every number downstream is bit-identical to the pre-spec-12 code.
+    """
+    def constitutive(u, state=None):
+        story = np.diff(u, axis=0, prepend=np.zeros((1, u.shape[1])))
+        drift = np.broadcast_to(story[:, None, :], (*bb['k0'].shape, u.shape[1]))
+        force, tangent, damage, defect, machine = _hysteresis_history(drift, bb, state)
+        return (assemble_pseudo_force(defect.sum(axis=1)),
+                HysteresisAux(machine, story, drift, force, tangent, damage))
+    return constitutive
+
+
+def _torsion_constitutive(bb_x, bb_y, positions):
+    """Spec 12 B2+B3: two independent per-column state machines, one placement.
+
+    The two bending axes of a column are kept independent -- one state
+    machine per (story, column, axis), with NO biaxial interaction surface.
+    That is a real approximation, not a simplification of bookkeeping:
+    biaxial bending reduces a column's capacity in both directions at once,
+    so this model is unconservative for a column driven hard on both axes
+    simultaneously. A circular/elliptical interaction is research-grade and
+    deliberately out of scope (spec 12 B2).
+    """
+    def constitutive(u, state=None):
+        sx, sy = state if state is not None else (None, None)
+        dx, dy = column_drift_3N(u, positions)
+        fx, tx, gx, ex, mx = _hysteresis_history(dx, bb_x, sx)
+        fy, ty, gy, ey, my = _hysteresis_history(dy, bb_y, sy)
+        N = u.shape[0] // 3
+        story = (np.diff(u[:N], axis=0, prepend=np.zeros((1, u.shape[1]))),
+                 np.diff(u[N:2 * N], axis=0, prepend=np.zeros((1, u.shape[1]))))
+        return (assemble_pseudo_force_3N(ex, ey, positions),
+                HysteresisAux((mx, my), story, (dx, dy), (fx, fy),
+                              (tx, ty), (gx, gy)))
+    return constitutive
 
 
 def evaluate_collapse_criteria(result, building):
@@ -1111,13 +1525,19 @@ def evaluate_collapse_criteria(result, building):
     """
     r, p, bb = result, result.backbones['params'], result.backbones
     drift = r.story_drift
-    mu = abs(drift[:,None,:])/bb['dy'][:,:,None]
+    # Capacity is a per-column property, so ductility and fracture are
+    # evaluated on the per-column drift; the descriptive story-level
+    # thresholds and the reported residual stay on the story drift, which
+    # is the centre-of-mass quantity the viewer and the wire format carry.
+    col = r.column_drift if r.column_drift is not None else np.broadcast_to(
+        drift[:,None,:], (*bb['dy'].shape, drift.shape[-1]))
+    mu = abs(col)/bb['dy'][:,:,None]
     kt = r.column_tangent.sum(axis=1)
     first = lambda mask: float(np.argmax(mask)*r.dt) if np.any(mask) else None
-    fail = [[first(abs(drift[i]) > bb['du'][i,j]) for j in range(4)] for i in range(building.N)]
+    fail = [[first(abs(col[i,j]) > bb['du'][i,j]) for j in range(4)] for i in range(building.N)]
     times, criteria, directions = [], [], []
     for i in range(building.N):
-        masks = [abs(drift[i])/building.h[i] > p['drift_limit_cp'],
+        masks = [np.max(abs(col[i]),axis=0)/building.h[i] > p['drift_limit_cp'],
                  np.max(mu[i],axis=0) > p['collapse_mu_cap'],
                  kt[i] <= (building.k_g[i] if building.p_delta else 0.)]
         hits = [(int(np.argmax(m)),name) for m,name in zip(masks,('drift','ductility','gravity')) if np.any(m)] if r.converged else []
@@ -1151,6 +1571,9 @@ class _HFTDConvolution:
                  overlap_seconds=None):
         self.building = building
         self.npts = npts
+        # DOF count, not story count: the coupled 3N kernel runs the same
+        # modal overlap-save with phi shaped (3N, 3N).
+        self.ndof = building.phi.shape[0]
         settle = 5 / (building.zeta * building.omega_n[0])
         requested_guard = int(np.ceil(3 * settle / dt))
         self.guard = min(requested_guard, 200000)
@@ -1176,7 +1599,7 @@ class _HFTDConvolution:
             end = min(start + self.block_size, self.npts)
             left = max(0, start - self.overlap)
             size = end - left
-            padded = np.zeros((b.N, self.length))
+            padded = np.zeros((self.ndof, self.length))
             padded[:, self.guard:self.guard + size] = force[:, left:end]
             padded[:, self.guard + size:] = force[:, end - 1, None]
             q = self.compliance * (b.phi.T @ fft(padded, axis=1))
@@ -1189,7 +1612,7 @@ class _HFTDConvolution:
 
 
 
-def _causal_fft_predictor(building, base, bb, convolution, dt, max_iterations):
+def _causal_fft_predictor(building, base, constitutive, convolution, dt, max_iterations):
     """Causal block predictor for the whole-record FFT fixed point.
 
     The positive-time samples of IFFT(H) form a Volterra convolution.
@@ -1197,6 +1620,17 @@ def _causal_fft_predictor(building, base, bb, convolution, dt, max_iterations):
     blocks contribute through FFT convolution, with frozen causal state.
     This predicts forces only. The requested whole-record/overlap-save
     operator must still pass its unchanged residual test afterward.
+
+    The block length is that contraction knob, so a block that runs out of
+    iterations HALVES it and retries the same block rather than abandoning
+    the whole prediction. Spec 12 is what made this necessary: the coupled
+    3N map contracts more slowly than the per-axis one -- measurably
+    contracting, just not inside the budget -- and giving up dropped the
+    solve back to plain relaxation, which stalls near a residual of 0.6
+    and never converges. Completed blocks stay valid when the schedule
+    changes, so nothing already solved is recomputed. The per-axis path
+    never exhausts the budget at 1.0 s, so it never halves and its numbers
+    are unchanged.
     """
     b = building
     n = base.shape[1]
@@ -1207,18 +1641,20 @@ def _causal_fft_predictor(building, base, bb, convolution, dt, max_iterations):
     local_length = next_fast_len(2 * block - 1)
     local_kernel = rfft(kernel[:, :block], n=local_length, axis=1)
     past, force = np.zeros_like(base), np.zeros_like(base)
-    state = ColumnHysteresis(bb)
+    state = None
     total_iterations = 0
-    for start in range(0, n, block):
+    start = 0
+    while start < n:
         end = min(n, start + block)
         size = end - start
-        trial = np.repeat(force[:, start-1:start], size, axis=1) if start else np.zeros((b.N, size))
+        trial = np.repeat(force[:, start-1:start], size, axis=1) if start else np.zeros((base.shape[0], size))
         for _ in range(max_iterations):
             total_iterations += 1
             modal = b.phi.T @ trial
             correction = b.phi @ irfft(local_kernel * rfft(modal, n=local_length, axis=1), n=local_length, axis=1)[:, :size]
             u = base[:, start:end] + past[:, start:end] + correction
-            _, _, _, _, candidate, next_state = _hysteresis_history(u, bb, state)
+            candidate, aux = constitutive(u, state)
+            next_state = aux.state
             error = np.linalg.norm(candidate-trial) / max(np.linalg.norm(candidate), 1.)
             if not np.isfinite(error):
                 return None, total_iterations
@@ -1230,14 +1666,93 @@ def _causal_fft_predictor(building, base, bb, convolution, dt, max_iterations):
                 break
             trial = candidate
         else:
-            return None, total_iterations
+            if block <= 2:
+                return None, total_iterations
+            block = max(2, block // 2)
+            local_length = next_fast_len(2 * block - 1)
+            local_kernel = rfft(kernel[:, :block], n=local_length, axis=1)
+            continue
         state = next_state
         force[:, start:end] = trial
         modal = b.phi.T @ trial
         response = b.phi @ irfft(kernel_fft * rfft(modal, n=length, axis=1), n=length, axis=1)[:, :n-start]
         past[:, end:] += response[:, size:]
+        start = end
     return force, total_iterations
 
+
+
+def _hftd_fixed_point(building, base, constitutive, convolution, dt, p, dy_min):
+    """The shared pseudo-force fixed point: causally seeded, Anderson-mixed.
+
+    DOF-agnostic. `base` is the elastic response on whatever DOF set the
+    building has -- (N, npts) per axis, (3N, npts) coupled -- and
+    `constitutive` maps a displacement history to a pseudo-force on those
+    same DOFs. The per-axis and 3N paths differ ONLY in that callable and
+    in how the converged history is packaged afterwards, never in the
+    iteration itself, so there is still exactly one fixed point in the
+    codebase rather than a torsional copy of it.
+
+    Returns the converged force, the displacement history it produced, the
+    last constitutive `HysteresisAux`, and the loop's own diagnostics.
+    """
+    n = base.shape[1]
+    force = np.zeros_like(base)
+    history=[]
+    previous_force = previous_residual = None
+    force_steps, residual_steps = [], []
+    converged=False
+    predictor_iterations = 0
+    quiet_prefix = 0
+    causality_error = 0.
+    u=base.copy()
+    for iteration in range(1,int(p['hftd_max_iterations'])+1):
+        if iteration == 3:
+            predicted, predictor_iterations = _causal_fft_predictor(
+                building, base, constitutive, convolution, dt, int(p['hftd_max_iterations']))
+            if predicted is not None:
+                force = predicted
+                active = np.any(force != 0, axis=0)
+                # Stay away from the first force corner: finite-bandwidth
+                # interpolation has a small local pre-ringing there.
+                quiet_prefix = int(np.argmax(active)) // 2 if np.any(active) else n
+                previous_force = previous_residual = None
+                force_steps, residual_steps = [], []
+        if np.any(force):
+            correction,_,_ = convolution.apply(force)
+            u=base+correction
+        candidate, aux = constitutive(u)
+        residual = candidate-force
+        change=p['hftd_relaxation']*residual
+        updated=force+change
+        norm=float(np.linalg.norm(change)/max(np.linalg.norm(updated),1e-30))
+        history.append(norm)
+        if not np.isfinite(norm) or not np.all(np.isfinite(u)):
+            break
+        if quiet_prefix:
+            causality_error = float(np.max(abs(u[:, :quiet_prefix]-base[:, :quiet_prefix])) / dy_min)
+            if causality_error > p['hftd_tolerance']:
+                break
+        if norm < p['hftd_tolerance']:
+            converged=True
+            break
+        if iteration < p['hftd_max_iterations']:
+            # Anderson mixing accelerates the same FFT fixed point; it does
+            # not introduce a time integrator or alter the residual test.
+            if previous_force is not None:
+                force_steps.append((force-previous_force).reshape(-1))
+                residual_steps.append((residual-previous_residual).reshape(-1))
+                force_steps, residual_steps = force_steps[-20:], residual_steps[-20:]
+                D = np.stack(residual_steps,axis=1)
+                gram = D.T@D
+                regularizer = max(float(np.trace(gram))*1e-12,1e-30)
+                weights = np.linalg.solve(gram+regularizer*np.eye(len(force_steps)),D.T@residual.reshape(-1))
+                accelerated = updated.reshape(-1)-(np.stack(force_steps,axis=1)+p['hftd_relaxation']*D)@weights
+                if np.all(np.isfinite(accelerated)) and np.linalg.norm(accelerated) <= 10*max(np.linalg.norm(force)+np.linalg.norm(candidate),1e-30):
+                    updated=accelerated.reshape(force.shape)
+            previous_force, previous_residual = force.copy(), residual.copy()
+            force=updated
+    return force, u, aux, iteration, history, converged, predictor_iterations, causality_error
 
 
 def solve_hftd(building, accel, disp, dt, params=None):
@@ -1276,7 +1791,8 @@ def solve_hftd(building, accel, disp, dt, params=None):
     building.compute_response(a, d, dt, nonlinear=False)
     for name in ('u_rel', 'u_abs', 'story_drift', 'story_shear', 'k_t_ratio',
                  'p_nl', 'damage_state', 'column_damage', 'velocity',
-                 'acceleration', 'column_force', 'column_tangent'):
+                 'acceleration', 'column_force', 'column_tangent',
+                 'column_drift'):
         setattr(result, name, getattr(result, name)[..., ::factor].copy())
     result.u_abs = result.u_rel + d[None, :]
     result.dt = dt
@@ -1306,6 +1822,7 @@ def _solve_hftd_grid(building, accel, disp, dt, params=None):
         raise ValueError('ground traces must be finite matching 1-D arrays and dt positive')
     bb = build_backbones(building, **p)
     building.compute_response(a,d,dt,nonlinear=False)
+    constitutive = _per_axis_constitutive(bb)
     base = building.floor_disp_rel.copy()
     base_acc = building.floor_accel_rel.copy()
     n, N = len(a), building.N
@@ -1320,61 +1837,12 @@ def _solve_hftd_grid(building, accel, disp, dt, params=None):
         old_den=building.omega_n[i]**2-old_w**2+2j*building.zeta*building.omega_n[i]*old_w
         q=(-building.Gamma[i]/old_den)*af
         base_vel+=np.outer(building.phi[:,i],np.real(ifft(1j*old_w*q))[:n])
-    force = np.zeros_like(base)
-    history=[]
-    previous_force = previous_residual = None
-    force_steps, residual_steps = [], []
-    converged=False
-    predictor_iterations = 0
-    quiet_prefix = 0
-    causality_error = 0.
-    u=base.copy(); velocity=base_vel.copy(); acceleration=base_acc.copy()
-    for iteration in range(1,int(p['hftd_max_iterations'])+1):
-        if iteration == 3:
-            predicted, predictor_iterations = _causal_fft_predictor(
-                building, base, bb, convolution, dt, int(p['hftd_max_iterations']))
-            if predicted is not None:
-                force = predicted
-                active = np.any(force != 0, axis=0)
-                # Stay away from the first force corner: finite-bandwidth
-                # interpolation has a small local pre-ringing there.
-                quiet_prefix = int(np.argmax(active)) // 2 if np.any(active) else n
-                previous_force = previous_residual = None
-                force_steps, residual_steps = [], []
-        if np.any(force):
-            correction,_,_ = convolution.apply(force)
-            u=base+correction
-        drift, vf, kt, damage, candidate, machine = _hysteresis_history(u,bb)
-        residual = candidate-force
-        change=p['hftd_relaxation']*residual
-        updated=force+change
-        norm=float(np.linalg.norm(change)/max(np.linalg.norm(updated),1e-30))
-        history.append(norm)
-        if not np.isfinite(norm) or not np.all(np.isfinite(u)):
-            break
-        if quiet_prefix:
-            causality_error = float(np.max(abs(u[:, :quiet_prefix]-base[:, :quiet_prefix])) / np.min(bb['dy']))
-            if causality_error > p['hftd_tolerance']:
-                break
-        if norm < p['hftd_tolerance']:
-            converged=True
-            break
-        if iteration < p['hftd_max_iterations']:
-            # Anderson mixing accelerates the same FFT fixed point; it does
-            # not introduce a time integrator or alter the residual test.
-            if previous_force is not None:
-                force_steps.append((force-previous_force).reshape(-1))
-                residual_steps.append((residual-previous_residual).reshape(-1))
-                force_steps, residual_steps = force_steps[-20:], residual_steps[-20:]
-                D = np.stack(residual_steps,axis=1)
-                gram = D.T@D
-                regularizer = max(float(np.trace(gram))*1e-12,1e-30)
-                weights = np.linalg.solve(gram+regularizer*np.eye(len(force_steps)),D.T@residual.reshape(-1))
-                accelerated = updated.reshape(-1)-(np.stack(force_steps,axis=1)+p['hftd_relaxation']*D)@weights
-                if np.all(np.isfinite(accelerated)) and np.linalg.norm(accelerated) <= 10*max(np.linalg.norm(force)+np.linalg.norm(candidate),1e-30):
-                    updated=accelerated.reshape(force.shape)
-            previous_force, previous_residual = force.copy(), residual.copy()
-            force=updated
+    force, u, aux, iteration, history, converged, predictor_iterations, causality_error = \
+        _hftd_fixed_point(building, base, constitutive, convolution, dt, p,
+                          float(np.min(bb['dy'])))
+    drift, vf, kt, damage, machine = (aux.story_drift, aux.force, aux.tangent,
+                                      aux.damage, aux.state)
+    velocity=base_vel.copy(); acceleration=base_acc.copy()
     if np.any(force):
         _,correction_velocity,correction_acceleration=convolution.apply(force,True)
         velocity=base_vel+correction_velocity
@@ -1396,6 +1864,7 @@ def _solve_hftd_grid(building, accel, disp, dt, params=None):
                 closure_error=(kinetic+strain+damp+hysteretic_work-input_energy)/max(abs(input_energy),1e-30))
     result=HFTDResult(u,u+d[None,:],drift,vf.sum(axis=1),kt.sum(axis=1)/building.k0_profile[:,None],
         force,np.max(damage,axis=1),damage,converged,iteration,history,energy,velocity,acceleration+a[None,:],vf,kt,bb,dt,
+        column_drift=aux.column_drift,
         segments=convolution.segments, padding_capped=convolution.padding_capped,
         reason='' if converged else 'Pseudo-force iteration did not converge; no collapse is inferred.')
     evaluate_collapse_criteria(result,building)
@@ -1404,6 +1873,250 @@ def _solve_hftd_grid(building, accel, disp, dt, params=None):
         result.summary['reason'] = result.reason
     result.summary['causality_error'] = causality_error
     result.summary['predictor_iterations'] = predictor_iterations
+    return result
+
+
+def _column_spring_stiffness_3N(k0_x, k0_y, positions):
+    """sum_ij T_ij^T k0,ij T_ij -- the per-column story springs placed on 3N.
+
+    The same `T_ij` as `column_drift_3N` / `assemble_pseudo_force_3N`,
+    written once as a matrix so the energy balance's "everything that is
+    NOT a yielding story spring" term is the exact complement of what the
+    pseudo-force replaces. `B = I - shift` turns a column's lateral
+    displacement into its story drift.
+    """
+    N = k0_x.shape[0]
+    B = np.eye(N) - np.eye(N, k=-1)
+    K = np.zeros((3 * N, 3 * N))
+    for j, (xj, yj) in enumerate(positions):
+        for kind, off, k0 in (("X", yj, k0_x[:, j]), ("Y", xj, k0_y[:, j])):
+            T = B @ frame_transform(N, off, kind)
+            K += T.T @ (k0[:, None] * T)
+    return K
+
+
+@dataclass
+class HFTD3NResult:
+    """The coupled nonlinear result: 3N histories plus two per-axis views.
+
+    `x` and `y` are ordinary `HFTDResult`s carrying that bending axis's
+    per-column arrays, so `evaluate_collapse_criteria` runs on them
+    unchanged -- drift limits, ductility and the gravity tangent test are
+    genuinely per-axis quantities and there is no second copy of them here.
+    The `energy` dict is the COUPLED balance and is therefore the same
+    object on both views; it is not separable per axis.
+    """
+    u_rel: np.ndarray
+    p_nl: np.ndarray
+    velocity: np.ndarray
+    acceleration: np.ndarray
+    x: HFTDResult
+    y: HFTDResult
+    converged: bool
+    iterations: int
+    residual_history: list
+    energy: dict
+    dt: float
+    positions: np.ndarray
+    collapse_events: list = field(default_factory=list)
+    summary: dict = field(default_factory=dict)
+    segments: int = 1
+    padding_capped: bool = False
+    reason: str = ''
+
+    @property
+    def theta(self):
+        """Floor rotation history (N, npts), radians about +Z."""
+        return self.u_rel[2 * (self.u_rel.shape[0] // 3):]
+
+
+def tangent_eccentricity(result):
+    """Tangent centre-of-rigidity offset per story, (2, N, npts) (spec A3).
+
+    e_x,i(t) = sum_j kt_x,ij*y_j / sum_j kt_x,ij  -- the offset, along y, of
+    the centre that resists X-sway; e_y,i(t) is its x-offset counterpart.
+    `build_backbones` gives all four columns k0/4 exactly, so before any
+    yielding every kt is equal and both are 0.0 exactly -- that is a
+    property of the code, not a hope (verification correction V-3).
+    """
+    x, y = result.positions[:, 0], result.positions[:, 1]
+    out = []
+    for kt, coord in ((result.x.column_tangent, y), (result.y.column_tangent, x)):
+        out.append(np.einsum('ijt,j->it', kt, coord) / kt.sum(axis=1))
+    return np.array(out)
+
+
+def _solve_hftd_grid_3N(building, ax, dx, ay, dy, dt, params=None):
+    """Spec 12 B2/B3: the pseudo-force fixed point on the coupled 3N system.
+
+    Identical in structure to `_solve_hftd_grid` -- same elastic base, same
+    modal FFT convolution, same Anderson-mixed fixed point, shared through
+    `_hftd_fixed_point`. What changes is the constitutive callable: every
+    column now has its own drift on each of two bending axes, and the
+    defect is placed through `T_ij^T` instead of the single-index
+    `p_i = s_i - s_{i+1}`.
+
+    `K_3N`, `Phi` and `omega_n` are built once by the building's own
+    constructor and never touched inside the iteration; re-forming them per
+    iteration is the thing the performance gate is watching for.
+    """
+    p = {**HFTD_DEFAULTS, **(params or {})}
+    scale = p['intensity_scale']
+    ax, dx = np.asarray(ax, dtype=float)*scale, np.asarray(dx, dtype=float)*scale
+    ay, dy = np.asarray(ay, dtype=float)*scale, np.asarray(dy, dtype=float)*scale
+    for trace in (ax, dx, ay, dy):
+        if trace.ndim != 1 or trace.shape != ax.shape or len(ax) < 2 or not np.all(np.isfinite(trace)):
+            raise ValueError('ground traces must be finite matching 1-D arrays')
+    if not np.isfinite(dt) or dt <= 0:
+        raise ValueError('dt must be finite and positive')
+
+    bb_x = build_backbones(building.bx, **p)
+    bb_y = build_backbones(building.by, **p)
+    positions = building.column_positions
+    constitutive = _torsion_constitutive(bb_x, bb_y, positions)
+
+    building.compute_response(ax, dx, ay, dy, dt, nonlinear=False)
+    base = building.floor_disp_rel.copy()
+    base_acc = building.floor_accel_rel.copy()
+    base_vel = building.floor_vel_rel.copy()
+    n, N = len(ax), building.N
+    convolution = _HFTDConvolution(building, n, dt, p['hftd_segment_seconds'])
+
+    force, u, aux, iteration, history, converged, predictor_iterations, causality_error = \
+        _hftd_fixed_point(building, base, constitutive, convolution, dt, p,
+                          float(min(np.min(bb_x['dy']), np.min(bb_y['dy']))))
+    (mx, my) = aux.state
+    velocity, acceleration = base_vel.copy(), base_acc.copy()
+    if np.any(force):
+        _, correction_velocity, correction_acceleration = convolution.apply(force, True)
+        velocity = base_vel + correction_velocity
+        acceleration = base_acc + correction_acceleration
+
+    # Same energy decomposition as the per-axis solver, summed over the two
+    # bending axes. Everything the per-column springs do NOT represent --
+    # the frames' flexural coupling and P-Delta -- stays elastic and is
+    # carried by `coupling`.
+    springs = _column_spring_stiffness_3N(bb_x['k0'], bb_y['k0'], positions)
+    coupling = building.K - springs
+    elastic_energy = .5*np.einsum('it,ij,jt->t', u, coupling, u)
+    spring_energy = (np.sum(.5*aux.force[0]**2/bb_x['k0'][:,:,None], axis=(0,1))
+                     + np.sum(.5*aux.force[1]**2/bb_y['k0'][:,:,None], axis=(0,1)))
+    hysteretic_work = float(np.sum(mx.work)+np.sum(my.work)) - spring_energy[-1]
+    if not (np.any(mx.yielded) or np.any(my.yielded)):
+        hysteretic_work = 0.
+    modal_velocity = building.phi.T@building.M@velocity
+    damp = float(np.trapezoid(np.sum(2*building.zeta*building.omega_n[:,None]*modal_velocity**2, axis=0), dx=dt))
+    momentum = building.M@velocity
+    input_energy = float(np.trapezoid(
+        -ax*np.sum(momentum[:N], axis=0) - ay*np.sum(momentum[N:2*N], axis=0), dx=dt))
+    kinetic = float(.5*velocity[:,-1]@building.M@velocity[:,-1])
+    strain = float(elastic_energy[-1]+spring_energy[-1])
+    energy = dict(input=input_energy, kinetic=kinetic, strain=strain, damping=damp,
+                  hysteretic=hysteretic_work,
+                  closure_error=(kinetic+strain+damp+hysteretic_work-input_energy)/max(abs(input_energy),1e-30))
+
+    reason = '' if converged else 'Pseudo-force iteration did not converge; no collapse is inferred.'
+    views = []
+    for k, (sub, bb, ground, accel_g) in enumerate((
+            (building.bx, bb_x, dx, ax), (building.by, bb_y, dy, ay))):
+        block = slice(k*N, (k+1)*N)
+        vf, kt, damage = aux.force[k], aux.tangent[k], aux.damage[k]
+        views.append(HFTDResult(
+            u[block], u[block]+ground[None,:], aux.story_drift[k],
+            vf.sum(axis=1), kt.sum(axis=1)/sub.k0_profile[:,None],
+            force[block], np.max(damage, axis=1), damage, converged, iteration,
+            history, energy, velocity[block], acceleration[block]+accel_g[None,:],
+            vf, kt, bb, dt, column_drift=aux.column_drift[k],
+            segments=convolution.segments,
+            padding_capped=convolution.padding_capped, reason=reason))
+    rx, ry = views
+
+    result = HFTD3NResult(
+        u, force, velocity, acceleration, rx, ry, converged, iteration, history,
+        energy, dt, positions, segments=convolution.segments,
+        padding_capped=convolution.padding_capped, reason=reason)
+    evaluate_collapse_criteria(rx, building.bx)
+    evaluate_collapse_criteria(ry, building.by)
+    result.collapse_events = rx.collapse_events + ry.collapse_events
+    result.summary = dict(x=rx.summary, y=ry.summary, converged=converged,
+                          iterations=iteration, reason=reason,
+                          residual_history=history, segments=convolution.segments,
+                          padding_capped=convolution.padding_capped,
+                          collapse_events=result.collapse_events,
+                          peak_rotation=float(np.max(abs(result.theta))),
+                          residual_rotation=result.theta[:,-1].tolist())
+    if causality_error > p['hftd_tolerance']:
+        result.reason = 'FFT tail dynamic range contaminated the causal prefix; no collapse is inferred.'
+        result.summary['reason'] = result.reason
+    result.summary['causality_error'] = causality_error
+    result.summary['predictor_iterations'] = predictor_iterations
+    return result
+
+
+def solve_hftd_3N(building, ax, dx, ay, dy, dt, params=None):
+    """`solve_hftd`'s adaptive 4x sampling wrapper, on the coupled system.
+
+    DOF-agnostic by construction -- the refinement is of the ground traces
+    and of the output slicing, neither of which knows how many DOFs a floor
+    has. Both components are resampled on the same grid so the pairing
+    `pair_components` established survives the refinement.
+    """
+    p = {**HFTD_DEFAULTS, **(params or {})}
+    a_x = np.asarray(ax, dtype=float)*p['intensity_scale']
+    a_y = np.asarray(ay, dtype=float)*p['intensity_scale']
+    bb_x = build_backbones(building.bx, **p)
+    bb_y = build_backbones(building.by, **p)
+    building.compute_response(a_x, np.asarray(dx, dtype=float)*p['intensity_scale'],
+                              a_y, np.asarray(dy, dtype=float)*p['intensity_scale'],
+                              dt, nonlinear=False)
+    cdx, cdy = column_drift_3N(building.floor_disp_rel, building.column_positions)
+    if (np.all(np.max(abs(cdx), axis=-1) <= bb_x['dy'])
+            and np.all(np.max(abs(cdy), axis=-1) <= bb_y['dy'])):
+        result = _solve_hftd_grid_3N(building, ax, dx, ay, dy, dt, p)
+        result.summary['sampling_factor'] = 1
+        return result
+
+    from scipy.signal import resample
+    factor = 4
+    n = len(a_x)
+    settle = 5/(building.zeta*building.omega_n[0])
+    length = min(4*n, n + int(np.ceil(settle/dt)))
+    count = (n-1)*factor + 1
+    fine = [resample(np.pad(np.asarray(t, dtype=float)*p['intensity_scale'], (0, length-n)),
+                     length*factor)[:count]
+            for t in (ax, dx, ay, dy)]
+    result = _solve_hftd_grid_3N(building, *fine, dt/factor,
+                                 {**p, 'intensity_scale': 1.})
+    building.compute_response(a_x, np.asarray(dx, dtype=float)*p['intensity_scale'],
+                              a_y, np.asarray(dy, dtype=float)*p['intensity_scale'],
+                              dt, nonlinear=False)
+    for holder in (result, result.x, result.y):
+        for name in ('u_rel', 'u_abs', 'story_drift', 'story_shear', 'k_t_ratio',
+                     'p_nl', 'damage_state', 'column_damage', 'velocity',
+                     'acceleration', 'column_force', 'column_tangent',
+                     'column_drift'):
+            value = getattr(holder, name, None)
+            if value is not None:
+                setattr(holder, name, value[..., ::factor].copy())
+        holder.dt = dt
+    result.x.u_abs = result.x.u_rel + np.asarray(dx, dtype=float)[None,:]*p['intensity_scale']
+    result.y.u_abs = result.y.u_rel + np.asarray(dy, dtype=float)[None,:]*p['intensity_scale']
+    result.x.backbones['params'] = p
+    result.y.backbones['params'] = p
+    predictor_iterations = result.summary['predictor_iterations']
+    causality_error = result.summary['causality_error']
+    result.collapse_events = []
+    result.x.collapse_events, result.y.collapse_events = [], []
+    evaluate_collapse_criteria(result.x, building.bx)
+    evaluate_collapse_criteria(result.y, building.by)
+    result.collapse_events = result.x.collapse_events + result.y.collapse_events
+    result.summary.update(x=result.x.summary, y=result.y.summary,
+                          collapse_events=result.collapse_events,
+                          peak_rotation=float(np.max(abs(result.theta))),
+                          residual_rotation=result.theta[:,-1].tolist(),
+                          sampling_factor=factor,
+                          predictor_iterations=predictor_iterations,
+                          causality_error=causality_error)
     return result
 
 
@@ -1991,6 +2704,421 @@ class MDOF_ShearBuilding:
         print(f"Saved response to {filename}")
 
 
+# --- Spec 12: the coupled 3N building -------------------------------------
+
+class MDOF_Building3N:
+    """Three DOFs per floor -- u_x, u_y and theta_z -- in ONE coupled solve.
+
+    Spec 11 gave every (story, column) its own hysteresis, but in a
+    one-lateral-DOF-per-floor model that asymmetry has no dynamic
+    consequence: all four columns share one drift, so a weakened east
+    column changes nothing about how the building moves. With a rotational
+    DOF the feedback -- twist -> more demand on the damaged side -> more
+    damage -> more twist -- emerges from the dynamics instead of being
+    animated.
+
+    This is still modal frequency-domain FFT convolution. `M` and `K_3N`
+    are both real symmetric, so `Phi^T M Phi = I` still diagonalises and
+    the system stays classically dampable with one shared `zeta` across
+    all 3N modes -- that property is exactly what lets the FFT kernel
+    survive the change (spec A5). Newmark remains validation-only.
+
+    DOF ordering is `[u_x,1..N, u_y,1..N, theta_1..N]` throughout; see the
+    "Spec 12" block beside the frame math for the sign convention and the
+    pinned column plan positions.
+
+    **This is a new class, not a mutation of MDOF_ShearBuilding.** It
+    *holds* two per-axis MDOF_ShearBuilding instances (`self.bx`,
+    `self.by`) and takes `k0_profile`, `V_p_profile`, `delta_y_profile`
+    and the nonlinear backbones from them unchanged. That is not
+    convenience: `story_stiffness_profile` is a first-mode pushover of a
+    single-axis condensed frame, and there is no meaningful "first-mode
+    pushover" of a coupled 3N system that reproduces those numbers (spec
+    correction C-2). It also keeps spec 11's per-column backbones and the
+    elastic 3N assembly derived from the *same* condensed frames, with no
+    second definition of story stiffness introduced, and it is what makes
+    verification check 1's bit-identity reachable at all.
+    """
+
+    def __init__(self, num_stories, mass_per_floor=1000e3, zeta=0.05,
+                 story_height=3.5, column_depth_x=1.10, column_depth_y=1.10,
+                 beam_depth=1.50, E=E_CONCRETE,
+                 plan_span_x=PLAN_SPAN_X, plan_span_y=PLAN_SPAN_Y,
+                 section_stiffness_mode=DEFAULT_SECTION_STIFFNESS_MODE,
+                 cracked_factor_column=None, cracked_factor_beam=None,
+                 p_delta=True,
+                 f_y=F_Y_STEEL, f_c=F_C_CONCRETE,
+                 rho_longitudinal=RHO_LONGITUDINAL,
+                 concrete_cover=CONCRETE_COVER, phi_axial=PHI_AXIAL,
+                 axial_cap_factor=AXIAL_CAP_FACTOR,
+                 nonlinear=False, **nonlinear_params):
+        per_axis = dict(
+            num_stories=num_stories, mass_per_floor=mass_per_floor,
+            zeta=zeta, story_height=story_height,
+            column_depth_x=column_depth_x, column_depth_y=column_depth_y,
+            beam_depth=beam_depth, E=E,
+            plan_span_x=plan_span_x, plan_span_y=plan_span_y,
+            section_stiffness_mode=section_stiffness_mode,
+            cracked_factor_column=cracked_factor_column,
+            cracked_factor_beam=cracked_factor_beam,
+            p_delta=p_delta, f_y=f_y, f_c=f_c,
+            rho_longitudinal=rho_longitudinal, concrete_cover=concrete_cover,
+            phi_axial=phi_axial, axial_cap_factor=axial_cap_factor,
+            nonlinear=nonlinear, **nonlinear_params)
+
+        # Two cheap elastic eigensolves. They also mean a gravity-unstable
+        # parameter set raises with the per-axis machinery's story
+        # diagnostic before the 3N assembly is even built.
+        self.bx = MDOF_ShearBuilding(axis="X", **per_axis)
+        self.by = MDOF_ShearBuilding(axis="Y", **per_axis)
+
+        self.nonlinear = bool(nonlinear)
+        self.nonlinear_params = nonlinear_params
+        self.N = num_stories
+        self.m = mass_per_floor
+        self.zeta = zeta
+        self.h = self.bx.h
+        self.total_height = self.bx.total_height
+        self.E = E
+        self.plan_span_x = plan_span_x
+        self.plan_span_y = plan_span_y
+        self.section_stiffness_mode = self.bx.section_stiffness_mode
+        self.cracked_factor_column = self.bx.cracked_factor_column
+        self.cracked_factor_beam = self.bx.cracked_factor_beam
+        self.p_delta = bool(p_delta)
+        self.gravity_unstable = False
+
+        self.column_positions = column_plan_positions(plan_span_x, plan_span_y)
+
+        # Per-axis capacity/stiffness profiles, taken unchanged (C-2). Named
+        # `*_x` / `*_y` rather than collapsed into one array, because a
+        # column's plastic shear genuinely differs by bending axis.
+        self.k0_profile_x = self.bx.k0_profile
+        self.k0_profile_y = self.by.k0_profile
+        self.V_p_profile_x = self.bx.V_p_profile
+        self.V_p_profile_y = self.by.V_p_profile
+        self.delta_y_profile_x = self.bx.delta_y_profile
+        self.delta_y_profile_y = self.by.delta_y_profile
+
+        self._build_matrices()
+        self._modal_analysis()
+
+    def _build_matrices(self):
+        N = self.N
+        self.M = mass_matrix_3N(N, self.m, self.plan_span_x, self.plan_span_y)
+
+        # Same cracked-section knock-down as the per-axis class, taken from
+        # the instances themselves so the two can never disagree.
+        self.I_c_x = self.bx.I_c
+        self.I_c_y = self.by.I_c
+        self.I_b = self.bx.I_b
+
+        self.K_no_pdelta = assemble_K3N(
+            N, self.E, self.I_c_x, self.I_c_y, self.I_b, self.h,
+            self.plan_span_x, self.plan_span_y)
+
+        self.K_G, self.k_g, self.P_gravity = geometric_stiffness_3N(
+            N, self.m, self.h, self.plan_span_x, self.plan_span_y)
+
+        if self.p_delta:
+            self.K = self.K_no_pdelta - self.K_G
+        else:
+            # Assigned directly, not via a zero-scaled subtraction, so the
+            # regression path is bit-identical rather than merely close --
+            # same reason as MDOF_ShearBuilding._build_matrices.
+            self.K = self.K_no_pdelta
+
+    def _modal_analysis(self):
+        """Generalized eigenproblem K_3N Phi = omega^2 M Phi, over 3N modes."""
+        n = 3 * self.N
+        eigvals, eigvecs = scipy_eigh(self.K, self.M, lower=True)
+        idx = np.argsort(eigvals)
+
+        # Gravity-instability guard BEFORE np.sqrt -- see
+        # GravityInstabilityError's docstring for where the nan would
+        # otherwise surface. The 3N system can go unstable torsionally as
+        # well as laterally, so the message names which block the failing
+        # mode lives in rather than assuming it is lateral.
+        if eigvals[idx][0] <= 0.0:
+            self.gravity_unstable = True
+            v = eigvecs[:, idx[0]]
+            share = [float(np.sum(v[k * self.N:(k + 1) * self.N] ** 2))
+                     for k in range(3)]
+            block = ("u_x", "u_y", "theta_z")[int(np.argmax(share))]
+            story = self.bx._weakest_story()
+            raise GravityInstabilityError(
+                f"Gravity exceeds lateral stiffness: the building cannot "
+                f"stand under its own weight at these parameters (3N "
+                f"coupled model, failing mode is dominantly {block}; "
+                f"weakest lateral story {story + 1} of {self.N}; smallest "
+                f"eigenvalue {float(eigvals[idx][0]):.6e} <= 0). Reduce the "
+                f"mass or story height, or increase the column depth.",
+                story=story)
+
+        self.omega_n = np.sqrt(eigvals[idx])
+        self.phi = eigvecs[:, idx]
+        for i in range(n):
+            norm = np.sqrt(np.dot(self.phi[:, i].conj(), self.M @ self.phi[:, i]))
+            self.phi[:, i] /= norm
+
+        # Influence vectors for translational base excitation: unit
+        # displacement of every floor in one direction, and **zero on the
+        # theta DOFs** -- the ground translates, it does not spin.
+        self.iota_x = np.zeros(n)
+        self.iota_x[:self.N] = 1.0
+        self.iota_y = np.zeros(n)
+        self.iota_y[self.N:2 * self.N] = 1.0
+
+        self.Gamma_x = self.phi.T @ (self.M @ self.iota_x)
+        self.Gamma_y = self.phi.T @ (self.M @ self.iota_y)
+
+        # Gamma^theta is the rotational share of that load vector. M is
+        # block-diagonal and iota is zero on the theta DOFs, so this is
+        # identically zero -- which is the point. A nonzero value means the
+        # mass matrix picked up spurious u-theta coupling or an influence
+        # vector was built with 1s in the theta block, and either would
+        # otherwise show up only as a wrong answer. Verification check 4
+        # asserts it rather than assuming it.
+        rot = slice(2 * self.N, 3 * self.N)
+        self.Gamma_theta = (
+            self.phi[rot, :].T @ (self.M @ self.iota_x)[rot]
+            + self.phi[rot, :].T @ (self.M @ self.iota_y)[rot])
+
+        # Modal mass share per DOF block, used to say which modes are
+        # torsional. Sums to 1 per mode because Phi is mass-normalised.
+        self.modal_block_share = np.vstack([
+            np.einsum('in,ij,jn->n',
+                      self.phi[k * self.N:(k + 1) * self.N, :],
+                      self.M[k * self.N:(k + 1) * self.N,
+                             k * self.N:(k + 1) * self.N],
+                      self.phi[k * self.N:(k + 1) * self.N, :])
+            for k in range(3)])
+
+    def _modes_of_block(self, k):
+        """Ascending frequencies of the modes dominated by DOF block `k`."""
+        which = np.argmax(self.modal_block_share, axis=0) == k
+        return self.omega_n[which]
+
+    def torsional_frequencies(self):
+        """Ascending omega of the theta-dominated modes (rad/s)."""
+        return self._modes_of_block(2)
+
+    def lateral_frequencies(self, axis):
+        """Ascending omega of the u_x- or u_y-dominated modes (rad/s)."""
+        if axis not in ("X", "Y"):
+            raise ValueError(f"axis must be 'X' or 'Y', got {axis!r}")
+        return self._modes_of_block(0 if axis == "X" else 1)
+
+    def frequency_ratio(self, axis="X"):
+        """Omega = omega_theta,1 / omega_lateral,1 (spec A3).
+
+        Below ~1 marks a torsionally-flexible structure, which codes
+        restrict -- useful for spec 18.
+        """
+        return float(self.torsional_frequencies()[0]
+                     / self.lateral_frequencies(axis)[0])
+
+    # --- DOF-block addressing (spec 12 B4) -------------------------------
+
+    _DOF_BLOCK = {"X": 0, "Y": 1, "THETA": 2}
+
+    def dof_offset(self, axis="X"):
+        """Row offset of a DOF block in the `[u_x, u_y, theta]` ordering.
+
+        `phi[building.dof_offset('Y') + i, n]` is floor `i`'s u_y component
+        of mode `n`. This is what `transfer_function`'s `dof_offset`
+        argument takes: the Frequency tab's X/Y toggle selects a DOF block
+        of one 3N solve, not a separate solve (B4).
+        """
+        try:
+            return self.N * self._DOF_BLOCK[axis]
+        except KeyError:
+            raise ValueError(
+                f"axis must be 'X', 'Y' or 'THETA', got {axis!r}") from None
+
+    def participation(self, axis="X"):
+        """Gamma^x / Gamma^y / Gamma^theta, by the same axis names."""
+        self.dof_offset(axis)          # one place validates the name
+        return {"X": self.Gamma_x, "Y": self.Gamma_y,
+                "THETA": self.Gamma_theta}[axis]
+
+    # --- Response (spec 12 B1/B5) ----------------------------------------
+
+    def compute_response(self, accel_x, disp_x, accel_y, disp_y, dt,
+                         nonlinear=None):
+        """One coupled 3N solve driven by BOTH components simultaneously.
+
+            RHS(t) = -M ( iota_x a_g,x(t) + iota_y a_g,y(t) )
+
+        so modal coordinate `n` obeys
+
+            q_n'' + 2 zeta w_n q_n' + w_n^2 q_n
+                = -( Gamma_n^x a_g,x + Gamma_n^y a_g,y )
+
+        which is `MDOF_ShearBuilding.compute_response`'s per-mode solve
+        with a two-term forcing instead of one. Same H_n(jw), same
+        zero-padding rationale, same `min(4*npts, ...)` cap -- see that
+        method for why the padding exists at all.
+
+        The two components must already be paired onto one time base
+        (`pair_components`); this method does not re-align them.
+
+        **Why u_x(t) is not bit-identical to the per-axis solve**, even
+        though `K`'s u_x sub-block is (check 1's matrix half, and
+        verification correction V-10): the 3N eigensolve is one LAPACK
+        call over the whole `3N x 3N` pair, which reproduces the per-axis
+        eigenvalues to ~4e-16 relative rather than exactly; and `pad_len`
+        follows the slowest mode of the *coupled* system, which is
+        generally the other axis's. A blockwise eigensolve would recover
+        bit-identity, but only by making the "one solve" of B1 three
+        decoupled ones -- and it would make check 1 and check 4 true by
+        construction instead of testing the assembly. V-10 records the
+        measured departure the tolerance was set against.
+        """
+        if nonlinear is True or (nonlinear is None and self.nonlinear):
+            return self.compute_response_nonlinear(
+                accel_x, disp_x, accel_y, disp_y, dt)
+
+        accel_x = np.asarray(accel_x, dtype=float)
+        accel_y = np.asarray(accel_y, dtype=float)
+        if len(accel_x) != len(accel_y):
+            raise ComponentPairingError(
+                f"the two components must already be aligned to one length "
+                f"(got {len(accel_x)} and {len(accel_y)}); call "
+                f"pair_components first")
+
+        self.accel_x = accel_x
+        self.accel_y = accel_y
+        self.ground_disp_x = np.asarray(disp_x, dtype=float)
+        self.ground_disp_y = np.asarray(disp_y, dtype=float)
+        self.dt = dt
+        self.npts = len(accel_x)
+        self.time = np.arange(self.npts) * dt
+
+        settle_time = 5.0 / (self.zeta * self.omega_n[0])
+        pad_len = min(4 * self.npts,
+                      self.npts + int(np.ceil(settle_time / dt)))
+        self.pad_len = pad_len
+
+        ax_padded = np.zeros(pad_len)
+        ax_padded[:self.npts] = accel_x
+        ay_padded = np.zeros(pad_len)
+        ay_padded[:self.npts] = accel_y
+
+        Ax_fft = fft(ax_padded)
+        Ay_fft = fft(ay_padded)
+        omega = 2 * np.pi * fftfreq(pad_len, dt)
+
+        n = 3 * self.N
+        q_time = np.zeros((n, pad_len))
+        qvel_time = np.zeros((n, pad_len))
+        qacc_time = np.zeros((n, pad_len))
+        for i in range(n):
+            wn = self.omega_n[i]
+            z = self.zeta
+            denom = (wn**2 - omega**2 + 1j * 2 * z * wn * omega)
+            # Superposition of the two components' forcing on this mode.
+            # Gamma_x and Gamma_y are the two participation factors of B4;
+            # Gamma_theta is zero for translational excitation and so does
+            # not appear (asserted, not assumed -- check 4).
+            Q_fft = -(self.Gamma_x[i] * Ax_fft + self.Gamma_y[i] * Ay_fft) \
+                / denom
+            q_time[i, :] = np.real(ifft(Q_fft))
+            # Floor absolute acceleration via the transform's
+            # differentiate-in-time property, on Q_fft -- same reasoning as
+            # the per-axis method, not a np.gradient shortcut.
+            qvel_time[i, :] = np.real(ifft(1j * omega * Q_fft))
+            qacc_time[i, :] = np.real(ifft(-(omega**2) * Q_fft))
+
+        q_time = q_time[:, :self.npts]
+        qvel_time = qvel_time[:, :self.npts]
+        qacc_time = qacc_time[:, :self.npts]
+
+        u_rel = self.phi @ q_time
+        # Kept here rather than re-derived by the nonlinear solver: the
+        # per-axis path re-runs its own FRF loop to get base velocity, which
+        # is a second copy of this expression waiting to disagree with it.
+        # Only the energy balance consumes it, so the extra ifft per mode is
+        # paid once per solve, not once per HFTD iteration.
+        self.floor_vel_rel = self.phi @ qvel_time
+        a_rel = self.phi @ qacc_time
+
+        x, y, t = (slice(0, self.N), slice(self.N, 2 * self.N),
+                   slice(2 * self.N, n))
+        self.floor_disp_rel_x = u_rel[x]
+        self.floor_disp_rel_y = u_rel[y]
+        self.floor_rot = u_rel[t]
+        self.floor_accel_rel_x = a_rel[x]
+        self.floor_accel_rel_y = a_rel[y]
+        self.floor_rot_accel = a_rel[t]
+
+        # The full 3N vectors, kept alongside the per-block views because
+        # the nonlinear kernel works on the whole DOF set.
+        self.floor_disp_rel = u_rel
+        self.floor_accel_rel = a_rel
+
+        self.floor_disp_abs_x = self.floor_disp_rel_x + self.ground_disp_x
+        self.floor_disp_abs_y = self.floor_disp_rel_y + self.ground_disp_y
+        self.floor_accel_abs_x = self.floor_accel_rel_x + self.accel_x
+        self.floor_accel_abs_y = self.floor_accel_rel_y + self.accel_y
+
+        self._install_axis_views()
+        return (self.time, self.floor_disp_rel_x, self.floor_disp_rel_y,
+                self.floor_rot)
+
+    def _install_axis_views(self, hftd=None):
+        """Hand each held per-axis building its DOF block of the 3N solve.
+
+        Furniture (`get_decimated_furniture`) and spec 10's response-
+        dependent keys (`theta_demand`, `peak_drift_ratio`, `mu_demand`) are
+        per-axis quantities that already live on `MDOF_ShearBuilding`.
+        Installing the coupled histories there reuses those methods instead
+        of growing a second copy of them here. They see the floor-CENTRE
+        drift and acceleration; per-column drift is what the hysteresis
+        sees, and those stay on `hftd_result.x/.y`.
+        """
+        for b, s in ((self.bx, "x"), (self.by, "y")):
+            b.accel = getattr(self, f"accel_{s}")
+            b.ground_disp = getattr(self, f"ground_disp_{s}")
+            b.dt, b.npts, b.time = self.dt, self.npts, self.time
+            b.floor_disp_rel = getattr(self, f"floor_disp_rel_{s}")
+            b.floor_disp_abs = getattr(self, f"floor_disp_abs_{s}")
+            b.floor_accel_abs = getattr(self, f"floor_accel_abs_{s}")
+            b.floor_accel_rel = getattr(self, f"floor_accel_rel_{s}")
+            if hftd is not None:
+                b.hftd_result = getattr(hftd, s)
+            b._demand_stability_coefficients()
+
+    def compute_response_nonlinear(self, accel_x, disp_x, accel_y, disp_y, dt,
+                                   **params):
+        """The coupled nonlinear solve; installs its histories on `self`.
+
+        Mirrors `MDOF_ShearBuilding.compute_response_nonlinear`, including
+        the elastic solve it runs first to establish the base response and
+        the time metadata. `floor_rot` is the quantity that did not exist
+        before spec 12: elastically it is identically zero, so any nonzero
+        value here is emergent twist from asymmetric yielding (check 5).
+        """
+        result = solve_hftd_3N(self, accel_x, disp_x, accel_y, disp_y, dt,
+                               {**self.nonlinear_params, **params})
+        self.hftd_result = result
+        N = self.N
+        self.floor_disp_rel = result.u_rel
+        self.floor_disp_rel_x = result.u_rel[:N]
+        self.floor_disp_rel_y = result.u_rel[N:2*N]
+        self.floor_rot = result.theta
+        self.floor_disp_abs_x = result.x.u_abs
+        self.floor_disp_abs_y = result.y.u_abs
+        self.floor_accel_abs_x = result.x.acceleration
+        self.floor_accel_abs_y = result.y.acceleration
+        self.floor_accel_rel_x = result.x.acceleration - self.accel_x[None,:]
+        self.floor_accel_rel_y = result.y.acceleration - self.accel_y[None,:]
+        self.floor_rot_accel = result.acceleration[2*N:]
+        self._install_axis_views(result)
+        return (self.time, self.floor_disp_rel_x, self.floor_disp_rel_y,
+                self.floor_rot)
+
+
 # --- Ground-motion frequency-domain spectrum (spec 6, Part A) -------------
 
 def log_bin_edges(nyquist_hz, f_min=0.1, n_bins=400):
@@ -2079,7 +3207,8 @@ def log_bin_spectrum(signal, dt, n_bins=400):
     return f_centers, values
 
 
-def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx):
+def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx,
+                      dof_offset=0):
     """
     Analytic transfer function from ground acceleration to floor
     `floor_idx`'s displacement RELATIVE to ground (spec 6 Part A2) --
@@ -2103,6 +3232,15 @@ def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx):
     `phi` must be mass-normalized (phi^T M phi = I), as produced by
     _modal_analysis() -- do not renormalize it here.
 
+    `dof_offset` selects the DOF block for the 3N torsional kernel (spec
+    12 B4): `phi`'s rows are ordered `[u_x,1..N, u_y,1..N, theta_1..N]`, so
+    floor `floor_idx`'s u_y row is `MDOF_Building3N.dof_offset('Y') +
+    floor_idx`. Pass the matching `Gamma^x`/`Gamma^y` from
+    `MDOF_Building3N.participation(axis)` -- an axis's transfer function
+    needs BOTH the right rows of `phi` and the right participation vector.
+    The default 0 leaves the per-axis `MDOF_ShearBuilding` callers
+    unchanged.
+
     Returns (T_i, mode_terms):
         T_i: complex ndarray, shape (len(f_hz),) -- the solid curve,
             T_i = -mode_terms.sum(axis=0).
@@ -2114,11 +3252,12 @@ def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx):
     omega = 2 * np.pi * np.asarray(f_hz, dtype=float)
     n_modes = phi.shape[1]
     mode_terms = np.empty((n_modes, len(omega)), dtype=complex)
+    row = dof_offset + floor_idx
     for j in range(n_modes):
         wn = omega_n[j]
         denom = (wn**2 - omega**2 + 1j * 2 * zeta * wn * omega)
         H_j = 1.0 / denom
-        mode_terms[j] = phi[floor_idx, j] * Gamma[j] * H_j
+        mode_terms[j] = phi[row, j] * Gamma[j] * H_j
     T_i = -mode_terms.sum(axis=0)
     return T_i, mode_terms
 
@@ -2340,8 +3479,7 @@ if __name__ == "__main__":
             print("  Need at least two horizontal components. Skipping folder.")
             continue
 
-        x_orient = at2_orients[0]
-        y_orient = at2_orients[1]
+        x_orient, y_orient = assign_component_axes(at2_orients)
         print(f"  X axis: {x_orient}°, Y axis: {y_orient}°")
 
         # Build DT2 orientation dict
@@ -2415,8 +3553,29 @@ if __name__ == "__main__":
         furn_x, npts_dec_x, q_x, rate_x = building_x.get_decimated_furniture()
 
         # Process Y
-        accel_y, disp_y, _ = load_component(y_orient, "Y", building_y)
+        accel_y, disp_y, dt_y = load_component(y_orient, "Y", building_y)
         has_y = accel_y is not None
+
+        # Spec 12 B5 / correction C-4: decide NOW whether this record's two
+        # components can legitimately drive one coupled 3N solve, and record
+        # the answer alongside the cached traces. Y's own dt used to be
+        # discarded here in favour of X's, which is harmless while the two
+        # axes are solved independently and a silent correctness defect the
+        # moment they are not.
+        try:
+            paired = pair_components(accel_x, disp_x, dt,
+                                     accel_y, disp_y, dt_y,
+                                     x_orient=x_orient, y_orient=y_orient,
+                                     label=folder)
+            torsion_header = dict(paired.header, torsion_eligible=True)
+        except ComponentPairingError as exc:
+            print(f"  Not eligible for torsion: {exc}")
+            torsion_header = {"x_orient_deg": x_orient,
+                              "y_orient_deg": y_orient,
+                              "component_pad_x": 0, "component_pad_y": 0,
+                              "torsion_eligible": False,
+                              "torsion_rejected_because": str(exc)}
+
         if has_y:
             time, g_disp_y, rel_y, abs_y = building_y.compute_response(accel_y, disp_y, dt)
             building_y.save_to_csv(os.path.join(out_folder, "response_Y.csv"), prefix="Y")
@@ -2478,6 +3637,11 @@ if __name__ == "__main__":
             "X_disp": disp_x.tolist(),
             "Y_disp": disp_y.tolist() if accel_y is not None else None,
             "reference_magnitude": reference_magnitude,
+            # Which azimuth was assigned X and which Y. The assignment is a
+            # sort (`assign_component_axes`), not a compass reading, so
+            # recording it is what keeps a swapped pairing detectable after
+            # the fact (spec correction C-4, verification V-6).
+            **torsion_header,
         }
         with open(os.path.join(out_folder, "ground_accel.json"), 'w') as f:
             json.dump(ground_accel_data, f)

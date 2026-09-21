@@ -2001,3 +2001,573 @@ verification record. Optimizing the shared hysteresis/FFT hot path is deferred
 until spec 12's coupled 3N prototype can be measured, avoiding work against a
 solver shape that spec 12 immediately changes. Spec 11 is approved for local
 merge; no push or backend mirror was authorized.
+
+## Spec 12 — Torsion: a 3N kernel (branch `goal/12-torsion`)
+
+### Task 1 — 3N assembly, mass, corrected `K_G`, modal analysis (2026-09-21)
+
+Added the 3N kernel's static half to `mdof_response.py`, plus
+`claude_scripts/verify_torsion.py` carrying checks 1–4. Written test-first:
+all four checks failed on `AttributeError` before the implementation existed.
+
+New module-level functions beside the frame math, with the DOF ordering
+`[u_x,1..N, u_y,1..N, theta_1..N]` stated once at the top of the block:
+
+- `column_plan_positions` — pins column index `j` to a plan position
+  (counter-clockwise from `+x,+y`) and fixes the right-handed sign
+  convention for the whole spec. Spec 11's strength seed
+  `f'{record}#{axis}#{i}#{j}'` is deliberately left byte-for-byte unchanged.
+- `frame_transform` — the `N x 3N` kinematic transform,
+  `d_x = u_x − y_f·θ`, `d_y = u_y + x_f·θ`.
+- `building_frames` — spec 5's `N_PARALLEL_FRAMES` structure *placed*
+  (two X frames at `y = ±b/2`, two Y frames at `x = ±a/2`) rather than counted.
+- `assemble_K3N` — `Σ_f T_fᵀ K_f T_f` over those four frames, with `K_f` the
+  single-frame condensed matrix (`build_condensed_K` minus its
+  `N_PARALLEL_FRAMES` factor, which would otherwise double-count).
+- `geometric_stiffness_3N`, `mass_matrix_3N`.
+- `MDOF_Building3N` — holds `self.bx`/`self.by` per C-2, does not mutate
+  `MDOF_ShearBuilding`.
+
+**Ruling: `_relative_drift_matrix` factored out of
+`geometric_stiffness_matrix`.** The rotational `K_G` block needs the identical
+shear-building topology with a different spring, so the assembly is now one
+function with two callers instead of a copy that can drift. The arithmetic is
+expression-for-expression the old inline loop, so the existing output is
+unchanged bit for bit — confirmed by `verify_elastic_foundation.py`, which
+still matches `claude_scripts/fixtures/pre_spec10_baseline.npz`.
+
+**Ruling: spec A4's rotational `K_G` was wrong by a factor of 3, and the code
+implements the corrected form.** Check 3 re-derives
+`k_gθ,i = (1/h_i)·Σ_j P_ij(x_j²+y_j²) = (P_i/h_i)(a²+b²)/4` from the column
+plan positions independently (not by restating C-1), and prints spec A4's
+`(a²+b²)/12` beside it: hand `7.464261600e+07` vs A4's `2.488087200e+07`,
+ratio exactly 3.0000. Per check 3's own rule, the record is that **the spec
+was wrong, not the code**. `I_m = m(a²+b²)/12` is unaffected — mass is the
+distributed plate, the gravity torque acts through the corner columns. Both
+radii must appear side by side in the math PDF (Task 7) or a later reader
+will "fix" the discrepancy.
+
+**Ruling: `Γ^θ` is defined as the rotational share of the load vector under
+translational base excitation**, i.e. `φ_rotᵀ·(M ι_x + M ι_y)_rot`. It is
+identically zero by construction, which is the point: a nonzero value means
+the mass matrix picked up spurious `u–θ` coupling or an influence vector was
+built with 1s in the `θ` block. Measured `0.000e+00`.
+
+`MDOF_Building3N._modal_analysis` keeps the pre-`np.sqrt` gravity guard, and
+its message now names which DOF block the failing mode is dominantly in —
+the 3N system can go unstable torsionally as well as laterally.
+
+Verification output (`python claude_scripts/verify_torsion.py`, all pass):
+
+- **Check 1** — `p_delta` both **off and on**: `K`, `M` and `K_no_pdelta` all
+  have `u_x`/`u_y` sub-blocks **bit-identical** to the per-axis `K_X`/`K_Y`,
+  and all six coupling blocks are `0.0` **exactly**, asserted entry by entry
+  with `np.argwhere(block != 0.0)`. The `T_fᵀ K_f T_f` form turned out to be
+  exact as predicted: the `u_x` block sums to `K_f + K_f == 2*K_f`, and the
+  `u_x–θ` block to two exact negations. The lateral `K_G` blocks come from
+  `geometric_stiffness_matrix()` verbatim, which V-1 flagged as load-bearing
+  for the `p_delta=True` case.
+- **Check 2** — plan positions and kinematics asserted; one-story asymmetric
+  push (stiff frame at `+y`) gives `u_x = 2.730627e-03 m`,
+  `θ = +1.537515e-04 rad`, matching the hand solution `+1.537515e-04` to
+  ≤1e-12 relative, with the largest drift at the column furthest from
+  `y_cr = +1.5000 m`. The nonlinear half of check 2 belongs to Task 3 and
+  must run in the same pass as check 6 (V-4).
+- **Check 3** — rel diff `0.00e+00` against the independent hand derivation;
+  lateral blocks confirmed verbatim; first torsional mode softens from
+  `14.608309` to `14.479518 rad/s` (−0.882%) when P-Δ is enabled;
+  `p_delta=False` assigns `K_no_pdelta` directly (bit-identical).
+- **Check 4** — `ΦᵀMΦ = I` to `4.877e-16`; `ΦᵀKΦ` off-diagonal `1.435e-16`
+  relative; 12 real positive frequencies at N=4;
+  `max |Γ^θ| = 0.000e+00`; `Ω = ω_θ1/ω_x1 = 1.673233`;
+  `GravityInstabilityError` still raised on a wildly unstable 3N parameter set.
+
+Response-level assertions deferred to Task 2 as the plan specifies: check 1's
+`u_x(t)`/`u_y(t)` bit-identity over all 10 records and `theta_z(t) == 0.0`,
+and check 4's modal-sum-vs-direct-solve. The script prints a NOTE at each
+point rather than leaving the gap silent.
+
+Existing regressions re-run after the shared-code refactor:
+`verify_frame_furniture.py`, `verify_elastic_foundation.py` and
+`verify_floor_area.py` all report ALL CHECKS PASSED, including the
+`/compute`-vs-`out/` parity checks and the pre-spec-10 baseline fixture.
+
+## Spec 12 (torsion) — Task 2: elastic 3N response, two-component excitation
+
+**Commit:** see `goal/12-torsion`. Gate A passed.
+
+### What changed
+
+`mdof_response.py`:
+- `ComponentPairingError`, `assign_component_axes()`, `PairedComponents`,
+  `pair_components()` — B5's rules in one place. Rejects a missing Y
+  component, an unassigned orientation, or `dt_y != dt_x`; zero-pads a
+  length mismatch from sample 0 and reports it; returns the header fields
+  that record the assignment.
+- `MDOF_Building3N.compute_response(accel_x, disp_x, accel_y, disp_y, dt)`
+  — one coupled solve, `RHS = −M(ι_x a_gx + ι_y a_gy)`, per-mode
+  `Q_n = −(Γ_n^x A_x + Γ_n^y A_y)/(ω_n² − ω² + 2jζω_nω)`. Same padding
+  rationale and `min(4·npts, …)` cap as the per-axis method. Sets
+  `floor_disp_rel_x/_y`, `floor_rot`, the `_abs` variants and the
+  acceleration variants (via `−ω²Q` on `Q_fft`, not `np.gradient`).
+- `MDOF_Building3N.dof_offset(axis)` / `.participation(axis)`.
+- `transfer_function(..., dof_offset=0)` — B4's DOF-block selection, with
+  the default leaving all four existing callers unchanged.
+- Offline `__main__`: keeps Y's `dt` instead of discarding it (C-4), calls
+  `assign_component_axes` for the X/Y split, and writes the pairing verdict
+  into `ground_accel.json`.
+
+`claude_scripts/verify_torsion.py`: check 1's response half, check 4's
+direct-solve half, and check 8. `claude_scripts/performance_torsion.py`:
+Gate A timing.
+
+### Verification output
+
+`verify_torsion.py` — checks 1, 2, 3, 4, 8 all PASS.
+- check 1: `K`/`M`/`K_no_pdelta` sub-blocks bit-identical and all six
+  coupling blocks exactly 0.0 with `p_delta` on and off; over all 10
+  records and both slow-axis configurations, `theta_z(t) == 0.0` exactly
+  everywhere, matched-grid departure `1.094e-14` (X-slow) and `1.235e-14`
+  (Y-slow).
+- check 4: `ΦᵀMΦ = I` to `4.877e-16`; `ΦᵀKΦ` off-diagonal `1.435e-16`
+  relative; `max|Γ^θ| = 0.000e+00`; modal sum vs direct
+  `(K − ω²M + jωC)⁻¹` solve over 1024 frequency lines: **`4.573e-14`**.
+- check 8: dt mismatch, unparsed orientation and missing Y all rejected;
+  7-sample zero-pad applied from sample 0 with the tail exactly zero;
+  swapping `KOCAELI_AYD`'s components changes `u_x` by **141.50% RMS**.
+
+`run_spec11_regressions.py` — all 15 exit 0.
+
+Offline pipeline regenerated into a scratch directory against the real
+`data/`: all 10 folders processed, no rejections. Diff against tracked
+`out/`: of 61 files, **only** the 10 `ground_accel.json` differ, and only
+by the five new keys — every pre-existing key byte-identical. Those 10
+files were copied into `out/` rather than doing a full regeneration.
+
+### Rulings made (recorded as spec C-7…C-10, verification V-10…V-13)
+
+1. **Check 1's response-level bit-identity is unreachable and was amended,
+   not dropped.** Cause measured, not guessed: the zero-pad length follows
+   the slowest mode of the *coupled* system, so the stiffer axis lands on a
+   different frequency grid (`pad_x = 21566` vs `pad_3N = 21653` on
+   `ANZA1_CIDLA`, giving `9.578e-06`). Re-running the per-axis kernel at the
+   3N pad length reproduces the 3N answer to `6.2e-15`, and against a
+   `4·npts` reference the 3N grid is the *more* accurate of the two
+   (`1.169e-05` vs `1.601e-05`). Rather than loosening to ~1e-5 — which
+   would hide a real assembly error — each axis is asserted at 1e-12 in the
+   configuration where it carries the slowest mode, so both kernels share a
+   grid. `theta_z == 0.0` stays exact.
+2. **A blockwise eigensolve was considered and rejected.** It would restore
+   bit-identity, but it contradicts B1's "one solve" and would make checks
+   1 and 4 true by construction rather than testing the assembly.
+3. **`transfer_function` took `dof_offset`, not an axis name** — one
+   optional argument, default 0, so the four existing Python callers are
+   untouched. The JS mirror changes with the frontend work (Task 5).
+4. **Nonlinear `compute_response` raises `NotImplementedError`** rather
+   than silently solving elastically; the 3N pseudo-force is Task 3.
+5. **The axis→compass assignment is per-record, not global** (V-13). Eight
+   records get X = 0°, but `KOCAELI_AYD` (90/180) and both `PARK2004`
+   records (90/360) get X = East. Correct per the documented lower-azimuth
+   rule; left unchanged because changing it would break byte-identity of
+   existing outputs. Now recorded in the header, so it stays visible.
+6. **Gate A passed:** coupled vs per-axis elastic, `KOCAELI_AYD` at
+   intensity 40, best of 3 — N=7 `0.0870 s` vs `0.0740 s` (1.175×), N=20
+   `0.3133 s` vs `0.3927 s` (**0.798×, faster**). Sub-second either way.
+
+## Spec 12 (torsion) — Task 3: per-column drift and the 3N pseudo-force assembly
+
+**Commit:** see `goal/12-torsion`. Gate B measured and reported.
+
+### What changed
+
+`mdof_response.py`:
+- `column_drift_3N(u, positions)` — B2. Every column gets its OWN drift,
+  `δ_x,ij = [u_x,i − y_j·θ_i] − [u_x,i−1 − y_j·θ_i−1]` and the Y form.
+  Spec 11 A4's "a rigid diaphragm forces every column to share the same
+  drift" was true of a one-lateral-DOF-per-floor model and is false here.
+- `assemble_pseudo_force_3N(s_x, s_y, positions)` — B3.
+  `p_NL = Σ_ij T_ijᵀ[k₀,ij·δ_ij − V_ij]`. `Bᵀ` factors out of the sum
+  over `j`, so spec 11's `assemble_pseudo_force` is reused verbatim on
+  three placed sums rather than reimplemented.
+- `_hysteresis_history(drift, bb, initial_state)` — now takes per-column
+  drift `(N, 4, npts)` and returns the RAW per-column defect instead of a
+  placed pseudo-force, because the 3N path must sum both bending axes
+  before placing. The per-axis path passes its story drift broadcast
+  across the column axis, which is a view rather than arithmetic, so its
+  numbers are unchanged bit for bit.
+- `_per_axis_constitutive` / `_torsion_constitutive` — the two
+  constitutive laws as callables, and `HysteresisAux` carrying the state
+  a resumed block needs.
+- `_hftd_fixed_point(...)` — the Anderson-mixed, causally-seeded fixed
+  point extracted from `_solve_hftd_grid` and made DOF-agnostic. The
+  per-axis and coupled paths now differ ONLY in the constitutive callable
+  and in result packaging, never in the iteration.
+- `_causal_fft_predictor` — takes the constitutive callable, and its block
+  length is now adaptive (see ruling 26).
+- `_HFTDConvolution.ndof` — `building.phi.shape[0]`, not `building.N`.
+- `evaluate_collapse_criteria` — ductility and fracture now index the
+  per-column drift; the story-level thresholds and the reported residual
+  stay on the centre-of-mass story drift, so the per-axis summary shape is
+  unchanged.
+- `HFTDResult.column_drift`, `HFTD3NResult`, `_column_spring_stiffness_3N`,
+  `_solve_hftd_grid_3N`, `solve_hftd_3N`,
+  `MDOF_Building3N.compute_response_nonlinear`.
+- `MDOF_Building3N.compute_response` now also stores `floor_vel_rel` and
+  the full 3N `floor_disp_rel` / `floor_accel_rel`.
+
+`claude_scripts/verify_torsion.py`: checks 5 and 6, check 2's nonlinear
+transpose half (run inside check 6 per V-4), and check 8's deferred `θ_z`
+half. `claude_scripts/performance_torsion_nonlinear.py`: Gate B.
+
+### Task 3 rulings
+
+24. **`_hysteresis_history` was generalised, not forked.** Passing the
+    per-axis story drift broadcast to `(N, 4, npts)` is exact, and the
+    segment-cut reduction over both the story and column axes reduces to
+    the old story-only expression (`any_j(peak_i > dy_ij)` is
+    `peak_i > min_j dy_ij`). Confirmed by
+    `check_hftd_elastic_baseline.py` (140 cases bit-identical) and
+    `check_hftd_sampling_wrapper.py` reproducing all three saved
+    nonlinear NRMS references exactly.
+25. **The fixed point is shared, the packaging is not.** Unifying the
+    energy balance and result shape as well would have meant one function
+    with per-axis and 3N branches throughout; instead `HFTD3NResult`
+    holds two ordinary `HFTDResult` views and
+    `evaluate_collapse_criteria` runs on them unchanged, because drift
+    limits, ductility and the gravity tangent test are genuinely per-axis
+    quantities.
+26. **The causal predictor's block length is now adaptive** (V-20). The
+    coupled map contracts more slowly than the per-axis one and was
+    exhausting the 40-iteration budget, after which the predictor returned
+    `None` and the solve stalled at a residual near 0.6 forever. A block
+    that exhausts its budget now halves and retries that block. No new
+    tuning constant; completed blocks stay valid; the per-axis path never
+    halves.
+27. **Biaxial interaction is deliberately absent.** One hysteresis state
+    machine per (story, column, axis), named in
+    `_torsion_constitutive`'s docstring as unconservative for a column
+    driven hard on both axes at once. A circular/elliptical interaction
+    surface is research-grade and out of scope (B2).
+28. **`nonlinear=True` on `MDOF_Building3N.compute_response` now
+    dispatches** to `compute_response_nonlinear` instead of raising
+    `NotImplementedError` (ruling 19 is superseded).
+29. **Check 5's exactness claim moved from `θ_z` to the pseudo-moment**
+    (V-14), check 5 now selects the axes that actually yielded (V-15),
+    and its `cov = 0` case runs at its own higher intensity (V-16).
+30. **Check 6 reaches the elastic branch through the demand, not the
+    material** (V-17): `f_y = 1e13` drives `column_plastic_moment`'s
+    compression block negative and returns `nan`.
+31. **Divergence at over-driven intensities is pre-existing** (V-19).
+    `PARK2004_HOG` at intensity 20 diverges in the per-axis kernel too
+    (`causality_error` 3.46e+31 / 4.01e+33 against the coupled 1.21e+53),
+    and all three report `converged = false` with the modeled reason
+    rather than inferring collapse. At intensity 4 all three converge and
+    the coupled peak displacement (2.572e-01) sits between the two
+    per-axis ones (2.688e-01, 2.317e-01).
+
+### Verification output
+
+`claude_scripts/verify_torsion.py 6` (check 6 + check 2's nonlinear half):
+
+```
+  unreachable strengths: max|p_NL| = 0.0, 1 iteration, vs linear 3N 0.000e+00 relative
+  adjoint identity <s,delta(u)> = <T^T s,u>: -7.212693370e+01 vs -7.212693370e+01
+  weak column at (+a/2,+b/2), +X push: p_theta = -1.500000e+07 (hand -1.500000e+07),
+    so theta < 0 and the weak +y side drifts further
+```
+
+`claude_scripts/verify_torsion.py 5`:
+
+```
+  first yield at sample 4052 (t=40.5200s); first nonzero eccentricity at 4052; equal: True
+  p_theta before first yield: exactly 0.0; theta_z there is 7.625e-09 of peak
+    (FFT tail leak, causality_error 3.161e-08)
+  peak |theta_z| = 2.307301e-03 rad
+  X columns stayed elastic: e_x is 0.0 and its drift ratio is 1.0 by construction
+  Y: eccentricity sign matches the psi scatter on all 3 stories; peak |e| = 3.9553 m
+  Y story 0: weak column 3 (psi=0.8502) vs strong 2 (psi=1.1189); cumulative drift
+    ratio from first yield ['1.0000', '1.0081', '1.1092', '1.1092', '1.1092', '1.1092']
+  column_strength_cov=0.0 at intensity 55.0, yielding on Y: theta_z, e_x, e_y and the
+    theta pseudo-moment are all exactly 0.0
+  uniform defect on one axis cancels on theta exactly; on both axes it leaves
+    1.509e-16 relative, i.e. rounding
+```
+
+`claude_scripts/verify_torsion.py 8` (the deferred `θ_z` half):
+
+```
+  nonlinear, components swapped: theta_z changes by 105.44% RMS
+    (peak |theta_z| 3.3781e-03 vs 1.3152e-03 rad)
+```
+
+Spec 11 regressions, all exit 0: the 15 in
+`run_spec11_regressions.py`, plus `check_hftd_api.py`,
+`check_hftd_contracts.py`, `check_hftd_convolution.py`,
+`check_hftd_elastic_baseline.py` (140 bit-identical cases),
+`check_hftd_numerical_failure.py`, `check_hftd_sampling_wrapper.py`
+(saved references NRMS 0.000170806008 / 0.000176518585 / 0.000243836441,
+unchanged), `verify_hftd_determinism.py`,
+`verify_hftd_segments_columns.py`, `verify_hftd_energy_scaling.py`.
+
+### GATE B — nonlinear performance (C-3 / check 12 / V-9)
+
+`claude_scripts/performance_torsion_nonlinear.py`, KOCAELI_AYD @ intensity
+40, whole record (22016 samples), both sides re-measured on this machine
+in the same run:
+
+| N | per-axis X | per-axis Y | both axes | coupled 3N | total ratio | per-iteration ratio |
+|---|---|---|---|---|---|---|
+| 7 | 23.067 s | 28.211 s | 51.278 s | **74.362 s** | 1.45× | **2.90×** |
+| 20 | 58.368 s | 73.036 s | 131.404 s | **202.695 s** | 1.54× | **3.09×** |
+
+Spec 11's stored per-axis numbers (21.925 s and 66.470 s, i.e. 43.85 s and
+132.94 s for both axes) reproduce closely enough on this machine that the
+freshly measured both-axes column is the fair reference; it is what the
+ratios above use.
+
+All six runs converged in 3 iterations. The coupled N=7 run reports
+`causality_error` 7.6e-08 and peak rotation 6.70e-03 rad with 6 collapse
+events; N=20 reports 1.15e-06 and 2.21e-02 rad with 14.
+
+**Check 12's diagnostic is satisfied.** Per-iteration cost is 2.90× and
+3.09× the both-axes cost — right at the ~3× a 3N-versus-2×N solve should
+cost, not "far above" it. `K_3N`, `Φ` and `ω_n` are built once in the
+constructor and are not re-formed inside the loop.
+
+**Finding to decide on (C-3/C-5): N=20 coupled nonlinear is 202.7 s.**
+That is above the ~133 s the existing both-axes path already costs, and
+`AGENTS.md`'s handoff already records that a two-axis nonlinear request
+"can exceed two minutes and needs an adequate deployment timeout or must
+remain disabled". Ruling recorded for Task 5 to implement, subject to the
+user's decision: **`torsion` defaults true for the elastic path and false
+for the nonlinear path on the live `/compute` endpoint**, with nonlinear
+torsion available explicitly. Nothing about `torsion = false` changes:
+byte-identical spec-11 behaviour (check 9).
+
+## Spec 12 (torsion) — Task 4: Newmark 3N reference and check 7
+
+### What changed
+
+- `claude_scripts/newmark_reference.py` (gitignored tooling): the
+  average-acceleration Newton loop extracted into `_newmark(M, C,
+  coupling, load, internal, machine, dt, u0, v0, a0)`; `solve_reference`
+  (per-axis) and new `solve_reference_3N` are thin front-ends. The 3N one
+  uses TOTAL spring forces `T^T V` (via `assemble_pseudo_force_3N`, which
+  is linear) and Newton tangent `_column_spring_stiffness_3N(kt_x, kt_y)`,
+  with `coupling = K_3N − springs`, two `ColumnHysteresis` machines (one
+  per bending axis), forcing `−M(ι_x a_x + ι_y a_y)`.
+- `claude_scripts/verify_torsion.py`: check 7, two cases (straight ×40,
+  swapped ×50), per-block u_x / u_y / θ_z tolerances printed separately,
+  elastic-vs-reference gap printed beside each, assertion that both axes
+  yield across the cases.
+- No tracked source changed; `mdof_response.py` untouched by this task.
+
+### Verification output
+
+- Per-axis refactor bit-identical to the old file (yielding, μ 2.1, both
+  initial-state branches): `identical True` ×2.
+- `verify_torsion.py 7`: PASS — full table in verification V-21. θ_z NRMS
+  1.08e-03 (straight) and 4.18e-03 (swapped); every peak error ≤ 3.7e-03;
+  every residual/peak ≤ 9.7e-05; no collapse on either side. ~6 min.
+
+### Task 4 rulings
+
+32. **Check 7 runs two cases, not one** (V-21): the straight ordering
+    never yields X, so its u_x row only tested elastic coupling.
+33. **"Per-story" for θ_z is inter-story twist θ_i − θ_{i−1}**, the
+    rotational counterpart of drift; RMS is on the full floor-θ trace.
+34. **Newmark at dt/4** from the FFT solution's own t=0 state (the FFT
+    response is periodic over the padded window, so t=0 is not rest) —
+    matching the HFTD kernel's own 4× refinement once anything yields.
+35. **`t_collapse` is vacuous here** — no collapse on either side; not
+    chased further because over-driven cases diverge (V-19).
+
+## Spec 12 — Task 5: payload and server (2026-09-21)
+
+### What changed
+
+- `server.py`: `/compute` takes a strict-boolean `torsion` (default
+  `not nonlinear`). When requested, `pair_components()` decides
+  eligibility from the cached `ground_accel.json` (orientation keys, both
+  components, one `dt`); ineligible → per-axis path plus
+  `torsion_fallback_reason`. Eligible → one `MDOF_Building3N` solve (elastic
+  or HFTD), whose held `bx`/`by` carry that solve's DOF blocks so the
+  furniture, spec-10 and collapse code below stays one path. New header keys
+  (`torsion_enabled`, `has_floor_rotation`, `plan_a/_b`,
+  `eccentricity_x/_y`, `omega_theta_over_omega_x`, 3N
+  `natural_frequencies_Hz` / `mode_shapes` / `participation_factors_x/_y`;
+  old `_X/_Y` modal keys repopulated from the modes each DOF block
+  dominates). `theta_z` float32 `(N, npts)` block appended after
+  `gaccel_y`, gated by `has_floor_rotation`.
+- `mdof_response.py`: `tangent_eccentricity()` moved in from
+  `verify_torsion.py` (which now aliases it); `MDOF_Building3N.
+  _install_axis_views()` called at the end of both response methods.
+- `claude_scripts/check_ground_accel_block.py`: section 9 (spec 12 check 9);
+  3a/3b now post `torsion=False` explicitly.
+
+### Verification output
+
+- `check_ground_accel_block.py`: ALL CHECKS PASSED (3a, 3b, 9 — 17 new
+  assertions). torsion=false payload == main checkout's spec-11 payload,
+  3148520 bytes each; float-region offsets unchanged (3141632 B); surplus
+  for a flag-ignoring reader is exactly the theta block (745472 B); elastic
+  theta is 0.0 exactly; nonlinear (KOCAELI_AYD, N=3, 0.9×0.7 m, ×20)
+  converged, max|θ| 5.343e-04 rad, bit-equal to a direct 3N solve;
+  eccentricity envelope max 3.939 m (< a/2 = 4.2 m); stale-cache fallback
+  float payload == torsion=false; `torsion="yes"` → 400.
+- `run_spec11_regressions.py`: all 15 exit 0 (with the torsion default on).
+- `verify_torsion.py` (all): checks 1–8 PASS.
+
+### Task 5 rulings
+
+36. **Check 9: new header keys are gated behind `torsion`** (V-7), so
+    `torsion=false` is byte-identical including header and pad — the
+    stronger option, and cheaper than rescoping the check.
+37. **Elastic θ_z is exactly 0.0 for every building this model can
+    describe** (all four columns share a section, so the plan is always
+    symmetric and K_3N's u–θ blocks are exactly 0.0, V-1). Elastic
+    torsion-on therefore only adds a zero block; twist is a nonlinear
+    phenomenon here, whose default is off (GATE B). Flagged to the user.
+38. **Offline `__main__` stays per-axis; out/ is not regenerated.** For the
+    same reason as 37 the static artifacts would gain an all-zero θ block
+    and a ~1e-16 churn in every response file (V-10). The plan listed
+    `__main__` for this task; recorded as a deliberate deviation.
+39. **Eccentricity envelope** = signed value at each story's peak |e|,
+    over samples where every column tangent is ≥ 0 with positive sum
+    (only there is the rigidity centre a weighted average of the column
+    positions). Found by a real crash: a fully plateaued story gave 0/0 →
+    NaN → `json.dumps(allow_nan=False)` 500. Story never defined → null.
+40. **`/compute` clamps `intensity_scale` to ≤ 20** (spec 11); the torsion
+    checks ran at 40 via the Python API. A live torsion demo needs a weaker
+    building (e.g. 0.9×0.7 m columns at ×20). Relevant to Task 6.
+41. **Never run `claude_scripts/spec11_elastic_oracle.py` as a script.**
+    It is a frozen spec-11 copy of `mdof_response.py`, `__main__` and all:
+    running it regenerates `out/` with spec-11 code and silently strips the
+    five C-9 pairing keys from every `ground_accel.json`. Happened once
+    during Task 5 and was reverted with `git checkout -- out/`. Its exit 0 is
+    not a regression result.
+
+## Spec 12 — Task 6: frontend (2026-09-21)
+
+### What changed (`index.html`)
+
+- New `ROTATION-HELPERS` sentinel block: `displayYaw(θ, scale, u)` =
+  `-θ·scale/u`, `rotateOffset`, `columnEndpoint` (rotate the corner offset,
+  THEN add; explicit `yaw === 0` fast path keeps the old expression).
+- `sourceWorldPos()` returns the level's `yaw` (ground 0);
+  `updateColumnTransforms()` uses `columnEndpoint` and twists each column's
+  section by the mean yaw of its ends (skipped at zero).
+- `animate()` sets `group.rotation.y` from `floorRotData`; payload parser
+  reads the `theta_z` block when `has_floor_rotation`; `applyLoadedData`
+  stores it (null on the static path).
+- `#torsionToggle` ("Torsion in collapse", default off) beside the collapse
+  button; sent as `torsion` only with nonlinear requests; change drops the
+  collapse cache.
+- B4: `normalizeModal()` maps a 3N header to one modal set with
+  `dofOffsetX = 0`, `dofOffsetY = N`; `transferFunctionForFloor()` reads row
+  `floor + offset` — the JS form of `transfer_function(dof_offset=...)`.
+  Per-mode curves that never reach the Transfer panel's 70 dB window are
+  not drawn (the 3N set's other-block modes would smear along its floor).
+
+### Verification output
+
+- `check_floor_rotation.mjs` (check 10, new): ALL PASS — θ=0 endpoints
+  bit-identical over 6561 cases incl. signed zeros; θ=0.3 rad matches an
+  independent polar rotation to 4.4e-16 while the world-space trap is off
+  by 0.514 scene units; +θ moves an east corner to scene +z; twist gain ==
+  sway gain to sin(yaw)/yaw; `placeFurnitureForFloor`/
+  `updateFurnitureOffsets` byte-unchanged; furniture parented to the
+  rotated group.
+- `check_transfer_mirror.py` (new, B4): JS vs Python |T| max rel err
+  8.5e-16 (3N, DOF offsets) and 9.5e-16 (per-axis); per-mode 2.8e-16.
+- All 7 existing JS checks exit 0, each confirmed to compare something.
+
+### Task 6 rulings
+
+42. **Twist display gain = sway display gain** (`yaw = -θ·scale/u`), so a
+    corner's rotational shift is exaggerated by exactly the factor its
+    translation is. Un-gained θ (~5e-4 rad) would be invisible.
+43. **Columns twist about their own axis** by the mean end yaw; a
+    rectangular section would otherwise visibly misalign with the slab.
+44. **Torsion toggle defaults OFF** and applies to collapse only, matching
+    the GATE B server default; elastic requests omit it (elastic θ ≡ 0).
+45. **The JS↔Python mirror is now actually checked**
+    (`check_transfer_mirror.py`); `verify_spectrum.py` only ever covered
+    the Python side, contrary to what the spec assumed.
+
+## Spec 12 — Task 7: verification sweep, checks 11 and 13 (2026-09-21)
+
+Check 14 (docs) is deliberately deferred to a separate session at the
+user's request.
+
+### Check 11 — existing checks
+
+- `run_spec11_regressions.py`: all 15 exit 0 (incl. verify_frame_furniture,
+  verify_elastic_foundation, verify_spectrum, verify_floor_area,
+  verify_synthetic_earthquake — confirmed executing — check_quake_continuity,
+  check_ground_accel_block with section 9, and every JS check).
+- `verify_hftd.py`: **first run exit 1** — `check_hysteresis_batch.py`
+  still called `_hysteresis_history` with Task 3's retired signature
+  (floor displacement in, 6-tuple out). Fixed to the new API with the same
+  broadcast story drift `_per_axis_constitutive` uses; re-run exit 0.
+  Latent since Task 3 because verify_hftd.py is not in the 15-script runner.
+- `verify_torsion.py` 1–8 PASS (run after Task 5; Task 6 touched no Python).
+- `check_transfer_mirror.py`, `check_floor_rotation.mjs`: PASS.
+
+### Check 13 — real browser (Claude in Chrome, server.py from the worktree)
+
+Demo case: KOCAELI_AYD, 3 stories, columns 0.9×0.7 m, Magnitude 8.8,
+"Torsion in collapse" on, Run collapse analysis (real checkbox + button).
+
+1. Symmetric (cov = 0, injected into the request by a temporary fetch
+   wrapper — no UI control exists): columns yield (μ 1.15) yet θ is 0.0
+   exactly and both eccentricity envelopes are 0; top view shows the roof
+   square to the ground slab. PASS.
+2. Scatter on: converged, μ 1.36, roof θ peak 5.2e-4 rad at t = 83.5 s,
+   ground-story e_y = −3.94 m. Roof-θ RMS by record quarter: 2.2e-18 →
+   1.06e-4 → 6.5e-5 → 2.1e-5 — zero until yielding, then emergent twist that
+   decays with the shaking (residual ~1e-6 rad), not monotone growth. PASS
+   as emergence; "grows over the record" holds from first yield to peak.
+3. Top view at the peak: roof plate visibly yawed (~10° at display gain)
+   against the ground slab, column tips on the rotated corners. PASS
+   (θ = 0.3 rad geometry proven numerically by check 10).
+4. 20-story soft-ground-story at maximum zoom-out: fully lit, not fogged,
+   soft story visible; camera/fog/lighting code untouched by the branch. PASS.
+5. Signals drawer, Frequency tab, 7 stories, column Y 0.85: X and Y give
+   different transfer curves, every panel prints its own peak (X −5.9 dB,
+   Y −5.0 dB). DOF-block correctness proven by check_transfer_mirror.py on
+   this exact page code. PASS.
+6. 375×812: Chrome's window could not be resized (maximized), so the
+   built-in Browser pane's mobile emulation was used. scrollWidth 375 (no
+   horizontal overflow); torsion row at x 17–359, hit-test returns its
+   label; row aligned with the soft-ground-story row. PASS.
+7. Zero console errors in both browsers, including a fresh page load. PASS.
+
+### Task 7 rulings
+
+46. **`check_hysteresis_batch.py` updated to the generalised API**, keeping
+    what it tests (batched history == stepped machine, bit-exact over 6000
+    yielding samples). A test-script fix, not a physics change.
+47. **Check 13 item 6 ran in the built-in Browser pane**, the only browser
+    here that could emulate 375×812.
+48. **Item 2's twist is not monotone over the record** — it appears at
+    first yield, peaks, and decays. That is the physics of a converged run that never
+    approaches collapse; recorded rather than read as a failure.
+
+### Check 14 — documentation (2026-09-21)
+
+Updated: `README.md` (new "Spec 12: torsion" section; spec 11 section no
+longer says torsion is excluded), math PDF Part H (H1–H6: transformation
+assembly, rotational inertia with BOTH radii side by side, still
+real-symmetric/classically dampable, centre of rigidity + emergence,
+per-column drift; Part G3/G11 cross-referenced) regenerated to 37 pages and
+text-searched for "torsion", "centre of rigidity", "rotational inertia";
+`AGENTS.md` (both copies); `knowledge/` (`mdof_response`, `server`,
+`data_flow_and_wire_formats`, `index_html`, `spec_history`);
+`specs/11-hftd-nonlinear.md` A4 correction; `specs/README.md` row 12;
+`specs/COURSE-CONCEPTS.md`.
+
+Open items stated in the docs: elastic θ ≡ 0 and the still-open elastic
+torsion-default question (ruling 37); offline `__main__` stays per-axis and
+`out/` not regenerated (ruling 38); `t_collapse` criterion vacuous (ruling
+35).
