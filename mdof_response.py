@@ -549,14 +549,201 @@ def geometric_stiffness_matrix(N, m_per_floor, h, g=GRAVITY_MS2):
     P = g * np.cumsum(m_arr[::-1])[::-1]
     k_g = P / h_arr
 
-    K_G = np.zeros((N, N))
+    return _relative_drift_matrix(k_g), k_g, P
+
+
+def _relative_drift_matrix(k):
+    """Shear-building (relative-drift) assembly of per-story springs `k`.
+
+    Story i contributes k_i * b_i b_i^T with b_i = e_i - e_{i-1} and e_0
+    dropped at the fixed base:
+
+        K[i,i]   = k_i + k_{i+1}     (k_{N+1} == 0)
+        K[i,i+1] = K[i+1,i] = -k_{i+1}
+
+    Factored out because spec 12's rotational geometric stiffness uses the
+    *same* topology on the theta block with a different spring -- one
+    assembly, two callers, rather than a copy that can drift. The
+    arithmetic is expression-for-expression what geometric_stiffness_matrix
+    did inline before spec 12, so its output is unchanged bit for bit.
+    """
+    N = len(k)
+    K = np.zeros((N, N))
     for i in range(N):
-        k_above = k_g[i + 1] if i + 1 < N else 0.0
-        K_G[i, i] = k_g[i] + k_above
+        k_above = k[i + 1] if i + 1 < N else 0.0
+        K[i, i] = k[i] + k_above
         if i + 1 < N:
-            K_G[i, i + 1] = -k_g[i + 1]
-            K_G[i + 1, i] = -k_g[i + 1]
-    return K_G, k_g, P
+            K[i, i + 1] = -k[i + 1]
+            K[i + 1, i] = -k[i + 1]
+    return K
+
+
+# --- Spec 12: the 3N torsional kernel -------------------------------------
+#
+# DOF ordering, stated once and never varied:  [u_x,1..N, u_y,1..N, theta_1..N]
+#
+# A silent ordering mismatch between the assembler, the pseudo-force
+# assembly and the payload writer is the most likely bug in this spec, so
+# every function below indexes through that one ordering and nothing
+# re-derives it.
+
+def column_plan_positions(plan_span_x, plan_span_y):
+    """Plan positions (x_j, y_j) of the four corner columns, j = 0..3.
+
+    **This pins column index `j` to a physical plan position, once, for the
+    whole project.** Before spec 12 `j` was an anonymous slot in spec 11's
+    (N, 4) per-column arrays; it now has a location, and the strength
+    scatter seeded `f'{record}#{axis}#{i}#{j}'` acquires a geometric
+    meaning it did not have. That seed string is deliberately left
+    byte-for-byte unchanged -- changing it would break spec 11's
+    determinism checks and column_strength_scatter's bit-match with the
+    viewer's FNV/mulberry32 (spec correction C-1 item 6).
+
+    Counter-clockwise from the +x,+y corner, with a = plan_span_x along X
+    and b = plan_span_y along Y:
+
+        j = 0 -> (+a/2, +b/2)
+        j = 1 -> (-a/2, +b/2)
+        j = 2 -> (-a/2, -b/2)
+        j = 3 -> (+a/2, -b/2)
+
+    Sign convention for the whole spec, fixed here: a right-handed frame
+    with theta measured about +Z, so a floor rotation theta displaces a
+    point at (x, y) by (-y*theta, +x*theta). Verification check 2 asserts
+    both this table and that convention.
+    """
+    a = float(plan_span_x) / 2.0
+    b = float(plan_span_y) / 2.0
+    return np.array([[+a, +b], [-a, +b], [-a, -b], [+a, -b]])
+
+
+def frame_transform(N, offset, kind):
+    """The N x 3N kinematic transform T_f mapping floor DOFs to one planar
+    frame's in-plane drift (spec 12, A1).
+
+    Following column_plan_positions' right-handed convention:
+
+        frame resisting X-sway at plan offset y_f:  d_i = u_x,i - y_f*theta_i
+        frame resisting Y-sway at plan offset x_f:  d_i = u_y,i + x_f*theta_i
+
+    `kind` is "X" or "Y" -- the sway direction the frame resists, not the
+    axis its offset is measured along.
+    """
+    T = np.zeros((N, 3 * N))
+    eye = np.eye(N)
+    if kind == "X":
+        T[:, :N] = eye
+        T[:, 2 * N:] = -float(offset) * eye
+    elif kind == "Y":
+        T[:, N:2 * N] = eye
+        T[:, 2 * N:] = +float(offset) * eye
+    else:
+        raise ValueError(f"kind must be 'X' or 'Y', got {kind!r}")
+    return T
+
+
+def building_frames(plan_span_x, plan_span_y):
+    """The four planar frames as (offset, kind) pairs -- two resisting
+    X-sway at y = +-b/2, two resisting Y-sway at x = +-a/2.
+
+    This is spec 5's N_PARALLEL_FRAMES structure *placed* rather than
+    merely counted. build_condensed_K's factor of N_PARALLEL_FRAMES is
+    therefore removed here and replaced by explicit placement -- applying
+    both would double-count every frame.
+    """
+    a = float(plan_span_x) / 2.0
+    b = float(plan_span_y) / 2.0
+    return ((+b, "X"), (-b, "X"), (+a, "Y"), (-a, "Y"))
+
+
+def assemble_K3N(N, E, I_c_x, I_c_y, I_b, h, plan_span_x, plan_span_y):
+    """K_3N = sum_f T_f^T K_f T_f over the four placed planar frames.
+
+    `K_f` is ONE frame's condensed N x N matrix -- assemble_frame_stiffness
+    followed by condense_rotations, i.e. build_condensed_K *without* its
+    N_PARALLEL_FRAMES factor (see building_frames).
+
+    Do NOT substitute the research document's scalar per-column spring
+    formulas (spec A1). They assume each column is an independent lateral
+    spring, which throws away the beams' rotational restraint that spec 5's
+    condensation bakes into a full N x N matrix.
+
+    This reduces to the per-axis result **bit-identically** for a symmetric
+    plan, which is verification check 1 and the gate on the whole spec:
+    the u_x block sums to K_f + K_f and IEEE-754 gives x + x == 2*x
+    exactly; the u_x-theta block sums to (-b/2)K_f + (+b/2)K_f, two exact
+    negations, so it is 0.0 exactly rather than merely small.
+    """
+    K_x = condense_rotations(
+        assemble_frame_stiffness(N, E, I_c_x, I_b, h,
+                                 frame_span("X", plan_span_x, plan_span_y)), N)
+    K_y = condense_rotations(
+        assemble_frame_stiffness(N, E, I_c_y, I_b, h,
+                                 frame_span("Y", plan_span_x, plan_span_y)), N)
+
+    K3 = np.zeros((3 * N, 3 * N))
+    for offset, kind in building_frames(plan_span_x, plan_span_y):
+        T = frame_transform(N, offset, kind)
+        K3 += T.T @ (K_x if kind == "X" else K_y) @ T
+    return K3
+
+
+def geometric_stiffness_3N(N, m_per_floor, h, plan_span_x, plan_span_y,
+                           g=GRAVITY_MS2):
+    """Linearised P-Delta geometric stiffness for the 3N system.
+
+    The two lateral blocks are geometric_stiffness_matrix()'s output
+    **verbatim**, and that is load-bearing rather than a convenience: the
+    per-column placement sum computes 4*((P_i/4)/h_i) where the existing
+    code computes P_i/h_i, and those are not bit-identical in IEEE-754.
+    Verification check 1 demands bit-identity with p_delta on.
+
+    The rotational block uses the same relative-drift topology with
+
+        k_gtheta,i = (1/h_i) * sum_j P_ij (x_j^2 + y_j^2)
+                   = (P_i/h_i) * (a^2 + b^2)/4
+
+    for four equal corner columns. **This is NOT the (a^2+b^2)/12 of the
+    rotational mass**, and the difference is not a typo in either place.
+    Mass is the distributed floor plate, so its radius of gyration is the
+    plate's. The destabilising gravity torque acts through the axial load,
+    and in this model the axial load sits in the four corner columns at
+    (+-a/2, +-b/2) -- the same assumption column_axial_capacity() already
+    makes. The corner radius is a factor of 3 larger, which makes torsional
+    gravity instability *more* likely, not less. Spec A4 originally wrote
+    /12 here; spec correction C-1 item 2 records the derivation and
+    verification check 3 re-derives it independently.
+
+    Returns (K_G3, k_g, P) with `k_g`/`P` the per-story lateral quantities,
+    unchanged in meaning from geometric_stiffness_matrix.
+    """
+    K_G_lat, k_g, P = geometric_stiffness_matrix(N, m_per_floor, h, g=g)
+
+    pos = column_plan_positions(plan_span_x, plan_span_y)
+    r_sq = float(np.mean(pos[:, 0] ** 2 + pos[:, 1] ** 2))
+    K_G_rot = _relative_drift_matrix(k_g * r_sq)
+
+    K_G3 = np.zeros((3 * N, 3 * N))
+    K_G3[:N, :N] = K_G_lat
+    K_G3[N:2 * N, N:2 * N] = K_G_lat
+    K_G3[2 * N:, 2 * N:] = K_G_rot
+    return K_G3, k_g, P
+
+
+def mass_matrix_3N(N, m_per_floor, plan_span_x, plan_span_y):
+    """diag(m_i, m_i, I_m,i) per floor, with I_m,i = m_i(a^2 + b^2)/12.
+
+    The rigid diaphragm is a uniformly distributed plate of plan a x b, so
+    the rotational inertia keeps the plate's radius of gyration -- unlike
+    the gravity torque in geometric_stiffness_3N, which acts through the
+    corner columns. Both radii are correct; see that docstring.
+
+    `a`, `b` come from spec 8's plan_span_x/y, so I_m tracks the Area
+    slider for free.
+    """
+    m = np.broadcast_to(np.asarray(m_per_floor, dtype=float), (N,))
+    I_m = m * (float(plan_span_x) ** 2 + float(plan_span_y) ** 2) / 12.0
+    return np.diag(np.concatenate([m, m, I_m]))
 
 
 def story_stiffness_profile(K_L, M, phi1):
@@ -1989,6 +2176,221 @@ class MDOF_ShearBuilding:
                     row.append(self.floor_disp_abs[i, t_idx])
                 writer.writerow(row)
         print(f"Saved response to {filename}")
+
+
+# --- Spec 12: the coupled 3N building -------------------------------------
+
+class MDOF_Building3N:
+    """Three DOFs per floor -- u_x, u_y and theta_z -- in ONE coupled solve.
+
+    Spec 11 gave every (story, column) its own hysteresis, but in a
+    one-lateral-DOF-per-floor model that asymmetry has no dynamic
+    consequence: all four columns share one drift, so a weakened east
+    column changes nothing about how the building moves. With a rotational
+    DOF the feedback -- twist -> more demand on the damaged side -> more
+    damage -> more twist -- emerges from the dynamics instead of being
+    animated.
+
+    This is still modal frequency-domain FFT convolution. `M` and `K_3N`
+    are both real symmetric, so `Phi^T M Phi = I` still diagonalises and
+    the system stays classically dampable with one shared `zeta` across
+    all 3N modes -- that property is exactly what lets the FFT kernel
+    survive the change (spec A5). Newmark remains validation-only.
+
+    DOF ordering is `[u_x,1..N, u_y,1..N, theta_1..N]` throughout; see the
+    "Spec 12" block beside the frame math for the sign convention and the
+    pinned column plan positions.
+
+    **This is a new class, not a mutation of MDOF_ShearBuilding.** It
+    *holds* two per-axis MDOF_ShearBuilding instances (`self.bx`,
+    `self.by`) and takes `k0_profile`, `V_p_profile`, `delta_y_profile`
+    and the nonlinear backbones from them unchanged. That is not
+    convenience: `story_stiffness_profile` is a first-mode pushover of a
+    single-axis condensed frame, and there is no meaningful "first-mode
+    pushover" of a coupled 3N system that reproduces those numbers (spec
+    correction C-2). It also keeps spec 11's per-column backbones and the
+    elastic 3N assembly derived from the *same* condensed frames, with no
+    second definition of story stiffness introduced, and it is what makes
+    verification check 1's bit-identity reachable at all.
+    """
+
+    def __init__(self, num_stories, mass_per_floor=1000e3, zeta=0.05,
+                 story_height=3.5, column_depth_x=1.10, column_depth_y=1.10,
+                 beam_depth=1.50, E=E_CONCRETE,
+                 plan_span_x=PLAN_SPAN_X, plan_span_y=PLAN_SPAN_Y,
+                 section_stiffness_mode=DEFAULT_SECTION_STIFFNESS_MODE,
+                 cracked_factor_column=None, cracked_factor_beam=None,
+                 p_delta=True,
+                 f_y=F_Y_STEEL, f_c=F_C_CONCRETE,
+                 rho_longitudinal=RHO_LONGITUDINAL,
+                 concrete_cover=CONCRETE_COVER, phi_axial=PHI_AXIAL,
+                 axial_cap_factor=AXIAL_CAP_FACTOR,
+                 nonlinear=False, **nonlinear_params):
+        per_axis = dict(
+            num_stories=num_stories, mass_per_floor=mass_per_floor,
+            zeta=zeta, story_height=story_height,
+            column_depth_x=column_depth_x, column_depth_y=column_depth_y,
+            beam_depth=beam_depth, E=E,
+            plan_span_x=plan_span_x, plan_span_y=plan_span_y,
+            section_stiffness_mode=section_stiffness_mode,
+            cracked_factor_column=cracked_factor_column,
+            cracked_factor_beam=cracked_factor_beam,
+            p_delta=p_delta, f_y=f_y, f_c=f_c,
+            rho_longitudinal=rho_longitudinal, concrete_cover=concrete_cover,
+            phi_axial=phi_axial, axial_cap_factor=axial_cap_factor,
+            nonlinear=nonlinear, **nonlinear_params)
+
+        # Two cheap elastic eigensolves. They also mean a gravity-unstable
+        # parameter set raises with the per-axis machinery's story
+        # diagnostic before the 3N assembly is even built.
+        self.bx = MDOF_ShearBuilding(axis="X", **per_axis)
+        self.by = MDOF_ShearBuilding(axis="Y", **per_axis)
+
+        self.nonlinear = bool(nonlinear)
+        self.nonlinear_params = nonlinear_params
+        self.N = num_stories
+        self.m = mass_per_floor
+        self.zeta = zeta
+        self.h = self.bx.h
+        self.total_height = self.bx.total_height
+        self.E = E
+        self.plan_span_x = plan_span_x
+        self.plan_span_y = plan_span_y
+        self.section_stiffness_mode = self.bx.section_stiffness_mode
+        self.cracked_factor_column = self.bx.cracked_factor_column
+        self.cracked_factor_beam = self.bx.cracked_factor_beam
+        self.p_delta = bool(p_delta)
+        self.gravity_unstable = False
+
+        self.column_positions = column_plan_positions(plan_span_x, plan_span_y)
+
+        # Per-axis capacity/stiffness profiles, taken unchanged (C-2). Named
+        # `*_x` / `*_y` rather than collapsed into one array, because a
+        # column's plastic shear genuinely differs by bending axis.
+        self.k0_profile_x = self.bx.k0_profile
+        self.k0_profile_y = self.by.k0_profile
+        self.V_p_profile_x = self.bx.V_p_profile
+        self.V_p_profile_y = self.by.V_p_profile
+        self.delta_y_profile_x = self.bx.delta_y_profile
+        self.delta_y_profile_y = self.by.delta_y_profile
+
+        self._build_matrices()
+        self._modal_analysis()
+
+    def _build_matrices(self):
+        N = self.N
+        self.M = mass_matrix_3N(N, self.m, self.plan_span_x, self.plan_span_y)
+
+        # Same cracked-section knock-down as the per-axis class, taken from
+        # the instances themselves so the two can never disagree.
+        self.I_c_x = self.bx.I_c
+        self.I_c_y = self.by.I_c
+        self.I_b = self.bx.I_b
+
+        self.K_no_pdelta = assemble_K3N(
+            N, self.E, self.I_c_x, self.I_c_y, self.I_b, self.h,
+            self.plan_span_x, self.plan_span_y)
+
+        self.K_G, self.k_g, self.P_gravity = geometric_stiffness_3N(
+            N, self.m, self.h, self.plan_span_x, self.plan_span_y)
+
+        if self.p_delta:
+            self.K = self.K_no_pdelta - self.K_G
+        else:
+            # Assigned directly, not via a zero-scaled subtraction, so the
+            # regression path is bit-identical rather than merely close --
+            # same reason as MDOF_ShearBuilding._build_matrices.
+            self.K = self.K_no_pdelta
+
+    def _modal_analysis(self):
+        """Generalized eigenproblem K_3N Phi = omega^2 M Phi, over 3N modes."""
+        n = 3 * self.N
+        eigvals, eigvecs = scipy_eigh(self.K, self.M, lower=True)
+        idx = np.argsort(eigvals)
+
+        # Gravity-instability guard BEFORE np.sqrt -- see
+        # GravityInstabilityError's docstring for where the nan would
+        # otherwise surface. The 3N system can go unstable torsionally as
+        # well as laterally, so the message names which block the failing
+        # mode lives in rather than assuming it is lateral.
+        if eigvals[idx][0] <= 0.0:
+            self.gravity_unstable = True
+            v = eigvecs[:, idx[0]]
+            share = [float(np.sum(v[k * self.N:(k + 1) * self.N] ** 2))
+                     for k in range(3)]
+            block = ("u_x", "u_y", "theta_z")[int(np.argmax(share))]
+            story = self.bx._weakest_story()
+            raise GravityInstabilityError(
+                f"Gravity exceeds lateral stiffness: the building cannot "
+                f"stand under its own weight at these parameters (3N "
+                f"coupled model, failing mode is dominantly {block}; "
+                f"weakest lateral story {story + 1} of {self.N}; smallest "
+                f"eigenvalue {float(eigvals[idx][0]):.6e} <= 0). Reduce the "
+                f"mass or story height, or increase the column depth.",
+                story=story)
+
+        self.omega_n = np.sqrt(eigvals[idx])
+        self.phi = eigvecs[:, idx]
+        for i in range(n):
+            norm = np.sqrt(np.dot(self.phi[:, i].conj(), self.M @ self.phi[:, i]))
+            self.phi[:, i] /= norm
+
+        # Influence vectors for translational base excitation: unit
+        # displacement of every floor in one direction, and **zero on the
+        # theta DOFs** -- the ground translates, it does not spin.
+        self.iota_x = np.zeros(n)
+        self.iota_x[:self.N] = 1.0
+        self.iota_y = np.zeros(n)
+        self.iota_y[self.N:2 * self.N] = 1.0
+
+        self.Gamma_x = self.phi.T @ (self.M @ self.iota_x)
+        self.Gamma_y = self.phi.T @ (self.M @ self.iota_y)
+
+        # Gamma^theta is the rotational share of that load vector. M is
+        # block-diagonal and iota is zero on the theta DOFs, so this is
+        # identically zero -- which is the point. A nonzero value means the
+        # mass matrix picked up spurious u-theta coupling or an influence
+        # vector was built with 1s in the theta block, and either would
+        # otherwise show up only as a wrong answer. Verification check 4
+        # asserts it rather than assuming it.
+        rot = slice(2 * self.N, 3 * self.N)
+        self.Gamma_theta = (
+            self.phi[rot, :].T @ (self.M @ self.iota_x)[rot]
+            + self.phi[rot, :].T @ (self.M @ self.iota_y)[rot])
+
+        # Modal mass share per DOF block, used to say which modes are
+        # torsional. Sums to 1 per mode because Phi is mass-normalised.
+        self.modal_block_share = np.vstack([
+            np.einsum('in,ij,jn->n',
+                      self.phi[k * self.N:(k + 1) * self.N, :],
+                      self.M[k * self.N:(k + 1) * self.N,
+                             k * self.N:(k + 1) * self.N],
+                      self.phi[k * self.N:(k + 1) * self.N, :])
+            for k in range(3)])
+
+    def _modes_of_block(self, k):
+        """Ascending frequencies of the modes dominated by DOF block `k`."""
+        which = np.argmax(self.modal_block_share, axis=0) == k
+        return self.omega_n[which]
+
+    def torsional_frequencies(self):
+        """Ascending omega of the theta-dominated modes (rad/s)."""
+        return self._modes_of_block(2)
+
+    def lateral_frequencies(self, axis):
+        """Ascending omega of the u_x- or u_y-dominated modes (rad/s)."""
+        if axis not in ("X", "Y"):
+            raise ValueError(f"axis must be 'X' or 'Y', got {axis!r}")
+        return self._modes_of_block(0 if axis == "X" else 1)
+
+    def frequency_ratio(self, axis="X"):
+        """Omega = omega_theta,1 / omega_lateral,1 (spec A3).
+
+        Below ~1 marks a torsionally-flexible structure, which codes
+        restrict -- useful for spec 18.
+        """
+        return float(self.torsional_frequencies()[0]
+                     / self.lateral_frequencies(axis)[0])
 
 
 # --- Ground-motion frequency-domain spectrum (spec 6, Part A) -------------
