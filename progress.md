@@ -2091,3 +2091,85 @@ Existing regressions re-run after the shared-code refactor:
 `verify_frame_furniture.py`, `verify_elastic_foundation.py` and
 `verify_floor_area.py` all report ALL CHECKS PASSED, including the
 `/compute`-vs-`out/` parity checks and the pre-spec-10 baseline fixture.
+
+## Spec 12 (torsion) — Task 2: elastic 3N response, two-component excitation
+
+**Commit:** see `goal/12-torsion`. Gate A passed.
+
+### What changed
+
+`mdof_response.py`:
+- `ComponentPairingError`, `assign_component_axes()`, `PairedComponents`,
+  `pair_components()` — B5's rules in one place. Rejects a missing Y
+  component, an unassigned orientation, or `dt_y != dt_x`; zero-pads a
+  length mismatch from sample 0 and reports it; returns the header fields
+  that record the assignment.
+- `MDOF_Building3N.compute_response(accel_x, disp_x, accel_y, disp_y, dt)`
+  — one coupled solve, `RHS = −M(ι_x a_gx + ι_y a_gy)`, per-mode
+  `Q_n = −(Γ_n^x A_x + Γ_n^y A_y)/(ω_n² − ω² + 2jζω_nω)`. Same padding
+  rationale and `min(4·npts, …)` cap as the per-axis method. Sets
+  `floor_disp_rel_x/_y`, `floor_rot`, the `_abs` variants and the
+  acceleration variants (via `−ω²Q` on `Q_fft`, not `np.gradient`).
+- `MDOF_Building3N.dof_offset(axis)` / `.participation(axis)`.
+- `transfer_function(..., dof_offset=0)` — B4's DOF-block selection, with
+  the default leaving all four existing callers unchanged.
+- Offline `__main__`: keeps Y's `dt` instead of discarding it (C-4), calls
+  `assign_component_axes` for the X/Y split, and writes the pairing verdict
+  into `ground_accel.json`.
+
+`claude_scripts/verify_torsion.py`: check 1's response half, check 4's
+direct-solve half, and check 8. `claude_scripts/performance_torsion.py`:
+Gate A timing.
+
+### Verification output
+
+`verify_torsion.py` — checks 1, 2, 3, 4, 8 all PASS.
+- check 1: `K`/`M`/`K_no_pdelta` sub-blocks bit-identical and all six
+  coupling blocks exactly 0.0 with `p_delta` on and off; over all 10
+  records and both slow-axis configurations, `theta_z(t) == 0.0` exactly
+  everywhere, matched-grid departure `1.094e-14` (X-slow) and `1.235e-14`
+  (Y-slow).
+- check 4: `ΦᵀMΦ = I` to `4.877e-16`; `ΦᵀKΦ` off-diagonal `1.435e-16`
+  relative; `max|Γ^θ| = 0.000e+00`; modal sum vs direct
+  `(K − ω²M + jωC)⁻¹` solve over 1024 frequency lines: **`4.573e-14`**.
+- check 8: dt mismatch, unparsed orientation and missing Y all rejected;
+  7-sample zero-pad applied from sample 0 with the tail exactly zero;
+  swapping `KOCAELI_AYD`'s components changes `u_x` by **141.50% RMS**.
+
+`run_spec11_regressions.py` — all 15 exit 0.
+
+Offline pipeline regenerated into a scratch directory against the real
+`data/`: all 10 folders processed, no rejections. Diff against tracked
+`out/`: of 61 files, **only** the 10 `ground_accel.json` differ, and only
+by the five new keys — every pre-existing key byte-identical. Those 10
+files were copied into `out/` rather than doing a full regeneration.
+
+### Rulings made (recorded as spec C-7…C-10, verification V-10…V-13)
+
+1. **Check 1's response-level bit-identity is unreachable and was amended,
+   not dropped.** Cause measured, not guessed: the zero-pad length follows
+   the slowest mode of the *coupled* system, so the stiffer axis lands on a
+   different frequency grid (`pad_x = 21566` vs `pad_3N = 21653` on
+   `ANZA1_CIDLA`, giving `9.578e-06`). Re-running the per-axis kernel at the
+   3N pad length reproduces the 3N answer to `6.2e-15`, and against a
+   `4·npts` reference the 3N grid is the *more* accurate of the two
+   (`1.169e-05` vs `1.601e-05`). Rather than loosening to ~1e-5 — which
+   would hide a real assembly error — each axis is asserted at 1e-12 in the
+   configuration where it carries the slowest mode, so both kernels share a
+   grid. `theta_z == 0.0` stays exact.
+2. **A blockwise eigensolve was considered and rejected.** It would restore
+   bit-identity, but it contradicts B1's "one solve" and would make checks
+   1 and 4 true by construction rather than testing the assembly.
+3. **`transfer_function` took `dof_offset`, not an axis name** — one
+   optional argument, default 0, so the four existing Python callers are
+   untouched. The JS mirror changes with the frontend work (Task 5).
+4. **Nonlinear `compute_response` raises `NotImplementedError`** rather
+   than silently solving elastically; the 3N pseudo-force is Task 3.
+5. **The axis→compass assignment is per-record, not global** (V-13). Eight
+   records get X = 0°, but `KOCAELI_AYD` (90/180) and both `PARK2004`
+   records (90/360) get X = East. Correct per the documented lower-azimuth
+   rule; left unchanged because changing it would break byte-identity of
+   existing outputs. Now recorded in the header, so it stays visible.
+6. **Gate A passed:** coupled vs per-axis elastic, `KOCAELI_AYD` at
+   intensity 40, best of 3 — N=7 `0.0870 s` vs `0.0740 s` (1.175×), N=20
+   `0.3133 s` vs `0.3927 s` (**0.798×, faster**). Sub-second either way.

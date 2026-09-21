@@ -895,6 +895,108 @@ def get_orientation_from_filename(filename):
     print(f"Warning: Could not parse orientation for {filename}. Skipping.")
     return None
 
+
+class ComponentPairingError(ValueError):
+    """The two horizontal components cannot drive one coupled 3N solve.
+
+    Raised rather than patched over: spec 12 B5 makes component pairing a
+    correctness issue, because a swapped or mis-timed pairing produces a
+    plausible-looking but wrong twist. Every caller's response is the same
+    -- fall back to the per-axis elastic path for that record.
+    """
+
+
+def assign_component_axes(orients):
+    """(x_orient, y_orient) from a record's horizontal azimuths.
+
+    X is the LOWER azimuth. That is a heuristic, not a compass direction
+    (spec correction C-4): it is the sort that decides, not the filename
+    parser, so the assignment is recorded in the header by
+    `pair_components` and stays detectable after the fact.
+    """
+    ordered = sorted(orients)
+    if len(ordered) < 2:
+        raise ComponentPairingError(
+            f"a record needs two horizontal components, got {ordered}")
+    return ordered[0], ordered[1]
+
+
+class PairedComponents:
+    """Two horizontal components on one time base, plus what was done."""
+
+    __slots__ = ("accel_x", "disp_x", "accel_y", "disp_y", "dt",
+                 "npts", "pad_x", "pad_y", "header")
+
+    def __init__(self, accel_x, disp_x, accel_y, disp_y, dt,
+                 npts, pad_x, pad_y, header):
+        self.accel_x = accel_x
+        self.disp_x = disp_x
+        self.accel_y = accel_y
+        self.disp_y = disp_y
+        self.dt = dt
+        self.npts = npts
+        self.pad_x = pad_x
+        self.pad_y = pad_y
+        self.header = header
+
+
+def pair_components(accel_x, disp_x, dt_x, accel_y, disp_y, dt_y,
+                    x_orient=None, y_orient=None, label=""):
+    """Align a record's two horizontal components for one 3N solve.
+
+    The two `.AT2` files are simultaneous recordings of the same event, so
+    they are aligned on sample index 0 and zero-**padded** to a common
+    length -- never resampled, which would shift phase and quietly
+    invent a different earthquake. Spec 12 B5, verification check 8.
+
+    Raises `ComponentPairingError` (caller falls back to the per-axis
+    path) when there is no Y component, when either orientation could not
+    be assigned, or when the two components were sampled at different
+    rates. That last guard is new: `load_component` returned each
+    component's own `dt` and the offline caller discarded Y's, so a
+    mismatched pair would have been solved as though it were simultaneous
+    (spec correction C-4). Latent while every shipped record has one
+    shared `dt`; a correctness defect the moment both components drive one
+    solve.
+    """
+    tag = f"{label}: " if label else ""
+    if accel_y is None or disp_y is None:
+        raise ComponentPairingError(
+            f"{tag}no Y component -- rejected for torsion, use the per-axis "
+            f"path")
+    if x_orient is None or y_orient is None:
+        raise ComponentPairingError(
+            f"{tag}orientation could not be assigned (x={x_orient}, "
+            f"y={y_orient}) -- rejected for torsion rather than guessed")
+    if dt_y != dt_x:
+        raise ComponentPairingError(
+            f"{tag}the two components were sampled at different rates "
+            f"(dt_x={dt_x}, dt_y={dt_y}); they cannot be treated as "
+            f"simultaneous -- rejected for torsion")
+
+    arrays = [np.asarray(a, dtype=float)
+              for a in (accel_x, disp_x, accel_y, disp_y)]
+    npts = max(len(a) for a in arrays)
+
+    def padded(a):
+        if len(a) == npts:
+            return a
+        out = np.zeros(npts)
+        out[:len(a)] = a
+        return out
+
+    pad_x = npts - min(len(arrays[0]), len(arrays[1]))
+    pad_y = npts - min(len(arrays[2]), len(arrays[3]))
+    if pad_x or pad_y:
+        print(f"  {tag}component length mismatch -- zero-padding X by "
+              f"{pad_x} and Y by {pad_y} samples to {npts} (not resampled).")
+
+    return PairedComponents(
+        *[padded(a) for a in arrays], dt_x, npts, pad_x, pad_y,
+        {"x_orient_deg": x_orient, "y_orient_deg": y_orient,
+         "component_pad_x": pad_x, "component_pad_y": pad_y})
+
+
 def parse_peer_file(filename, convert_to_ms2=True):
     """Parse a PEER .AT2 acceleration file. Returns (acceleration, dt) in m/s²."""
     with open(filename, 'r') as f:
@@ -2392,6 +2494,140 @@ class MDOF_Building3N:
         return float(self.torsional_frequencies()[0]
                      / self.lateral_frequencies(axis)[0])
 
+    # --- DOF-block addressing (spec 12 B4) -------------------------------
+
+    _DOF_BLOCK = {"X": 0, "Y": 1, "THETA": 2}
+
+    def dof_offset(self, axis="X"):
+        """Row offset of a DOF block in the `[u_x, u_y, theta]` ordering.
+
+        `phi[building.dof_offset('Y') + i, n]` is floor `i`'s u_y component
+        of mode `n`. This is what `transfer_function`'s `dof_offset`
+        argument takes: the Frequency tab's X/Y toggle selects a DOF block
+        of one 3N solve, not a separate solve (B4).
+        """
+        try:
+            return self.N * self._DOF_BLOCK[axis]
+        except KeyError:
+            raise ValueError(
+                f"axis must be 'X', 'Y' or 'THETA', got {axis!r}") from None
+
+    def participation(self, axis="X"):
+        """Gamma^x / Gamma^y / Gamma^theta, by the same axis names."""
+        self.dof_offset(axis)          # one place validates the name
+        return {"X": self.Gamma_x, "Y": self.Gamma_y,
+                "THETA": self.Gamma_theta}[axis]
+
+    # --- Response (spec 12 B1/B5) ----------------------------------------
+
+    def compute_response(self, accel_x, disp_x, accel_y, disp_y, dt,
+                         nonlinear=None):
+        """One coupled 3N solve driven by BOTH components simultaneously.
+
+            RHS(t) = -M ( iota_x a_g,x(t) + iota_y a_g,y(t) )
+
+        so modal coordinate `n` obeys
+
+            q_n'' + 2 zeta w_n q_n' + w_n^2 q_n
+                = -( Gamma_n^x a_g,x + Gamma_n^y a_g,y )
+
+        which is `MDOF_ShearBuilding.compute_response`'s per-mode solve
+        with a two-term forcing instead of one. Same H_n(jw), same
+        zero-padding rationale, same `min(4*npts, ...)` cap -- see that
+        method for why the padding exists at all.
+
+        The two components must already be paired onto one time base
+        (`pair_components`); this method does not re-align them.
+
+        **Why u_x(t) is not bit-identical to the per-axis solve**, even
+        though `K`'s u_x sub-block is (check 1's matrix half, and
+        verification correction V-10): the 3N eigensolve is one LAPACK
+        call over the whole `3N x 3N` pair, which reproduces the per-axis
+        eigenvalues to ~4e-16 relative rather than exactly; and `pad_len`
+        follows the slowest mode of the *coupled* system, which is
+        generally the other axis's. A blockwise eigensolve would recover
+        bit-identity, but only by making the "one solve" of B1 three
+        decoupled ones -- and it would make check 1 and check 4 true by
+        construction instead of testing the assembly. V-10 records the
+        measured departure the tolerance was set against.
+        """
+        if nonlinear is True or (nonlinear is None and self.nonlinear):
+            raise NotImplementedError(
+                "the nonlinear 3N pseudo-force assembly lands with spec 12 "
+                "Task 3; call with nonlinear=False for the elastic solve")
+
+        accel_x = np.asarray(accel_x, dtype=float)
+        accel_y = np.asarray(accel_y, dtype=float)
+        if len(accel_x) != len(accel_y):
+            raise ComponentPairingError(
+                f"the two components must already be aligned to one length "
+                f"(got {len(accel_x)} and {len(accel_y)}); call "
+                f"pair_components first")
+
+        self.accel_x = accel_x
+        self.accel_y = accel_y
+        self.ground_disp_x = np.asarray(disp_x, dtype=float)
+        self.ground_disp_y = np.asarray(disp_y, dtype=float)
+        self.dt = dt
+        self.npts = len(accel_x)
+        self.time = np.arange(self.npts) * dt
+
+        settle_time = 5.0 / (self.zeta * self.omega_n[0])
+        pad_len = min(4 * self.npts,
+                      self.npts + int(np.ceil(settle_time / dt)))
+        self.pad_len = pad_len
+
+        ax_padded = np.zeros(pad_len)
+        ax_padded[:self.npts] = accel_x
+        ay_padded = np.zeros(pad_len)
+        ay_padded[:self.npts] = accel_y
+
+        Ax_fft = fft(ax_padded)
+        Ay_fft = fft(ay_padded)
+        omega = 2 * np.pi * fftfreq(pad_len, dt)
+
+        n = 3 * self.N
+        q_time = np.zeros((n, pad_len))
+        qacc_time = np.zeros((n, pad_len))
+        for i in range(n):
+            wn = self.omega_n[i]
+            z = self.zeta
+            denom = (wn**2 - omega**2 + 1j * 2 * z * wn * omega)
+            # Superposition of the two components' forcing on this mode.
+            # Gamma_x and Gamma_y are the two participation factors of B4;
+            # Gamma_theta is zero for translational excitation and so does
+            # not appear (asserted, not assumed -- check 4).
+            Q_fft = -(self.Gamma_x[i] * Ax_fft + self.Gamma_y[i] * Ay_fft) \
+                / denom
+            q_time[i, :] = np.real(ifft(Q_fft))
+            # Floor absolute acceleration via the transform's
+            # differentiate-in-time property, on Q_fft -- same reasoning as
+            # the per-axis method, not a np.gradient shortcut.
+            qacc_time[i, :] = np.real(ifft(-(omega**2) * Q_fft))
+
+        q_time = q_time[:, :self.npts]
+        qacc_time = qacc_time[:, :self.npts]
+
+        u_rel = self.phi @ q_time
+        a_rel = self.phi @ qacc_time
+
+        x, y, t = (slice(0, self.N), slice(self.N, 2 * self.N),
+                   slice(2 * self.N, n))
+        self.floor_disp_rel_x = u_rel[x]
+        self.floor_disp_rel_y = u_rel[y]
+        self.floor_rot = u_rel[t]
+        self.floor_accel_rel_x = a_rel[x]
+        self.floor_accel_rel_y = a_rel[y]
+        self.floor_rot_accel = a_rel[t]
+
+        self.floor_disp_abs_x = self.floor_disp_rel_x + self.ground_disp_x
+        self.floor_disp_abs_y = self.floor_disp_rel_y + self.ground_disp_y
+        self.floor_accel_abs_x = self.floor_accel_rel_x + self.accel_x
+        self.floor_accel_abs_y = self.floor_accel_rel_y + self.accel_y
+
+        return (self.time, self.floor_disp_rel_x, self.floor_disp_rel_y,
+                self.floor_rot)
+
 
 # --- Ground-motion frequency-domain spectrum (spec 6, Part A) -------------
 
@@ -2481,7 +2717,8 @@ def log_bin_spectrum(signal, dt, n_bins=400):
     return f_centers, values
 
 
-def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx):
+def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx,
+                      dof_offset=0):
     """
     Analytic transfer function from ground acceleration to floor
     `floor_idx`'s displacement RELATIVE to ground (spec 6 Part A2) --
@@ -2505,6 +2742,15 @@ def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx):
     `phi` must be mass-normalized (phi^T M phi = I), as produced by
     _modal_analysis() -- do not renormalize it here.
 
+    `dof_offset` selects the DOF block for the 3N torsional kernel (spec
+    12 B4): `phi`'s rows are ordered `[u_x,1..N, u_y,1..N, theta_1..N]`, so
+    floor `floor_idx`'s u_y row is `MDOF_Building3N.dof_offset('Y') +
+    floor_idx`. Pass the matching `Gamma^x`/`Gamma^y` from
+    `MDOF_Building3N.participation(axis)` -- an axis's transfer function
+    needs BOTH the right rows of `phi` and the right participation vector.
+    The default 0 leaves the per-axis `MDOF_ShearBuilding` callers
+    unchanged.
+
     Returns (T_i, mode_terms):
         T_i: complex ndarray, shape (len(f_hz),) -- the solid curve,
             T_i = -mode_terms.sum(axis=0).
@@ -2516,11 +2762,12 @@ def transfer_function(f_hz, omega_n, phi, Gamma, zeta, floor_idx):
     omega = 2 * np.pi * np.asarray(f_hz, dtype=float)
     n_modes = phi.shape[1]
     mode_terms = np.empty((n_modes, len(omega)), dtype=complex)
+    row = dof_offset + floor_idx
     for j in range(n_modes):
         wn = omega_n[j]
         denom = (wn**2 - omega**2 + 1j * 2 * zeta * wn * omega)
         H_j = 1.0 / denom
-        mode_terms[j] = phi[floor_idx, j] * Gamma[j] * H_j
+        mode_terms[j] = phi[row, j] * Gamma[j] * H_j
     T_i = -mode_terms.sum(axis=0)
     return T_i, mode_terms
 
@@ -2742,8 +2989,7 @@ if __name__ == "__main__":
             print("  Need at least two horizontal components. Skipping folder.")
             continue
 
-        x_orient = at2_orients[0]
-        y_orient = at2_orients[1]
+        x_orient, y_orient = assign_component_axes(at2_orients)
         print(f"  X axis: {x_orient}°, Y axis: {y_orient}°")
 
         # Build DT2 orientation dict
@@ -2817,8 +3063,29 @@ if __name__ == "__main__":
         furn_x, npts_dec_x, q_x, rate_x = building_x.get_decimated_furniture()
 
         # Process Y
-        accel_y, disp_y, _ = load_component(y_orient, "Y", building_y)
+        accel_y, disp_y, dt_y = load_component(y_orient, "Y", building_y)
         has_y = accel_y is not None
+
+        # Spec 12 B5 / correction C-4: decide NOW whether this record's two
+        # components can legitimately drive one coupled 3N solve, and record
+        # the answer alongside the cached traces. Y's own dt used to be
+        # discarded here in favour of X's, which is harmless while the two
+        # axes are solved independently and a silent correctness defect the
+        # moment they are not.
+        try:
+            paired = pair_components(accel_x, disp_x, dt,
+                                     accel_y, disp_y, dt_y,
+                                     x_orient=x_orient, y_orient=y_orient,
+                                     label=folder)
+            torsion_header = dict(paired.header, torsion_eligible=True)
+        except ComponentPairingError as exc:
+            print(f"  Not eligible for torsion: {exc}")
+            torsion_header = {"x_orient_deg": x_orient,
+                              "y_orient_deg": y_orient,
+                              "component_pad_x": 0, "component_pad_y": 0,
+                              "torsion_eligible": False,
+                              "torsion_rejected_because": str(exc)}
+
         if has_y:
             time, g_disp_y, rel_y, abs_y = building_y.compute_response(accel_y, disp_y, dt)
             building_y.save_to_csv(os.path.join(out_folder, "response_Y.csv"), prefix="Y")
@@ -2880,6 +3147,11 @@ if __name__ == "__main__":
             "X_disp": disp_x.tolist(),
             "Y_disp": disp_y.tolist() if accel_y is not None else None,
             "reference_magnitude": reference_magnitude,
+            # Which azimuth was assigned X and which Y. The assignment is a
+            # sort (`assign_component_axes`), not a compass reading, so
+            # recording it is what keeps a swapped pairing detectable after
+            # the fact (spec correction C-4, verification V-6).
+            **torsion_header,
         }
         with open(os.path.join(out_folder, "ground_accel.json"), 'w') as f:
             json.dump(ground_accel_data, f)
