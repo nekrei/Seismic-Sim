@@ -2818,3 +2818,42 @@ Section 9 was stale since spec 12 merged: `main`'s elastic default is now
 torsion on. The reference now asks `main` for torsion=false. Both elastic
 payloads were confirmed byte-identical to `main` separately. ALL CHECKS
 PASSED, exit 0.
+
+### Task 7 — real-browser negative pass, check 11 / V-8 (2026-09-22)
+
+**Finding (for spec 15 and the docs).** The UI's own Collapse Analysis
+request cannot currently produce a converged detachment. It sends scalar
+sliders only, `intensity_scale` 1 and the default 40 iterations, and
+magnitude is capped at 9.0 (×30.9 RMS on KOCAELI_AYD). Across 12
+slider-only KOCAELI_AYD probes (N 4–5, columns 0.6–1.1 m, soft story
+on/off, mass 1,000–5,000 t, M 8.8–9.0) the result was either collapse
+onset without all four columns failing, or no convergence.
+
+**Ruling R15.** The browser pass drove the real frontend with a
+test-only `fetch` wrapper, injected from the page console. It added
+section 10's verified detaching parameters to the UI's own nonlinear
+request (N=4, story-3 profile 0.7 m, ×20, M 8.0,
+hftd_max_iterations 200). Everything downstream is shipped code. No app
+code changed.
+
+Results: Claude in Chrome, worktree `server.py` on 127.0.0.1:8001
+(port 8000 was held by another process, left untouched), KOCAELI_AYD, Run
+collapse analysis.
+- `/compute` returned 200 in 55 s: `handoff_version` 1, story 3 at
+  80.54 s (X), floor_state in metres (x ≈ −1.03 m, vx ≈ −1.47 m/s),
+  surviving_stories 2.
+- **Hold:** the 4-story building renders. Floors 3–4 sit at the same
+  place at 120 s and 200 s while the survivor moves; they are held, not
+  vanished or flown off.
+- **Signals Time tab:** finite traces with sane peaks (floor 4:
+  1.64 m relative; floor 1: 2.75 cm; ground: 3.17 m/s²). A held floor's
+  relative trace after t_d is −ground, as documented.
+- **Scrubbing** 70 → 79 → 80 → 80.5 → 80.6 → 81 → 120 → 200 → 81 → 79 s:
+  no discontinuity artifact, no stale trace.
+- **Messages:** a 422 unstable-building message (19 stories, 0.30 m
+  columns, 5,000 t, soft story) dismissed with Esc and, separately, with
+  ×. Both times the sliders snapped back to the last valid building.
+- **Console:** zero errors on a fresh page load through the collapse run
+  and the scrubbing. An earlier session's 8 errors were all from my own
+  first wrapper (it parsed a 422 JSON body as binary), which was then
+  fixed.
