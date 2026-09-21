@@ -1405,6 +1405,9 @@ class HFTDResult:
     segments: int = 1
     padding_capped: bool = False
     reason: str = ''
+    # Spec 13: the pre-downsampling solve-grid histories (and the refined
+    # traces, when factor 4) kept so a restart can recover the exact state.
+    solve_grid: dict = None
 
 
 def _hysteresis_history(drift, bb, initial_state=None):
@@ -1477,13 +1480,16 @@ HysteresisAux = namedtuple(
     'HysteresisAux', 'state story_drift column_drift force tangent damage')
 
 
-def _per_axis_constitutive(bb):
+def _per_axis_constitutive(bb, initial=None):
     """Spec 11's one-drift-per-story constitutive law, as a callable.
 
     The drift broadcast across the column axis is a view, not arithmetic,
     so every number downstream is bit-identical to the pre-spec-12 code.
+    `initial` is the state a call with no state starts from: None (virgin)
+    for a from-rest solve, the frozen state for a spec-13 restart.
     """
     def constitutive(u, state=None):
+        state = initial if state is None else state
         story = np.diff(u, axis=0, prepend=np.zeros((1, u.shape[1])))
         drift = np.broadcast_to(story[:, None, :], (*bb['k0'].shape, u.shape[1]))
         force, tangent, damage, defect, machine = _hysteresis_history(drift, bb, state)
@@ -1492,7 +1498,7 @@ def _per_axis_constitutive(bb):
     return constitutive
 
 
-def _torsion_constitutive(bb_x, bb_y, positions):
+def _torsion_constitutive(bb_x, bb_y, positions, initial=None):
     """Spec 12 B2+B3: two independent per-column state machines, one placement.
 
     The two bending axes of a column are kept independent -- one state
@@ -1504,6 +1510,7 @@ def _torsion_constitutive(bb_x, bb_y, positions):
     deliberately out of scope (spec 12 B2).
     """
     def constitutive(u, state=None):
+        state = initial if state is None else state
         sx, sy = state if state is not None else (None, None)
         dx, dy = column_drift_3N(u, positions)
         fx, tx, gx, ex, mx = _hysteresis_history(dx, bb_x, sx)
@@ -1517,11 +1524,14 @@ def _torsion_constitutive(bb_x, bb_y, positions):
     return constitutive
 
 
-def evaluate_collapse_criteria(result, building):
+def evaluate_collapse_criteria(result, building, k_g=None):
     """Physical thresholds evaluated only after the fixed point converges.
 
     Global drift thresholds are descriptive FEMA 356 commentary values;
     crossing them is a model onset flag, not a validated failure prediction.
+    `k_g` optionally overrides `building.k_g` with a per-sample (N, npts)
+    history: after a spec-13 restart the survivor carries reduced gravity,
+    and the gravity criterion must use the P/h actually in force.
     """
     r, p, bb = result, result.backbones['params'], result.backbones
     drift = r.story_drift
@@ -1539,7 +1549,7 @@ def evaluate_collapse_criteria(result, building):
     for i in range(building.N):
         masks = [np.max(abs(col[i]),axis=0)/building.h[i] > p['drift_limit_cp'],
                  np.max(mu[i],axis=0) > p['collapse_mu_cap'],
-                 kt[i] <= (building.k_g[i] if building.p_delta else 0.)]
+                 kt[i] <= ((building.k_g[i] if k_g is None else k_g[i]) if building.p_delta else 0.)]
         hits = [(int(np.argmax(m)),name) for m,name in zip(masks,('drift','ductility','gravity')) if np.any(m)] if r.converged else []
         if hits:
             t,name = min(hits, key=lambda pair:pair[0])
@@ -1774,18 +1784,14 @@ def solve_hftd(building, accel, disp, dt, params=None):
     if np.all(np.max(abs(drift), axis=1)[:, None] <= bb['dy']):
         result = _solve_hftd_grid(building, accel, disp, dt, p)
         result.summary['sampling_factor'] = 1
+        result.solve_grid = _solve_grid(result, 1, dt, None)
         return result
 
-    from scipy.signal import resample
     factor = 4
-    n = len(a)
-    settle = 5 / (building.zeta * building.omega_n[0])
-    length = min(4*n, n + int(np.ceil(settle/dt)))
-    count = (n-1)*factor + 1
-    fine_a = resample(np.pad(a, (0, length-n)), length*factor)[:count]
-    fine_d = resample(np.pad(d, (0, length-n)), length*factor)[:count]
+    fine_a, fine_d = _refine_traces(building, (a, d), dt, factor)
     result = _solve_hftd_grid(building, fine_a, fine_d, dt/factor,
                               {**p, 'intensity_scale': 1.})
+    grid = _solve_grid(result, factor, dt/factor, (fine_a, fine_d))
     # Restore the native input/time metadata consumed by furniture and the
     # server; compute_response_nonlinear installs the returned floor arrays.
     building.compute_response(a, d, dt, nonlinear=False)
@@ -1804,7 +1810,49 @@ def solve_hftd(building, accel, disp, dt, params=None):
     result.summary.update(sampling_factor=factor,
                           predictor_iterations=predictor_iterations,
                           causality_error=causality_error)
+    result.solve_grid = grid
     return result
+
+
+def _refine_traces(building, traces, dt, factor=4):
+    """Band-limited `factor`x interpolation of already-scaled ground traces.
+
+    Shared by both sampling wrappers and by the spec-13 restart, which must
+    slice the SAME fine traces the original solve used rather than
+    re-resample a segment that starts mid-shake (that would add Gibbs
+    ringing at the restart the original solve never had).
+    """
+    from scipy.signal import resample
+    n = len(traces[0])
+    settle = 5 / (building.zeta * building.omega_n[0])
+    length = min(4*n, n + int(np.ceil(settle/dt)))
+    count = (n-1)*factor + 1
+    return [resample(np.pad(t, (0, length-n)), length*factor)[:count]
+            for t in traces]
+
+
+def _solve_grid(result, factor, dt, traces):
+    """References (not copies) to a result's solve-grid histories."""
+    views = (result.x, result.y) if isinstance(result, HFTD3NResult) else (result,)
+    return dict(factor=factor, dt=dt, traces=traces, u=result.u_rel,
+                velocity=result.velocity,
+                column_drift=[v.column_drift for v in views],
+                column_force=[v.column_force for v in views])
+
+
+def _base_velocity(building, a, dt):
+    """Velocity of the elastic base on compute_response's frequency grid."""
+    n, N = len(a), building.N
+    settle = 5/(building.zeta*building.omega_n[0])
+    old_len = min(4*n,n+int(np.ceil(settle/dt)))
+    old_w = 2*np.pi*fftfreq(old_len,dt)
+    af = fft(a,n=old_len)
+    base_vel=np.zeros((N, n))
+    for i in range(N):
+        old_den=building.omega_n[i]**2-old_w**2+2j*building.zeta*building.omega_n[i]*old_w
+        q=(-building.Gamma[i]/old_den)*af
+        base_vel+=np.outer(building.phi[:,i],np.real(ifft(1j*old_w*q))[:n])
+    return base_vel
 
 
 def _solve_hftd_grid(building, accel, disp, dt, params=None):
@@ -1826,17 +1874,9 @@ def _solve_hftd_grid(building, accel, disp, dt, params=None):
     base = building.floor_disp_rel.copy()
     base_acc = building.floor_accel_rel.copy()
     n, N = len(a), building.N
-    settle = 5/(building.zeta*building.omega_n[0])
     convolution = _HFTDConvolution(building,n,dt,p['hftd_segment_seconds'])
     # Velocity of the unchanged elastic base on its original frequency grid.
-    old_len = min(4*n,n+int(np.ceil(settle/dt)))
-    old_w = 2*np.pi*fftfreq(old_len,dt)
-    af = fft(a,n=old_len)
-    base_vel=np.zeros_like(base)
-    for i in range(N):
-        old_den=building.omega_n[i]**2-old_w**2+2j*building.zeta*building.omega_n[i]*old_w
-        q=(-building.Gamma[i]/old_den)*af
-        base_vel+=np.outer(building.phi[:,i],np.real(ifft(1j*old_w*q))[:n])
+    base_vel = _base_velocity(building, a, dt)
     force, u, aux, iteration, history, converged, predictor_iterations, causality_error = \
         _hftd_fixed_point(building, base, constitutive, convolution, dt, p,
                           float(np.min(bb['dy'])))
@@ -1923,6 +1963,7 @@ class HFTD3NResult:
     segments: int = 1
     padding_capped: bool = False
     reason: str = ''
+    solve_grid: dict = None
 
     @property
     def theta(self):
@@ -2074,19 +2115,15 @@ def solve_hftd_3N(building, ax, dx, ay, dy, dt, params=None):
             and np.all(np.max(abs(cdy), axis=-1) <= bb_y['dy'])):
         result = _solve_hftd_grid_3N(building, ax, dx, ay, dy, dt, p)
         result.summary['sampling_factor'] = 1
+        result.solve_grid = _solve_grid(result, 1, dt, None)
         return result
 
-    from scipy.signal import resample
     factor = 4
-    n = len(a_x)
-    settle = 5/(building.zeta*building.omega_n[0])
-    length = min(4*n, n + int(np.ceil(settle/dt)))
-    count = (n-1)*factor + 1
-    fine = [resample(np.pad(np.asarray(t, dtype=float)*p['intensity_scale'], (0, length-n)),
-                     length*factor)[:count]
-            for t in (ax, dx, ay, dy)]
+    fine = _refine_traces(building, [np.asarray(t, dtype=float)*p['intensity_scale']
+                                     for t in (ax, dx, ay, dy)], dt, factor)
     result = _solve_hftd_grid_3N(building, *fine, dt/factor,
                                  {**p, 'intensity_scale': 1.})
+    result.solve_grid = _solve_grid(result, factor, dt/factor, tuple(fine))
     building.compute_response(a_x, np.asarray(dx, dtype=float)*p['intensity_scale'],
                               a_y, np.asarray(dy, dtype=float)*p['intensity_scale'],
                               dt, nonlinear=False)
@@ -2204,6 +2241,102 @@ def slice_backbones(bb, stories):
     """Row slice of every (N, 4) backbone array -- the frozen backbone."""
     return {k: (v[:stories].copy() if isinstance(v, np.ndarray) else v)
             for k, v in bb.items()}
+
+
+class _RestartConvolution:
+    """The survivor's convolution operator, zero-input-corrected at tau=0.
+
+    A pseudo-force placed after the restart is convolved on the FULL-record
+    grid (so its band-limited response joins the fixed prefix without a
+    truncation jump), and the closed-form free vibration of its own value
+    and velocity at tau=0 is subtracted. Every iterate therefore starts from
+    exactly the handed-over state: continuity is a property of the operator,
+    not a patch on the stitched sample. Still linear, so the fixed point is
+    unchanged.
+    """
+
+    def __init__(self, convolution, start, building, tau):
+        self.convolution, self.start = convolution, start
+        self.building, self.tau = building, tau
+        self.compliance = convolution.compliance
+        self.segments = convolution.segments
+        self.padding_capped = convolution.padding_capped
+
+    def apply(self, force, derivatives=False):
+        full = np.zeros((force.shape[0], self.convolution.npts))
+        full[:, self.start:] = force
+        d, v, a = (x[:, self.start:] for x in self.convolution.apply(full, True))
+        fu, fv, fa = free_vibration(self.building, -d[:, 0], -v[:, 0], self.tau)
+        return d + fu, (v + fv if derivatives else None), (a + fa if derivatives else None)
+
+
+def _restart_solve(survivor, constitutive, base_full, vel_full, acc_full, start,
+                   prefix, u0, v0, dt, p, dy_min):
+    """Survivor response from sample `start`: zero-state + zero-input (C-3).
+
+    The particular (zero-state) part runs over the whole record on the
+    survivor: its elastic response to the full ground traces, plus the
+    convolution of `prefix`, the surviving columns' actual pseudo-force
+    before the restart. Both are continuous across `start`, so nothing is
+    truncated there. The closed-form free vibration of the survivor's modes
+    then carries the state difference `u0 - w(start)`, `v0 - w'(start)`.
+    Restricted to tau >= 0 that is exactly "free vibration from (u0, v0) +
+    convolution of the forcing after the restart". A from-rest FFT solve
+    that starts at the restart instead half-counts the first sample (a
+    band-limited pulse centred on tau=0), which breaks velocity continuity
+    by about a0*dt/2. The pseudo-force after `start` is found by the shared
+    fixed point.
+    """
+    nf = base_full.shape[1]
+    convolution = _HFTDConvolution(survivor, nf, dt, p['hftd_segment_seconds'])
+    if prefix is not None and np.any(prefix):
+        full = np.zeros_like(base_full)
+        full[:, :start] = prefix
+        d, v, a = convolution.apply(full, True)
+        base_full, vel_full, acc_full = base_full + d, vel_full + v, acc_full + a
+    tau = np.arange(nf - start) * dt
+    fu, fv, fa = free_vibration(survivor, u0 - base_full[:, start],
+                                v0 - vel_full[:, start], tau)
+    operator = _RestartConvolution(convolution, start, survivor, tau)
+    force, u, aux, iteration, history, converged, predictor_iterations, causality_error = \
+        _hftd_fixed_point(survivor, base_full[:, start:] + fu, constitutive,
+                          operator, dt, p, dy_min)
+    velocity = vel_full[:, start:] + fv
+    acceleration = acc_full[:, start:] + fa
+    if np.any(force):
+        _, cv, ca = operator.apply(force, True)
+        velocity, acceleration = velocity + cv, acceleration + ca
+    return dict(u=u, velocity=velocity, acceleration=acceleration, aux=aux,
+                force=force, iterations=iteration, residual_history=history,
+                converged=converged, predictor_iterations=predictor_iterations,
+                causality_error=causality_error, segments=convolution.segments,
+                padding_capped=convolution.padding_capped)
+
+
+def _restart_axis(survivor, bb, state, traces, dt, start, prefix_defect, u0, v0, p):
+    """Per-axis restart. `prefix_defect` is the story defect (s, start).
+    All returned histories are relative to the ground and start at `start`."""
+    a, d = traces
+    survivor.compute_response(a, d, dt, nonlinear=False)
+    prefix = None if prefix_defect is None else assemble_pseudo_force(prefix_defect)
+    out = _restart_solve(survivor, _per_axis_constitutive(bb, state),
+                         survivor.floor_disp_rel.copy(), _base_velocity(survivor, a, dt),
+                         survivor.floor_accel_rel.copy(), start, prefix, u0, v0, dt, p,
+                         float(np.min(bb['dy'])))
+    return out
+
+
+def _restart_3N(survivor, bb_x, bb_y, state, traces, dt, start, prefix_defect, u0, v0, p):
+    """Coupled restart. `prefix_defect` is the per-column (ex, ey), (s, 4, start)."""
+    ax, dx, ay, dy = traces
+    survivor.compute_response(ax, dx, ay, dy, dt, nonlinear=False)
+    positions = survivor.column_positions
+    prefix = None if prefix_defect is None else assemble_pseudo_force_3N(*prefix_defect, positions)
+    out = _restart_solve(survivor, _torsion_constitutive(bb_x, bb_y, positions, state),
+                         survivor.floor_disp_rel.copy(), survivor.floor_vel_rel.copy(),
+                         survivor.floor_accel_rel.copy(), start, prefix, u0, v0, dt, p,
+                         float(min(np.min(bb_x['dy']), np.min(bb_y['dy']))))
+    return out
 
 
 def slice_hysteresis_state(machine, stories):
@@ -2572,6 +2705,9 @@ class MDOF_ShearBuilding:
     def compute_response_nonlinear(self, acceleration, displacement, dt, **params):
         result = solve_hftd(self, acceleration, displacement, dt,
                             {**self.nonlinear_params, **params})
+        return self._install_nonlinear(result)
+
+    def _install_nonlinear(self, result):
         self.hftd_result = result
         self.floor_disp_rel = result.u_rel
         self.floor_disp_abs = result.u_abs
@@ -3197,6 +3333,9 @@ class MDOF_Building3N:
         """
         result = solve_hftd_3N(self, accel_x, disp_x, accel_y, disp_y, dt,
                                {**self.nonlinear_params, **params})
+        return self._install_nonlinear(result)
+
+    def _install_nonlinear(self, result):
         self.hftd_result = result
         N = self.N
         self.floor_disp_rel = result.u_rel
