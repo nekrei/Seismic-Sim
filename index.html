@@ -2568,6 +2568,90 @@
         }
         // ---8<--- HYSTERESIS-HELPERS-END
 
+        // ---8<--- COLLAPSE-PHYSICS-BEGIN
+        // Spec 15: the post-failure rigid-body animation. Its own sentinel
+        // block, extracted by claude_scripts/check_collapse_kinematics.mjs
+        // (with STORYHEIGHT-HELPERS for floorLevels) -- keep it separate.
+        // Pure: no THREE, and RAPIER is passed in, never imported here.
+        //
+        // Post-failure rigid-body model with assumed contact parameters --
+        // not a solution of the structural equations of motion (spec 13
+        // Part B). Nothing here feeds back into any structural equation.
+        //
+        // Units: the physics world is METRES, with the scene's axes (x =
+        // physics x, y = up, z = physics y). The scene draws plan at
+        // SCENE_UNITS_PER_METRE but heights raw, so it is anisotropic and the
+        // engine can never run in scene units; displayMatrix() maps a body
+        // pose to the scene as S.[R|p].S^-1, S = diag(SUPM, 1, SUPM).
+        const COLLAPSE_PHYS = Object.freeze({
+            DT: 1 / 120,          // fixed, never variable (spec A3)
+            MAX_SECONDS: 12,      // buffer length after the last detachment
+            RESTITUTION: 0.05,    // assumed
+            FRICTION: 0.8,        // assumed
+            CONTACT_DT: 0.02,     // s, impulse duration for the cascade test -- assumed
+            HINGE_TAU: 0.5,       // s, decay of the hinge column's residual moment -- assumed
+            STRUT_DENSITY: 2400,  // kg/m^3, failed-column strut mass -- assumed
+            SLAB_T: 0.10,         // m, slab collider thickness (the drawn slab)
+        });
+        const HANDOFF_VERSION = 1;
+        const HANDOFF_EVENT_FIELDS = ['story', 't_detach', 'axis', 'axes_tripped', 'direction', 'criterion',
+            'failed_columns', 'surviving_columns', 'hinge_column', 'floor_state_frame',
+            'floor_state', 'ground_state', 'upper_mass', 'upper_cm_height',
+            'upper_inertia_cm', 'story_height_at_failure', 'P_cap_below',
+            'residual_drift_below', 'surviving_stories'];
+
+        function deepFreeze(o) {
+            if (o && typeof o === 'object' && !Object.isFrozen(o)) {
+                for (const v of Object.values(o)) deepFreeze(v);
+                Object.freeze(o);
+            }
+            return o;
+        }
+
+        // JS mirror of mdof_response.validate_handoff(): refuse an unknown
+        // version or a missing field rather than guess. The computed events
+        // come back deep-frozen -- nothing may write into spec 13's list
+        // (check 5); animated cascades live in their own list.
+        function readHandoff(collapse) {
+            const v = collapse?.handoff_version;
+            if (v !== HANDOFF_VERSION) throw new Error(`unknown handoff_version ${v}; this viewer reads version ${HANDOFF_VERSION} only`);
+            for (const k of ['detachment_events', 'cap_reached', 'surviving_stories']) {
+                if (!(k in collapse)) throw new Error(`hand-off contract is missing '${k}'`);
+            }
+            for (const e of collapse.detachment_events) {
+                const missing = HANDOFF_EVENT_FIELDS.filter(k => !(k in e));
+                if (missing.length) throw new Error(`detachment event is missing ${missing.join(', ')}`);
+            }
+            return deepFreeze(collapse.detachment_events);
+        }
+
+        // Everything the engine needs, straight from the payload header.
+        // Mass per floor is uniform (server mass_per_floor is a scalar), so
+        // upper_mass / (N - m + 1) is exact.
+        function collapseModel(header, events, sceneGap) {
+            const N = header.num_stories;
+            const heights = normalizeStoryHeights(N, header.story_heights ?? header.story_height);
+            const a = header.plan_span_x, b = header.plan_span_y;
+            const perStory = (arr, scalar) => Array.from({ length: N }, (_, i) => (arr ? arr[i] : scalar));
+            const dx = perStory(header.column_depth_x_per_story, header.column_depth_x);
+            const dy = perStory(header.column_depth_y_per_story, header.column_depth_y);
+            const e0 = events[0];
+            return {
+                N, a, b, heights,
+                levelsM: floorLevels(heights, 0).y,
+                levelsScene: floorLevels(heights, sceneGap).y,
+                floorMass: e0.upper_mass / (N - e0.story + 1),
+                P_cap: header.P_cap_per_story_N.slice(),
+                strutSection: dx.map((v, i) => [v, dy[i]]),
+                // mdof_response.column_plan_positions: CCW from (+x, +y).
+                columnPlan: [[a / 2, b / 2], [-a / 2, b / 2], [-a / 2, -b / 2], [a / 2, -b / 2]],
+                // Spec 10 D2: V_p = 8 M_p / h per story (4 columns, 2 ends)
+                // -> M_p of one column = V_p h / 8, on the tripped axis.
+                hingeMoment: e => header[`V_p_per_story_N_${e.axis}`][e.story - 1] * heights[e.story - 1] / 8,
+            };
+        }
+        // ---8<--- COLLAPSE-PHYSICS-END
+
         function createBuilding(numFloors, storyHeights, frame, folderName) {
             for (const obj of sceneObjects) scene.remove(obj);
             sceneObjects = [];
