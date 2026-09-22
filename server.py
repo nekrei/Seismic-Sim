@@ -28,6 +28,7 @@ from mdof_response import (
     SOFT_STORY_HEIGHT_RATIO, GravityInstabilityError,
     MDOF_Building3N, pair_components, ComponentPairingError,
     tangent_eccentricity, solve_with_detachment, handoff_header,
+    finite_or_none,
 )
 
 # Frame-geometry defaults -- MUST match mdof_response.py's __main__
@@ -466,8 +467,11 @@ def compute():
         # compute_response() has run, and Y is skipped entirely for a
         # record with no second horizontal component -- so they are null
         # there rather than silently mirroring X's numbers.
-        "theta_demand_X": building_x.theta_demand.tolist(),
-        "theta_demand_Y": _y_or_none(has_y, building_y, "theta_demand"),
+        # null (never inf) where theta is undefined: zero story shear at
+        # the drift peak. See finite_or_none.
+        "theta_demand_X": finite_or_none(building_x.theta_demand),
+        "theta_demand_Y": (finite_or_none(building_y.theta_demand)
+                           if has_y else None),
         "peak_drift_ratio_X": building_x.peak_drift_ratio.tolist(),
         "peak_drift_ratio_Y": _y_or_none(has_y, building_y,
                                          "peak_drift_ratio"),
