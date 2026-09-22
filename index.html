@@ -2787,7 +2787,10 @@
         // metres at time t (the viewer passes where it is DRAWN, sway included,
         // so the release is teleport-free). An item becomes a body at the same
         // instant as its floor; items on surviving floors are never touched.
-        function buildCollapseSim(RAPIER, model, events, track, furniture = null) {
+        // `debris` (optional, B5 -- cosmetic): { max, rng(seedString) -> () => [0,1) }.
+        // The viewer passes the ONE PRNG (mulberry32(hashSeed(...))); fragments
+        // spawn only at computed failure locations/times and at impacts.
+        function buildCollapseSim(RAPIER, model, events, track, furniture = null, debris = null) {
             const P = COLLAPSE_PHYS, DT = P.DT, T = P.SLAB_T, N = model.N;
             const t0 = events[0].t_detach, tEnd = events[events.length - 1].t_detach + P.MAX_SECONDS;
             const K = Math.ceil((tEnd - t0) / DT - 1e-9);
@@ -2797,7 +2800,8 @@
             const colliderFloor = new Map();   // collider handle -> floor index (-1 = foundation)
             const floorBody = new Array(N).fill(null);   // the body currently carrying each floor
             const kinematic = new Set();       // floors still on the structural track
-            const bodies = [], struts = [], cascades = [], hit = new Set();
+            const bodies = [], struts = [], cascades = [], impacts = [], hit = new Set();
+            let debrisLeft = debris ? debris.max : 0;
             const density = model.floorMass / (model.a * T * model.b);
             let k = 0, lowestDynamic = N;      // floors >= lowestDynamic are dynamic
 
@@ -2918,6 +2922,30 @@
                 }
                 lowestDynamic = e.story - 1;
                 addStruts(e, rec);
+                impacts.push({ t: e.t_detach, p: v3add(seed.cm, seed.local[0]).map((c, i) => (i === 1 ? model.levelsM[e.story - 1] : c)), kind: 'detach', story: e.story });
+                for (const st of struts.filter(x => x.story === e.story)) {
+                    spawnDebris(worldPoint(st.body, [0, -st.L / 2, 0]), [0, 0, 0], e.t_detach, `detach#${e.story}#${st.column}`, 6);
+                }
+            }
+
+            // B5: small concrete fragments (cosmetic). Deterministic: the seed
+            // string names the event, and the PRNG is the viewer's one.
+            function spawnDebris(p, v, t, key, n) {
+                if (!debris) return;
+                const rand = debris.rng(key);
+                for (let i = 0; i < n && debrisLeft > 0; i++, debrisLeft--) {
+                    const h = [0.08 + 0.22 * rand(), 0.05 + 0.12 * rand(), 0.08 + 0.22 * rand()];
+                    const q = qFromUp([rand() - 0.5, 1, rand() - 0.5].map((c, _, a) => c / Math.hypot(...a)));
+                    const b = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+                        .setTranslation(p[0] + (rand() - 0.5) * 1.2, p[1] + 0.3 + 0.4 * rand(), p[2] + (rand() - 0.5) * 1.2)
+                        .setRotation(rq(q)));
+                    world.createCollider(RAPIER.ColliderDesc.cuboid(...h).setDensity(P.STRUT_DENSITY)
+                        .setRestitution(P.RESTITUTION).setFriction(P.FRICTION), b);
+                    b.setLinvel({ x: v[0] + (rand() - 0.5) * 3, y: v[1] + 2 * rand(), z: v[2] + (rand() - 0.5) * 3 }, true);
+                    b.setAngvel({ x: (rand() - 0.5) * 6, y: (rand() - 0.5) * 6, z: (rand() - 0.5) * 6 }, true);
+                    const r = register(b, [], t, { kind: 'debris', story: 0, key: `${key}#${i}`, tEvent: t });
+                    r.half = h;
+                }
             }
 
             function addStruts(e, rec) {
@@ -2968,7 +2996,15 @@
             // until the floor gives way (a grazing first touch must not use
             // the test up).
             function onImpact(f, vImpact, t) {
-                if (!hit.has(f)) { hit.add(f); crushStruts(f + 2); }
+                if (!hit.has(f)) {
+                    hit.add(f);
+                    crushStruts(f + 2);
+                    const b = supportOf(f), c = tr(b), y = f < 0 ? 0 : model.levelsM[f] + T / 2;
+                    impacts.push({ t, p: [c[0], y, c[2]], kind: f < 0 ? 'ground' : 'floor', story: f + 1 });
+                    for (const [sx, sz] of model.columnPlan) {
+                        spawnDebris(v3add([c[0], y, c[2]], qRot(rot(b), [sx, 0, sz])), [0, 0, 0], t, `impact#${f + 1}#${sx > 0}#${sz > 0}`, 5);
+                    }
+                }
                 if (f < 0 || !kinematic.has(f)) return;
                 const Mu = (N - 1 - f) * model.floorMass;
                 const F = Mu * vImpact / P.CONTACT_DT, cap = model.P_cap[f];
@@ -3034,7 +3070,7 @@
             }
 
             return {
-                t0, dt: DT, K, bodies, struts, cascades, world,
+                t0, dt: DT, K, bodies, struts, cascades, impacts, world,
                 step, get done() { return k >= K; }, get progress() { return k / K; },
             };
         }
@@ -3068,6 +3104,58 @@
             const tv = [0, 1, 2].map(i => tgt[i] - v3dot(A[i], pivot));
             return [A[0][0], A[1][0], A[2][0], 0, A[0][1], A[1][1], A[2][1], 0,
                 A[0][2], A[1][2], A[2][2], 0, tv[0], tv[1], tv[2], 1];
+        }
+        // A4: what fits the body budget. Floors, struts and failed columns are
+        // NEVER dropped -- over budget, furniture stops being separate bodies
+        // and rides its floor rigidly (coarsening), and debris takes only what
+        // is left, up to its own cap.
+        function collapseBudgetPlan(model, events, nFurniture, budget) {
+            const structural = model.N + 4 * events.length;
+            const furniture = structural + nFurniture <= budget.bodies;
+            const used = structural + (furniture ? nFurniture : 0);
+            return { structural, furniture, debrisMax: Math.max(0, Math.min(budget.debris, budget.bodies - used)), dustMax: budget.dust };
+        }
+
+        // Physics height (metres, no render gap) -> scene height, piecewise
+        // linear between the floor levels, so a fragment on a slab is drawn on it.
+        function sceneHeight(model, y) {
+            let lo = 0, loS = 0;
+            for (let f = 0; f < model.N; f++) {
+                const hi = model.levelsM[f], hiS = model.levelsScene[f];
+                if (y <= hi) return loS + (y - lo) * (hiS - loS) / (hi - lo);
+                lo = hi; loS = hiS;
+            }
+            return y + (loS - lo);
+        }
+
+        // B5 dust: per-particle parameters drawn ONCE from the one PRNG; the
+        // particle at time t is then a pure function of (t - t_spawn, params),
+        // so any frame, forward or backward, is the same (checks 3-4). Cosmetic.
+        const DUST_LIFE = 7;   // s
+        function dustParams(impacts, perPuff, rng) {
+            const out = new Float32Array(impacts.length * perPuff * 8);
+            impacts.forEach((im, j) => {
+                const rand = rng(`dust#${im.kind}#${im.story}#${im.t.toFixed(3)}`);
+                for (let i = 0; i < perPuff; i++) {
+                    const o = (j * perPuff + i) * 8, a = rand() * Math.PI * 2;
+                    out.set([im.t, im.p[0], im.p[1], im.p[2], Math.cos(a) * (0.5 + rand()), Math.sin(a) * (0.5 + rand()),
+                        0.3 + 0.7 * rand(), rand() * Math.PI * 2], o);
+                }
+            });
+            return out;
+        }
+        // -> [x, y, z (metres), size (m)] or null outside the particle's life.
+        function dustAt(params, i, t) {
+            const o = i * 8, age = t - params[o];
+            if (age < 0 || age > DUST_LIFE) return null;
+            const spread = 4 * (1 - Math.exp(-age / 1.2)), ph = params[o + 7];
+            const swirl = 0.35 * Math.sin(ph + age * 1.3);
+            return [
+                params[o + 1] + params[o + 4] * spread + swirl * Math.cos(ph),
+                params[o + 2] + params[o + 6] * 2.5 * (1 - Math.exp(-age / 2)) + 0.15 * Math.sin(ph * 2 + age),
+                params[o + 3] + params[o + 5] * spread + swirl * Math.sin(ph),
+                (0.6 + 0.9 * params[o + 6]) * (0.4 + 0.6 * Math.min(1, age / 0.8)) * (1 - (age / DUST_LIFE) ** 2),
+            ];
         }
         // ---8<--- COLLAPSE-PHYSICS-END
 
@@ -5332,6 +5420,61 @@
         // the world is freed: playback and scrubbing only read the buffer.
         let collapseAnim = null;
         let collapseBuildToken = 0;
+        let currentRecordForCollapse = '';
+
+        // B5 meshes: ONE InstancedMesh each for debris and dust (two draw
+        // calls, flat in N). Dust uses normal blending with fog on -- additive
+        // particles ignore fog and glow through it at zoom-out (spec 4's bug).
+        function makeCollapseFx(nDebris, nDust) {
+            const debrisMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+                new THREE.MeshStandardMaterial({ color: 0x8d8680, roughness: 0.95, metalness: 0 }), Math.max(1, nDebris));
+            const dustMesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1),
+                new THREE.MeshBasicMaterial({ color: 0x9c9285, map: dustSprite(), transparent: true, opacity: 0.35, depthWrite: false, fog: true }),
+                Math.max(1, nDust));
+            for (const m of [debrisMesh, dustMesh]) {
+                m.frustumCulled = false;
+                for (let i = 0; i < m.count; i++) m.setMatrixAt(i, _zeroMatrix);
+                scene.add(m);
+                sceneObjects.push(m);
+            }
+            return { debrisMesh, dustMesh };
+        }
+        // A soft round puff, drawn procedurally once (no texture assets).
+        let _dustTex = null;
+        function dustSprite() {
+            if (_dustTex) return _dustTex;
+            const c = document.createElement('canvas');
+            c.width = c.height = 64;
+            const g = c.getContext('2d'), grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+            grad.addColorStop(0, 'rgba(255,255,255,1)');
+            grad.addColorStop(0.45, 'rgba(255,255,255,0.45)');
+            grad.addColorStop(1, 'rgba(255,255,255,0)');
+            g.fillStyle = grad;
+            g.fillRect(0, 0, 64, 64);
+            return (_dustTex = new THREE.CanvasTexture(c));
+        }
+        const _fxPos = new THREE.Vector3(), _fxQuat = new THREE.Quaternion(), _fxScale = new THREE.Vector3();
+        function updateCollapseFx(A) {
+            const u = SCENE_UNITS_PER_METRE, { debrisMesh, dustMesh } = A.fx;
+            A.debrisRecs.forEach((rec, i) => {
+                const smp = sampleBody(A.sim, rec, animTime);
+                if (!smp) { debrisMesh.setMatrixAt(i, _zeroMatrix); return; }
+                _fxPos.set(smp.p[0] * u, sceneHeight(A.model, smp.p[1]), smp.p[2] * u);
+                _fxQuat.set(...smp.q);
+                _fxScale.set(2 * rec.half[0] * u, 2 * rec.half[1], 2 * rec.half[2] * u);
+                debrisMesh.setMatrixAt(i, _fxMat.compose(_fxPos, _fxQuat, _fxScale));
+            });
+            debrisMesh.instanceMatrix.needsUpdate = true;
+            for (let i = 0; i < A.dust.length / 8; i++) {
+                const d = dustAt(A.dust, i, animTime);
+                if (!d || d[3] <= 0) { dustMesh.setMatrixAt(i, _zeroMatrix); continue; }
+                _fxPos.set(d[0] * u, sceneHeight(A.model, d[1]), d[2] * u);
+                _fxScale.setScalar(d[3] * 0.45);
+                dustMesh.setMatrixAt(i, _fxMat.compose(_fxPos, camera.quaternion, _fxScale));
+            }
+            dustMesh.instanceMatrix.needsUpdate = true;
+        }
+        const _fxMat = new THREE.Matrix4();
         // Spec A4. The mobile check IS the bottom-sheet breakpoint (600px), not a second device test.
         const COLLAPSE_MOBILE = matchMedia('(max-width: 600px)');
         const COLLAPSE_BUDGET = { desktop: { bodies: 400, debris: 300, dust: 2000 }, mobile: { bodies: 120, debris: 60, dust: 400 } };
@@ -5368,6 +5511,13 @@
 
         function discardCollapseAnimation() {
             collapseBuildToken++;   // abandons an in-flight build
+            if (collapseAnim?.fx) {
+                for (const m of [collapseAnim.fx.debrisMesh, collapseAnim.fx.dustMesh]) {
+                    scene.remove(m);
+                    m.geometry.dispose();
+                    m.material.dispose();
+                }
+            }
             collapseAnim = null;
             for (const g of buildingGroups) g.matrixAutoUpdate = true;
             for (const it of furnitureItems) it.mesh.matrixAutoUpdate = true;
@@ -5378,6 +5528,7 @@
 
         async function startCollapseAnimation(header) {
             const token = ++collapseBuildToken;
+            currentRecordForCollapse = folderSelect.value;
             let events, model;
             try {
                 events = readHandoff(header.collapse);
@@ -5406,9 +5557,10 @@
             // A4 budgets: over budget, furniture rides its floor rigidly
             // (coarsening). Floors, struts and failed columns are never dropped.
             const budget = COLLAPSE_BUDGET[COLLAPSE_MOBILE.matches ? 'mobile' : 'desktop'];
-            const structural = model.N + 4 * events.length;
-            const furniture = structural + furnitureItems.length <= budget.bodies ? furnitureForSim() : null;
-            const sim = buildCollapseSim(RAPIER, model, events, track, furniture);
+            const plan = collapseBudgetPlan(model, events, furnitureItems.length, budget);
+            const furniture = plan.furniture ? furnitureForSim() : null;
+            const sim = buildCollapseSim(RAPIER, model, events, track, furniture,
+                { max: plan.debrisMax, rng: key => mulberry32(hashSeed(`${currentRecordForCollapse}#${key}`)) });
             // Chunked so the page never freezes; the result does not depend
             // on the chunk size (check 3), so yielding by timer is safe.
             while (!sim.step(200)) {
@@ -5438,8 +5590,13 @@
                 item.mesh.updateMatrix();
                 items.push({ item, rec, local: item.mesh.matrix.clone() });
             }
+            const debrisRecs = sim.bodies.filter(r => r.source.kind === 'debris');
+            const perPuff = Math.min(160, Math.floor(plan.dustMax / Math.max(1, sim.impacts.length)));
+            const dust = dustParams(sim.impacts, perPuff, key => mulberry32(hashSeed(`${currentRecordForCollapse}#${key}`)));
+            const fx = makeCollapseFx(debrisRecs.length, dust.length / 8);
             collapseAnim = { sim, events, floors, items, coarsened: !furniture && furnitureItems.length > 0,
-                             tFirst: sim.bodies[0].tAct, cap: !!header.collapse.cap_reached };
+                             tFirst: sim.bodies[0].tAct, cap: !!header.collapse.cap_reached,
+                             model, debrisRecs, dust, fx };
             renderCollapseBanner();
             recomputeElapsed.textContent = '';
             recomputeOverlay.classList.remove('is-active');
@@ -5476,6 +5633,7 @@
                 item.mesh.matrix.copy(g.matrix).invert().multiply(_itemMat).multiply(_collapseBase[item.floorIndex]).multiply(local);
                 item.mesh.matrixAutoUpdate = false;
             }
+            updateCollapseFx(A);
             collapseBanner.classList.toggle('is-shown', animTime >= A.tFirst - A.sim.dt / 2);
         }
 
@@ -5500,6 +5658,7 @@
             for (const c of A.sim.cascades) {
                 rows.push(line(`Animated cascade, not computed: story ${c.story} at ${c.t.toFixed(2)} s (impact ${c.F_impact.toExponential(1)} N > P_cap ${c.P_cap.toExponential(1)} N).`));
             }
+            rows.push(line(`Debris (${A.debrisRecs.length}) and dust are cosmetic, spawned only at computed failures and impacts.`));
             if (A.coarsened) rows.push(line('Over the body budget: furniture rides its floor rigidly.'));
             if (A.cap) rows.push(line('Detachment cap reached: the structural solve stopped counting, so this fall is incomplete.'));
             collapseBanner.replaceChildren(...rows);
@@ -5512,6 +5671,9 @@
             get struts() { return collapseAnim ? collapseAnim.sim.struts.length : 0; },
             get furnitureBodies() { return collapseAnim ? collapseAnim.items.length : 0; },
             get coarsened() { return collapseAnim ? collapseAnim.coarsened : false; },
+            get debris() { return collapseAnim ? collapseAnim.debrisRecs.length : 0; },
+            get dust() { return collapseAnim ? collapseAnim.dust.length / 8 : 0; },
+            get dynamicBodies() { return collapseAnim ? collapseAnim.sim.bodies.length + collapseAnim.sim.struts.length : 0; },
             get budget() { return COLLAPSE_BUDGET[COLLAPSE_MOBILE.matches ? 'mobile' : 'desktop']; },
             get cascades() { return collapseAnim ? collapseAnim.sim.cascades.slice() : []; },
             get animTime() { return animTime; },
