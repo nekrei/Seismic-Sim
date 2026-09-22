@@ -2954,3 +2954,26 @@ Rulings:
   values above 1 occur only where a column is on UNLOAD/RELOAD, and that
   the ratio is exactly 1 while all columns are elastic. The renderer
   clamps `1 − k_t/k₀` to [0, 1].
+
+### Task 2 — Part F: scenario controls, readout, parser (2026-09-22)
+
+- `index.html` Collapse Analysis section:
+  - Intensity slider (stepped list 0.05–20, `INTENSITY_STEPS`). Collapse-only; a change drops the collapse cache.
+  - Weak-story `<select>` (none / story 1..N, rebuilt with the Stories slider) and a weak-column depth slider.
+  - "Load collapse demo" button.
+  - `#collapseReadout`.
+- Collapse requests add `intensity_scale`, `hftd_max_iterations: 200` and the fixed R4 block set.
+- The weak-story profile is sent on elastic and collapse requests alike (R5). `buildingParamsAtDefault()` requires weak story = none.
+- The snapshot/restore on a dismissed 422/400 covers the weak-story controls.
+- The overlay counts elapsed seconds during a collapse run (`startElapsed`/`stopElapsed`). An aborted request never stops a newer request's counter.
+- The payload parser reads `header.damage.blocks` after `theta_z` as typed-array views (float32 / uint8 + declared pad). It passes `damage` and `collapse` to `applyLoadedData` (`damageData`, `collapseData`).
+- `normalizeFrame` carries `column_depth_{x,y}_per_story`. `createBuilding` draws each story's columns at the echoed depth.
+- The folder `change` handler is now the named `onFolderChange` so the demo loader can await it.
+- New `COLLAPSE-HELPERS` sentinel: `INTENSITY_STEPS`, `weakStoryProfile`, `firstOnset`, `formatCollapseReadout`.
+- `claude_scripts/check_collapse_readout.mjs` (new): ALL CHECKS PASSED against the real demo payload header. Readout: converged in 3; X/Y first onset story 3 at 35.50/35.82 s (gravity); "Story 3 detached at 80.54 s (axis X) — floors 3–4 no longer structural"; honesty line.
+- `check_index_syntax`, `check_time_domain`, `check_story_heights`, `check_floor_rotation`, `check_footprint_area`, `check_sway_gain` and `check_furniture_gain` all pass. `fft_check.mjs` runs.
+
+Rulings:
+- **R10 — the weak story is a depth in metres, not a factor.** It uses the column sliders' 0.30–1.50 m / 0.05 grid. A factor slider cannot reach the verified 0.70 m against 1.10 m columns exactly (0.7/1.1 is not on any sane grid). The weak depth applies to both axes.
+- **R11 (spec 14) — the intensity control is a stepped list, not a continuous log slider.** The stepped list makes 1× and the demo's 20× exact positions.
+- **F6 "stays dismissible"** is read as: messages stay dismissible, as before. A running solve is not cancellable from the overlay, and no abort UI was added.

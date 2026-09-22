@@ -286,6 +286,19 @@
         #runCollapseBtn { white-space: normal; }
         #runCollapseBtn:active { transform: scale(0.97); }
         #runCollapseBtn:disabled { opacity: 0.55; cursor: wait; }
+        #loadDemoBtn { white-space: normal; }
+        #loadDemoBtn:active { transform: scale(0.97); }
+        /* Spec 14 F5: the collapse result, in plain text (tabular digits so
+           times line up across lines). */
+        .collapse-readout {
+            margin-top: 8px;
+            font-size: 11.5px;
+            line-height: 1.55;
+            color: rgba(255,255,255,0.72);
+            font-variant-numeric: tabular-nums;
+        }
+        .collapse-readout:empty { display: none; }
+        .collapse-readout .readout-honesty { color: rgba(255,255,255,0.45); font-style: italic; }
 
         /* ---- mobile bottom-sheet reflow ---- */
         /* Collapsed strip: always visible, shows record name + play/pause.
@@ -946,7 +959,7 @@
             <div class="recompute-floor" style="animation-delay:0.1s"></div>
             <div class="recompute-floor" style="animation-delay:0s"></div>
         </div>
-        <div class="recompute-label">Recomputing<span class="dots"><span>.</span><span>.</span><span>.</span></span></div>
+        <div class="recompute-label"><span id="recomputeText">Recomputing</span><span class="dots"><span>.</span><span>.</span><span>.</span></span><span id="recomputeElapsed"></span></div>
         <!-- Gravity-instability message (spec 10, B3). /compute returns
              422 when the building cannot stand under its own weight at
              the current sliders -- a physically meaningful RESULT, so it
@@ -1139,9 +1152,32 @@
                     <input type="checkbox" id="torsionToggle" />
                     <span class="panel-value" id="torsionLabel">off</span>
                 </div>
+                <!-- Spec 14 Part F. Intensity scales the ground motion for the
+                     collapse solve only (sent as intensity_scale). The weak
+                     story is a BUILDING parameter -- sent as a per-floor
+                     column-depth profile on elastic and collapse requests
+                     alike, and drawn at the depth the server echoes back. -->
+                <div class="ctrl-row">
+                    <label class="panel-label" for="intensitySlider">Intensity</label>
+                    <input type="range" id="intensitySlider" min="0" max="12" step="1" value="4" />
+                    <span class="panel-value" id="intensityLabel">1×</span>
+                </div>
+                <div class="ctrl-row">
+                    <label class="panel-label" for="weakStorySelect">Weak story</label>
+                    <select id="weakStorySelect" style="flex:1;">
+                        <option value="0">none</option>
+                    </select>
+                </div>
+                <div class="ctrl-row">
+                    <label class="panel-label" for="weakDepthSlider">Weak columns</label>
+                    <input type="range" id="weakDepthSlider" min="0.30" max="1.50" step="0.05" value="0.70" />
+                    <span class="panel-value" id="weakDepthLabel">0.70m</span>
+                </div>
                 <div class="ctrl-row view-buttons">
+                    <button id="loadDemoBtn" type="button">Load collapse demo</button>
                     <button id="runCollapseBtn" type="button" class="primary">Run collapse analysis</button>
                 </div>
+                <div id="collapseReadout" class="collapse-readout" aria-live="polite"></div>
             </div>
         </details>
 
@@ -1318,6 +1354,16 @@
         const softGroundStoryLabel = document.getElementById('softGroundStoryLabel');
         const torsionToggle = document.getElementById('torsionToggle');
         const torsionLabel = document.getElementById('torsionLabel');
+        // spec 14 Part F
+        const intensitySlider = document.getElementById('intensitySlider');
+        const intensityLabel = document.getElementById('intensityLabel');
+        const weakStorySelect = document.getElementById('weakStorySelect');
+        const weakDepthSlider = document.getElementById('weakDepthSlider');
+        const weakDepthLabel = document.getElementById('weakDepthLabel');
+        const loadDemoBtn = document.getElementById('loadDemoBtn');
+        const collapseReadout = document.getElementById('collapseReadout');
+        const recomputeText = document.getElementById('recomputeText');
+        const recomputeElapsed = document.getElementById('recomputeElapsed');
         const sheetStrip = document.getElementById('sheetStrip');
         const stripPlayBtn = document.getElementById('stripPlayBtn');
         const stripRecordName = document.getElementById('stripRecordName');
@@ -1552,6 +1598,8 @@
         // Spec 12: per-floor rotation about +Z (radians), or null when the
         // payload carries none (static out/, torsion off, stale backend).
         let floorRotData = null;
+        let damageData = null;   // spec 14: {header, blocks{name: {data, shape, rateHz, npts}}} or null
+        let collapseData = null; // spec 14: header.collapse of the loaded collapse run, or null
         // Furniture (spec 5, Part B): furnitureData[axis]['table'|'chair'|'fan'][floorIndex] is a
         // decimated Float32Array of that class's relative-sway response for that floor, on that axis.
         // furnitureRate/furnitureNpts describe the decimated sample grid; furnitureItems holds the
@@ -2200,6 +2248,59 @@
         }
         // ---8<--- ROTATION-HELPERS-END
 
+        // ---8<--- COLLAPSE-HELPERS-BEGIN
+        // Spec 14 Part F: collapse scenario controls and the result readout.
+        // Its own sentinel block, extracted by claude_scripts/
+        // check_collapse_readout.mjs -- keep it separate from the others.
+        //
+        // Intensity is a stepped list, not a log slider, so the verified
+        // demo value (20) and the neutral 1 are exact slider positions.
+        // Range = server.py's intensity_scale clamp.
+        const INTENSITY_STEPS = [0.05, 0.1, 0.2, 0.5, 1, 1.5, 2, 3, 5, 7, 10, 15, 20];
+
+        // Per-floor column depths with one weak story (1-based `story1`,
+        // 0 = none -> null, so no profile is sent and out/ stays valid).
+        function weakStoryProfile(n, story1, base, weakDepth) {
+            if (!(story1 >= 1 && story1 <= n)) return null;
+            return Array.from({ length: n }, (_, i) => (i === story1 - 1 ? weakDepth : base));
+        }
+
+        // Earliest onset on one axis. `t_collapse` is indexed by 0-based
+        // story (spec 11); everything the viewer prints is 1-based, like the
+        // spec-13 detachment events.
+        function firstOnset(axisSummary) {
+            const t = axisSummary?.t_collapse || [];
+            let best = -1;
+            t.forEach((v, i) => { if (v != null && (best < 0 || v < t[best])) best = i; });
+            return best < 0 ? null : {
+                story: best + 1, time: t[best],
+                criterion: axisSummary.collapse_criterion?.[best] ?? '?',
+            };
+        }
+
+        // Plain-text lines for #collapseReadout from header.collapse.
+        function formatCollapseReadout(c, numStories) {
+            if (!c) return [];
+            if (!c.converged) {
+                return [`Did not converge (${c.iterations} iterations): ${c.reason || 'no collapse is inferred.'}`];
+            }
+            const lines = [`Converged in ${c.iterations} iteration${c.iterations === 1 ? '' : 's'}`];
+            for (const ax of ['X', 'Y']) {
+                if (!c.axes?.[ax]) continue;
+                const on = firstOnset(c.axes[ax]);
+                lines.push(on ? `${ax}: first onset story ${on.story} at ${on.time.toFixed(2)} s (${on.criterion})`
+                              : `${ax}: no collapse onset`);
+            }
+            for (const e of c.detachment_events || []) {
+                const floors = e.story === numStories ? `floor ${numStories}` : `floors ${e.story}–${numStories}`;
+                lines.push(`Story ${e.story} detached at ${e.t_detach.toFixed(2)} s (axis ${e.axis}) — ${floors} no longer structural`);
+            }
+            if (c.cap_reached) lines.push('Detachment cap reached; later failures are not solved.');
+            lines.push('Structural solve; the fall is not animated yet.');
+            return lines;
+        }
+        // ---8<--- COLLAPSE-HELPERS-END
+
         function createBuilding(numFloors, storyHeights, frame, folderName) {
             for (const obj of sceneObjects) scene.remove(obj);
             sceneObjects = [];
@@ -2354,8 +2455,10 @@
                         mesh,
                         cornerX: cx,
                         cornerZ: cz,
-                        thicknessX: colThickX,
-                        thicknessZ: colThickZ,
+                        thicknessX: frame.columnDepthXPerStory
+                            ? frame.columnDepthXPerStory[f] * SCENE_UNITS_PER_METRE * FRAME_RENDER_EXAGGERATION : colThickX,
+                        thicknessZ: frame.columnDepthYPerStory
+                            ? frame.columnDepthYPerStory[f] * SCENE_UNITS_PER_METRE * FRAME_RENDER_EXAGGERATION : colThickZ,
                         bottomSource: f === 0 ? { type: 'ground' } : { type: 'floor', index: f - 1 },
                         topSource: { type: 'floor', index: f },
                     });
@@ -2657,6 +2760,11 @@
                 beamWidth: raw?.beam_width ?? BEAM_WIDTH,
                 planSpanX: raw?.plan_span_x ?? PLAN_SPAN_X,
                 planSpanY: raw?.plan_span_y ?? PLAN_SPAN_Y,
+                // Spec 14 F2: the per-story depths the server actually built
+                // (present only when a profile was sent), so a weak story is
+                // drawn at its computed size.
+                columnDepthXPerStory: raw?.column_depth_x_per_story ?? null,
+                columnDepthYPerStory: raw?.column_depth_y_per_story ?? null,
             };
         }
 
@@ -3640,6 +3748,8 @@
             furnitureRateHz = furnitureRate || 0;
             modalData = extra.modal ?? null; // spec 6 -- null-safe; the drawer degrades to a disabled note if this or groundSpectrum is missing
             floorRotData = extra.floorRot ?? null; // spec 12 -- absent on every path that has no rotation block
+            damageData = extra.damage ?? null;     // spec 14 -- only a collapse run carries blocks
+            collapseData = extra.collapse ?? null; // spec 14 -- header.collapse of that run
             groundAccelData = extra.groundAccel ?? null; // spec 9 -- null-safe the same way; whichever path loaded it, the time panel reads only this
 
             periodReadout.textContent = (periodX != null && periodY != null)
@@ -3802,6 +3912,7 @@
         let collapseCache = null;
         function invalidateCollapseCache() {
             collapseCache = null;
+            renderCollapseReadout(null);
             if (liveAbortController) liveAbortController.abort();
             runCollapseBtn.disabled = false;
             runCollapseBtn.textContent = 'Run collapse analysis';
@@ -3830,6 +3941,16 @@
                 epicenter_distance_km: parseFloat(epicenterDistanceSlider.value),
                 epicenter_depth_km: parseFloat(epicenterDepthSlider.value),
             };
+            // Spec 14 F2 / R5: a weak story is part of the building, so it is
+            // sent on elastic and collapse requests alike (the elastic ghost
+            // must be the same building). "none" sends no profile at all.
+            const weakStory = parseInt(weakStorySelect.value, 10);
+            const weakDepth = parseFloat(weakDepthSlider.value);
+            const profileX = weakStoryProfile(params.num_stories, weakStory, params.column_depth_x, weakDepth);
+            if (profileX) {
+                params.column_depth_x_profile = profileX;
+                params.column_depth_y_profile = weakStoryProfile(params.num_stories, weakStory, params.column_depth_y, weakDepth);
+            }
             // Only send a magnitude once we know which record it belongs to.
             // On a record switch currentReferenceMagnitude is null and the
             // slider still holds the OUTGOING record's value -- sending that
@@ -3853,11 +3974,22 @@
                 // it to the server's default, and elastic twist is exactly
                 // zero for this symmetric plan anyway.
                 params.torsion = torsionToggle.checked;
+                // Spec 14 F1/F3/R4: intensity (collapse-only, so it is part of
+                // the cache key but never of an elastic request), the
+                // server's maximum iteration budget (40 fails to converge in
+                // the detaching regime), and one fixed set of damage blocks --
+                // requesting more later would re-run a minute-long solve.
+                params.intensity_scale = INTENSITY_STEPS[parseInt(intensitySlider.value, 10)];
+                params.hftd_max_iterations = 200;
+                params.damage_blocks = ['story_drift', 'story_shear', 'damage_state',
+                                        'stiffness_ratio', 'column_damage'];
             }
             const cacheKey = JSON.stringify(params);
             runCollapseBtn.disabled = nonlinear;
             revertOnDismiss = false;
             clearRecomputeError();
+            stopElapsed();
+            if (nonlinear && collapseCache?.key !== cacheKey) startElapsed('Running collapse analysis');
             recomputeOverlay.classList.add('is-active');
             try {
                 const res = nonlinear && collapseCache?.key === cacheKey
@@ -3903,6 +4035,7 @@
                 if (signal.aborted) return;
                 if (nonlinear) {
                     console.info('Collapse analysis', header.collapse);
+                    renderCollapseReadout(header.collapse, header.num_stories);
                     if (!header.collapse) {
                         showRecomputeError('This backend does not support collapse analysis yet.');
                         return;
@@ -3981,6 +4114,23 @@
                     for (let f = 0; f < N; f++) floorRot.push(Array.from(takeFloats(npts)));
                 }
 
+                // Spec 14 damage blocks, after theta_z, in the order the
+                // header lists them: float32 first, then uint8 blocks, each
+                // followed by its declared pad so the next block stays
+                // aligned. Typed-array views on `buf`, never copied: at
+                // N=20 they are tens of MB.
+                let damage = null;
+                if (header.damage?.blocks) {
+                    damage = { header: header.damage, blocks: {} };
+                    for (const b of header.damage.blocks) {
+                        const count = b.shape.reduce((p, q) => p * q, 1);
+                        const isFloat = b.dtype === 'float32';
+                        const data = isFloat ? new Float32Array(buf, offset, count) : new Uint8Array(buf, offset, count);
+                        offset += count * (isFloat ? 4 : 1) + b.pad_bytes;
+                        damage.blocks[b.name] = { data, shape: b.shape, rateHz: b.rate_hz, npts: b.npts };
+                    }
+                }
+
                 applyLoadedData(header.num_stories, header.story_heights || header.story_height, time, groundX, groundY, floorX, floorY, {
                     frame: normalizeFrame(header),
                     furniture,
@@ -3992,6 +4142,8 @@
                     referenceMagnitude: header.reference_magnitude,
                     groundAccel,
                     floorRot,
+                    damage,
+                    collapse: nonlinear ? header.collapse : null,
                 }, autoScaleAmplify);
                 recomputeOverlay.classList.remove('is-active');
                 snapshotBuildingParams();
@@ -4006,8 +4158,40 @@
                 console.error('❌ Live recompute failed:', err);
                 recomputeOverlay.classList.remove('is-active');
             } finally {
-                if (!signal.aborted) runCollapseBtn.disabled = false;
+                // An aborted request must not stop the NEWER request's counter.
+                if (!signal.aborted) {
+                    runCollapseBtn.disabled = false;
+                    stopElapsed();
+                }
             }
+        }
+
+        // Spec 14 F6: collapse runs take up to minutes, so the overlay counts
+        // seconds instead of looking hung.
+        let elapsedTimer = null;
+        function startElapsed(label) {
+            const t0 = performance.now();
+            recomputeText.textContent = label;
+            elapsedTimer = setInterval(() => {
+                recomputeElapsed.textContent = ` ${Math.round((performance.now() - t0) / 1000)} s`;
+            }, 1000);
+        }
+        function stopElapsed() {
+            clearInterval(elapsedTimer);
+            elapsedTimer = null;
+            recomputeText.textContent = 'Recomputing';
+            recomputeElapsed.textContent = '';
+        }
+
+        // Spec 14 F5: header.collapse as plain text in the Collapse Analysis
+        // section (the lines come from COLLAPSE-HELPERS, tested in Node).
+        function renderCollapseReadout(collapse, numStories) {
+            collapseReadout.replaceChildren(...formatCollapseReadout(collapse, numStories).map(line => {
+                const div = document.createElement('div');
+                div.textContent = line;
+                if (line.startsWith('Structural solve')) div.className = 'readout-honesty';
+                return div;
+            }));
         }
 
         // Gravity-instability / bad-parameter message on the recompute
@@ -4040,6 +4224,8 @@
             lastValidBuilding = {
                 sliders: BUILDING_SLIDERS.map(([el]) => el.value),
                 soft: softGroundStoryToggle.checked,
+                weakStory: weakStorySelect.value,
+                weakDepth: weakDepthSlider.value,
             };
         }
         function restoreBuildingParams() {
@@ -4050,6 +4236,10 @@
             });
             softGroundStoryToggle.checked = lastValidBuilding.soft;
             softGroundStoryLabel.textContent = lastValidBuilding.soft ? 'on' : 'off';
+            rebuildWeakStoryOptions();
+            weakStorySelect.value = lastValidBuilding.weakStory;
+            weakDepthSlider.value = lastValidBuilding.weakDepth;
+            weakDepthLabel.textContent = parseFloat(weakDepthSlider.value).toFixed(2) + 'm';
         }
         let revertOnDismiss = false;
         function dismissRecomputeError() {
@@ -4316,12 +4506,17 @@
                 // Unchecked IS the default (spec 10, C2), so the static
                 // out/ fast path stays valid until it is ticked.
                 && !softGroundStoryToggle.checked
+                // No weak story is the default: no profile is sent (spec 14).
+                && weakStorySelect.value === '0'
                 && earthquakeParamsAtDefault();
         }
 
-        folderSelect.addEventListener('change', async (e) => {
+        // Named (not an inline listener) so the collapse-demo loader can
+        // await the same record switch a user makes (spec 14 F4).
+        folderSelect.addEventListener('change', onFolderChange);
+        async function onFolderChange() {
             invalidateCollapseCache();
-            const folder = e.target.value;
+            const folder = folderSelect.value;
             if (!folder) return;
             stripRecordName.textContent = folder;
 
@@ -4356,7 +4551,7 @@
                 // record with the sliders' current values instead.
                 await liveRecompute(folder, true);
             }
-        });
+        }
 
         // Shared by both the main Playback play/pause button and the
         // mobile bottom-sheet's collapsed-strip button (spec 4, Part E) --
@@ -4525,6 +4720,64 @@
         softGroundStoryToggle.addEventListener('change', (e) => {
             softGroundStoryLabel.textContent = e.target.checked ? 'on' : 'off';
             scheduleLiveRecompute();
+        });
+
+        // --- Spec 14 Part F: collapse scenario controls ---
+        function rebuildWeakStoryOptions() {
+            const n = parseInt(storiesSlider.value, 10);
+            const keep = parseInt(weakStorySelect.value, 10);
+            weakStorySelect.replaceChildren(new Option('none', '0'),
+                ...Array.from({ length: n }, (_, i) => new Option(`story ${i + 1}`, String(i + 1))));
+            weakStorySelect.value = keep >= 1 && keep <= n ? String(keep) : '0';
+        }
+        rebuildWeakStoryOptions();
+        storiesSlider.addEventListener('input', rebuildWeakStoryOptions);
+        const formatIntensity = () => `${INTENSITY_STEPS[parseInt(intensitySlider.value, 10)]}×`;
+        intensityLabel.textContent = formatIntensity();
+        // Collapse-only, like torsion: drops the cached collapse result.
+        intensitySlider.addEventListener('input', () => {
+            intensityLabel.textContent = formatIntensity();
+            invalidateCollapseCache();
+        });
+        // The weak story changes the building, so the elastic view follows.
+        weakStorySelect.addEventListener('change', () => scheduleLiveRecompute());
+        weakDepthSlider.addEventListener('input', (e) => {
+            weakDepthLabel.textContent = parseFloat(e.target.value).toFixed(2) + 'm';
+            if (weakStorySelect.value !== '0') scheduleLiveRecompute();
+        });
+
+        // F4: the verified detaching case (spec 14 C-6), set VISIBLY -- the
+        // record and every control move to it and the elastic view updates.
+        // It does not run; the user still presses Run collapse analysis.
+        const COLLAPSE_DEMO = { record: 'KOCAELI_AYD', stories: 4, column: 1.10,
+                                weakStory: 3, weakDepth: 0.70, intensity: 20, magnitude: 8.0 };
+        loadDemoBtn.addEventListener('click', async () => {
+            const d = COLLAPSE_DEMO;
+            if (![...folderSelect.options].some(o => o.value === d.record)) {
+                showToast(`Demo record ${d.record} is not available`);
+                return;
+            }
+            storiesSlider.value = d.stories;
+            storiesLabel.textContent = String(d.stories);
+            rebuildWeakStoryOptions();
+            for (const [el, label] of [[columnXSlider, columnXLabel], [columnYSlider, columnYLabel]]) {
+                el.value = d.column;
+                label.textContent = d.column.toFixed(2) + 'm';
+            }
+            weakStorySelect.value = String(d.weakStory);
+            weakDepthSlider.value = d.weakDepth;
+            weakDepthLabel.textContent = d.weakDepth.toFixed(2) + 'm';
+            intensitySlider.value = INTENSITY_STEPS.indexOf(d.intensity);
+            intensityLabel.textContent = formatIntensity();
+            if (folderSelect.value !== d.record) {
+                folderSelect.value = d.record;
+                // Loads the record at its reference magnitude, then the
+                // magnitude below is applied on top -- the order a user
+                // would follow, through the same handlers.
+                await onFolderChange();
+            }
+            richterSlider.value = d.magnitude;
+            richterSlider.dispatchEvent(new Event('input'));
         });
 
         snapshotBuildingParams();
