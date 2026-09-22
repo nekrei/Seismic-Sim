@@ -2571,3 +2571,334 @@ Open items stated in the docs: elastic θ ≡ 0 and the still-open elastic
 torsion-default question (ruling 37); offline `__main__` stays per-axis and
 `out/` not regenerated (ruling 38); `t_collapse` criterion vacuous (ruling
 35).
+
+## Spec 13 — post-detachment re-solve and hand-off contract
+
+Plan: `claude_scripts/plans/2026-09-22-13-post-detachment-handoff.md`
+(rulings R1–R10 there). Branch `goal/13-post-detachment-handoff`.
+
+### Task 1 — building blocks (2026-09-22)
+
+Added to `mdof_response.py`: `free_vibration` (closed-form modal zero-input,
+both building classes), `ground_velocity` (jω on an evenly extended trace,
+R8), `survivor_building` (slices per-floor arrays and RE-ASSEMBLES; frozen
+`k0_profile` override, R9), `slice_backbones`, `slice_hysteresis_state`.
+`claude_scripts/verify_handoff.py 2` passes:
+- |K_surv − K[:m−1,:m−1]|_F at N=7 default geometry: 61.55 % (m=2),
+  31.57 % (m=4), 20.07 % (m=7) per axis; 58.38 / 29.69 / 19.35 % on 3N.
+  The slice is badly wrong, so re-assembly matters.
+- K_surv is bit-equal to `build_condensed_K(m−1,…)` and to `assemble_K3N`.
+- M_surv is (m−1)² (3N: (3(m−1))²), eigenvalues are finite and positive,
+  and reduced P_i equals g·Σm to 1e-14, strictly below the old values.
+- The coupling matrix is symmetric.
+- free_vibration: EOM residual 1.4e-15 / 6.4e-16. FD(u) vs v: 3e-6 / 8e-6
+  (dt = 1e-4).
+- ground_velocity vs analytic: 2.4e-7.
+
+### Task 2 — restart-capable segment solve (2026-09-22)
+
+**Ruling R11 (refines the plan's Task 2 / C-3 mechanics).** A zero-state
+FFT solve that starts from rest at t_d, with the forcing cut off there,
+half-counts the first sample. The DFT sees it as a band-limited pulse
+centred on τ=0, so the solve is not at rest at τ=0:
+- displacement error ≈ a0·dt²/π², velocity error ≈ a0·dt/2;
+- the pseudo-force term is worse, because near failure it is ~10× the
+  ground term;
+- check 3's 1e-6 velocity continuity would miss by ~3 orders of magnitude.
+
+The survivor is therefore solved as follows.
+- **Particular (zero-state) part, over the full record:** the survivor's
+  elastic response to the full refined ground traces, plus the
+  convolution of the surviving columns' actual pseudo-force before t_d as
+  a fixed prefix. Both are continuous at t_d, so nothing is truncated.
+- **Zero-input part:** the closed-form free vibration of the survivor's
+  modes carries the state difference at t_d.
+- `_RestartConvolution` builds that correction into the convolution
+  operator, so every fixed-point iterate starts exactly from (u0, v0).
+- Restricted to τ ≥ 0, this is exactly "free vibration from (u0, v0) +
+  convolution of the forcing after t_d": C-3's LTI decomposition,
+  evaluated without Gibbs ringing.
+- Cost: the convolution runs over the full record length. Hysteresis runs
+  on the suffix only.
+
+Code:
+- `_per_axis_constitutive` / `_torsion_constitutive` take `initial=`.
+- `_refine_traces`, `_base_velocity` and `_solve_grid` were extracted.
+- Both results keep `solve_grid`, i.e. references to the
+  pre-downsampling histories plus the fine traces.
+- Added `_RestartConvolution`, `_restart_solve`, `_restart_axis` and
+  `_restart_3N`.
+
+Verification:
+- `verify_handoff.py restart`, V-2 split cases:
+  - (a) zero forcing + ICs, elastic: |u − FV| = |v − FV| = 0.0, per-axis
+    and 3N.
+  - (b) u0 = v0 = 0 from sample 0: the restart differs from the from-rest
+    solve by 1.2e-5 of peak (elastic) and 5.6e-5 (yielding). That is the
+    from-rest solve's own t=0 artifact. With FV(−u_ref(0), −v_ref(0))
+    removed the difference is 0.0 elastic and 1.5e-10 yielding (both at
+    hftd_tolerance 1e-9).
+- Bit-identity against `main`: yielding N=3 solves (X factor 1, Y factor
+  4, 3N factor 4), 21 arrays + summaries, ALL BIT-IDENTICAL.
+- `check_hftd_elastic_baseline` (140 cases), `check_hftd_contracts`,
+  `check_hftd_sampling_wrapper`, `check_hftd_convolution` and
+  `verify_torsion 1 2 3 4` all exit 0.
+
+### Task 3 — driver, detection, stitching, hold + COST GATE (2026-09-22)
+
+`solve_with_detachment` (per-axis X[+Y], or the 3N building):
+- **First pass:** exactly `compute_response_nonlinear`. A run with no
+  detachment is returned untouched.
+- **Detection:** `_find_detachment` runs on the stitched history, in global
+  time. A story detaches when all 4 columns have failed and kt ≤ P/h in
+  force at that sample. Ties go to the lowest story.
+- **Restart:** a joint restart of both axes on `survivor_building`. State
+  is recovered by `_state_at`, which re-runs the law on the retained
+  solve-grid history. Survivor segments always run on the 4× grid, with
+  the first pass's fine traces.
+- **R7 hold:** absolute position (and θ) is held, absolute velocity and
+  acceleration are zero, and the detached stories' per-story histories
+  freeze.
+- **Criteria:** spec-11 criteria are re-evaluated with a per-sample k_g
+  history (`evaluate_collapse_criteria(k_g=)`).
+- **Stop:** when no further detachment is found, story 1 detaches, or
+  `MAX_DETACHMENT_EVENTS = 4` binds (`cap_reached`).
+
+**Ruling R12 — convergence fix for the restart.** The survivor's
+causal-predictor seed missed the restart operator by ~1e-3, and the
+coupled 3N outer iteration stalled there (N=7 3N: 200 iterations, not
+converged).
+- **Fix:** a change of variables. u(0)=u0 exactly and the frozen state are
+  both known, so the pseudo-force at τ=0 (p0) is determined. The survivor
+  solves for g = p − p0. The operator's τ=0 zero-input term then drops to
+  1.3e-6 relative (measured on captured restart inputs).
+- **What remains:** a 1.9e-4 seed miss, identical under the plain
+  convolution. So it is the shared predictor's own accuracy, not the
+  restart.
+- **Shared-code change:** `_hftd_fixed_point(offset=)` keeps the
+  convergence norm relative to the total pseudo-force. With the default
+  None it is bit-identical.
+- **Result:** N=7 3N now converges in 102 iterations. The spec-12 coupled
+  map still contracts slowly after the seed.
+
+**Detaching real-record cases** (KOCAELI_AYD) needed a spec-10 per-floor
+weak story. With the default uniform columns:
+- intensity 40: no column fails;
+- intensity 80: story 1 detaches at 95.37 s, so there is no survivor;
+- intensity ≥ 150: does not converge.
+
+**Cost gate (V-9), wall clock, sequential runs, commit `755e893`:**
+
+| config | first pass | restart(s) | total | ratio |
+|---|---|---|---|---|
+| N=7 per-axis X+Y, ×60, story 4 = 0.8 m | 101.7 s | 37.5 s (X 16 it, Y 3 it) | 139.3 s | 1.37 |
+| N=7 3N, same | 208.4 s | 244.5 s (102 it) | 453.0 s | 2.17 |
+| N=20 per-axis X+Y, ×40, story 11 = 0.8 m | 182.8 s | 62.7 s (3+3 it) | 245.8 s | 1.34 |
+| N=20 3N, same (cascade: story 11 at 71.37 s, then story 1 at 84.47 s) | 277.0 s | 111.7 s (3 it) | 389.1 s | 1.40 |
+
+Profile (N=20 per-axis): ~95 % of the restart time is the shared
+`_causal_fft_predictor` walking the survivor suffix, not the restart
+machinery.
+
+`t_detach` (80.62 s) is well after `t_collapse` (40.07 s) in the N=7 case.
+That strict-inequality case is for check 1.
+
+**Gate decision (user, 2026-09-22):** nonlinear collapse stays DISABLED on
+the deployed backend (an open item for the docs and the mirror step).
+`MAX_DETACHMENT_EVENTS` stays 4.
+
+### Task 4 — hand-off contract (2026-09-22)
+
+Code:
+- `HANDOFF_VERSION = 1`, `HANDOFF_EVENT_FIELDS`, `build_detachment_events`
+  (the single 0-based → 1-based conversion), `handoff_header` (the
+  `collapse.*` keys) and `validate_handoff` (the reference consumer;
+  refuses an unknown version).
+- `upper_cm_height` is measured from the failure plane (top of floor m−1).
+- `floor_state` is absolute, with `ground_state` beside it.
+- R3: `surviving_columns` is `[]` by definition. `hinge_column` is the
+  last column to fail on the tripped axis. Per-axis `t_fail_x` / `t_fail_y`
+  are null where that axis had not failed by `t_d`.
+
+Fast detaching fixtures (KOCAELI_AYD, N=4, ×60, windowed samples): `mid`
+(story 3 at 0.7 m), `cascade` (+ story 1 at 0.82 m, 50 s window), `story1`
+(story 1 at 0.8 m).
+
+`verify_handoff.py` results:
+- **Check 1** PASS: t_detach vs t_collapse for mid 30.59 vs 1.15 s,
+  cascade 30.77 vs 1.25 s and 38.83 vs 11.87 s, story1 29.04 vs 8.46 s,
+  all strict. Negative case: story 3 column 0 with du×1e3 still gives
+  onset (t_collapse 1.15 s) but no detachment.
+- **Check 6** PASS: cascade story 3 (X, 30.77 s) → story 1 (Y, 38.83 s).
+  max_events=1 gives 1 event and cap_reached. story1 gives
+  surviving_stories 0, all floors held. V-5: an X-only trip holds X and Y
+  bit-for-bit from the same k.
+- **Check 7** PASS: mid / cascade / story1 / mid-3N. Finiteness walk
+  (nulls only where allowed); upper_mass / h_cm / J recomputed to ≤1e-12;
+  unit sanity (max floor offset from ground 1.76 m); columns partition
+  {0..3}; P_cap_below = P_cap[m−2]; V-6 (1-based story vs 0-based
+  collapse_events, z = 0, θ = ω = 0 off 3N); version 2 refused.
+- **Check 9** PASS: 5 in-process + 3 fresh processes bit-identical
+  (sha256 aa6bd9397ad38d6e). t_detach is identical (exact) with
+  hftd_segment_seconds 10 and 20.
+
+Bug found by check 1's negative case and fixed: the builder read
+`info['ground']` when there were no events.
+
+### Task 5 — physics validation, checks 3/4/5 (2026-09-22)
+
+`claude_scripts/verify_handoff.py`:
+- **Check 3** PASS (mid, cascade, mid-3N):
+  - u(0⁺)−u0 and v(0⁺)−v0 are 0.0 (≤3e-16 on 3N).
+  - jω velocity vs an independent FD4 of the displacement, interior with
+    1 s margins: 7.6e-7 to 1.0e-6 RMS.
+  - V-3: the handed-over hysteresis state equals a fresh machine stepped
+    sample by sample over the retained solve-grid history (12,236–12,308
+    samples), bit-exact. Frozen k0/dy/du/Vy are bit-exact.
+  - Ground velocity (jω) vs FD4 of the displacement: 2.8e-5 / 2.6e-5 RMS.
+    floor_state v = relative + ground velocity, and `ground_state` is
+    present.
+- **Ruling R13 (V-3 comparison).** Two fields are excluded from the
+  bit-exact state comparison, both inert:
+  - spec 11's batched history does not track `direction` for a column
+    that has never yielded. Only reversal detection reads it, and that
+    requires `yielded`; the next nonzero step recomputes it.
+  - `work` is a summation-order diagnostic that never enters a force
+    (3.5e-15, or 4.2e-12 where the elastic shortcut set it).
+- **Check 4** PASS: E_surv(0⁺) − (E_full(t_d⁻) − KE_block) runs from −15 %
+  to −51 % of E_full over all five restarts. The detached story's spring
+  energy leaves with the block. Reduced-P gravity energy moves the balance
+  up (e.g. −2.6e5 J → −2.7e3 J), but that is dominated by the departing
+  spring energy.
+- **Check 5** PASS. `newmark_reference.py` gained `backbones=`/`machine=`
+  overrides and `solve_reference_with_detachment` (shared `_newmark` core;
+  default paths unchanged). Survivor after t_d vs HFTD:
+  - cascade u_x: NRMS 5.5e-4 (dt/4), 4.6e-4 (dt/8);
+  - 3N u_x / u_y: 4.6e-4 / 1.8e-4 (dt/8);
+  - 3N θ: 6.6e-3 at dt/4 (the survivor is elastic, so θ is pure torsional
+    free vibration and Newmark's period error accumulates), dropping to
+    1.6e-3 at dt/8.
+  That ~4× is Newmark converging onto the closed form. The check asserts
+  at dt/8, with tolerances unchanged.
+
+### Task 6 — server + payload, check 8 (2026-09-22)
+
+`server.py`:
+- Nonlinear requests go through `solve_with_detachment` on both paths.
+  The per-axis path now solves X and Y together (C-4 joint restart).
+- `header['collapse']` gains `handoff_header(...)`: `handoff_version`,
+  `detachment_events`, `cap_reached`, `surviving_stories`.
+- The binary layout is unchanged. The hold is in abs_x / abs_y / theta_z.
+- `respond()` is now elastic-only.
+
+**Bug found and fixed (R14).** A detaching request returned HTTP 500 with
+`inf` in `theta_demand_X`:
+- `_demand_stability_coefficients` recomputed a detached story's drift from
+  `floor_disp_rel`, i.e. held floor minus moving survivor.
+- Its peak landed after t_d, where the held floors' acceleration (and so
+  the story shear) is 0, giving θ = P·δ/(V·h) = inf.
+- Fix: the driver sets `held_from` (per-story t_detach sample) on each
+  axis building. The shared method holds that story's drift from there,
+  like its HFTD histories. It is one guard, and 3N goes through it via
+  `_install_axis_views`.
+- Remaining latent issue (pre-existing, not spec 13): `theta_demand` maps
+  a zero story shear to inf, which the JSON header cannot carry.
+
+`check_ground_accel_block.py` section 10 (the server's intensity cap is
+20, so a KOCAELI_AYD, M 8.0 (≈×3.1 RMS), ×20, N=4 request with story 3 at
+0.7 m was used; it detaches at 80.54 s):
+- a no-detachment nonlinear payload's floats are byte-identical to main,
+  and its header is identical apart from the 4 hand-off keys;
+- the elastic default payload is byte-identical to main;
+- detaching per-axis and has_floor_rotation requests: 200, zero trailing
+  bytes, 550,400 / 638,464 float32 all finite, floors ≥ 3 held
+  bit-for-bit in abs_x / abs_y (/ theta_z).
+
+Section 9 was stale since spec 12 merged: `main`'s elastic default is now
+torsion on. The reference now asks `main` for torsion=false. Both elastic
+payloads were confirmed byte-identical to `main` separately. ALL CHECKS
+PASSED, exit 0.
+
+### Task 7 — real-browser negative pass, check 11 / V-8 (2026-09-22)
+
+**Finding (for spec 15 and the docs).** The UI's own Collapse Analysis
+request cannot currently produce a converged detachment. It sends scalar
+sliders only, `intensity_scale` 1 and the default 40 iterations, and
+magnitude is capped at 9.0 (×30.9 RMS on KOCAELI_AYD). Across 12
+slider-only KOCAELI_AYD probes (N 4–5, columns 0.6–1.1 m, soft story
+on/off, mass 1,000–5,000 t, M 8.8–9.0) the result was either collapse
+onset without all four columns failing, or no convergence.
+
+**Ruling R15.** The browser pass drove the real frontend with a
+test-only `fetch` wrapper, injected from the page console. It added
+section 10's verified detaching parameters to the UI's own nonlinear
+request (N=4, story-3 profile 0.7 m, ×20, M 8.0,
+hftd_max_iterations 200). Everything downstream is shipped code. No app
+code changed.
+
+Results: Claude in Chrome, worktree `server.py` on 127.0.0.1:8001
+(port 8000 was held by another process, left untouched), KOCAELI_AYD, Run
+collapse analysis.
+- `/compute` returned 200 in 55 s: `handoff_version` 1, story 3 at
+  80.54 s (X), floor_state in metres (x ≈ −1.03 m, vx ≈ −1.47 m/s),
+  surviving_stories 2.
+- **Hold:** the 4-story building renders. Floors 3–4 sit at the same
+  place at 120 s and 200 s while the survivor moves; they are held, not
+  vanished or flown off.
+- **Signals Time tab:** finite traces with sane peaks (floor 4:
+  1.64 m relative; floor 1: 2.75 cm; ground: 3.17 m/s²). A held floor's
+  relative trace after t_d is −ground, as documented.
+- **Scrubbing** 70 → 79 → 80 → 80.5 → 80.6 → 81 → 120 → 200 → 81 → 79 s:
+  no discontinuity artifact, no stale trace.
+- **Messages:** a 422 unstable-building message (19 stories, 0.30 m
+  columns, 5,000 t, soft story) dismissed with Esc and, separately, with
+  ×. Both times the sliders snapped back to the last valid building.
+- **Console:** zero errors on a fresh page load through the collapse run
+  and the scrubbing. An earlier session's 8 errors were all from my own
+  first wrapper (it parsed a 422 JSON body as binary), which was then
+  fixed.
+
+### Final whole-branch pass (2026-09-22)
+
+On the final code:
+- `verify_handoff.py` (all checks): 2, restart, 1, 3, 4, 5, 6, 7 and 9
+  PASS, exit 0, 8 min 53 s.
+- Check-10 sweep, all exit 0:
+  - spec 10: verify_frame_furniture, verify_elastic_foundation,
+    verify_floor_area, verify_spectrum, verify_synthetic_earthquake,
+    check_quake_continuity, fft_check_scipy;
+  - spec 11: check_hysteresis, check_hftd_{elastic_baseline, contracts,
+    sampling_wrapper, convolution}, and verify_hftd checks 1–11 (525 s);
+  - spec 12: verify_torsion checks 1–8 (538 s), check_transfer_mirror;
+  - `.mjs`: check_story_heights, check_index_syntax, fft_check,
+    check_time_domain, check_footprint_area, check_sway_gain,
+    check_furniture_gain, check_floor_rotation.
+- `check_ground_accel_block.py`: ALL CHECKS PASSED.
+- `graphify update .` done.
+
+Test-fixture fix in the V-2 (b) yielding case. That case's fixed point
+stalls near 6e-5 (identically on main), and `hftd_tolerance` doubles as
+spec 11's causality-guard threshold (1.1e-7 here), so its 1e-9
+tolerance stopped both solves early. It now uses the production 1e-4:
+both converge at iteration 3 on the same trajectory, and the difference
+after removing the from-rest t=0 artifact is 1.5e-10. The reference's
+behaviour was confirmed identical at `ab06d2c`, at `main` and at HEAD.
+
+### Task 8 — documentation, Part E + C-8, check 12 (2026-09-22)
+
+- **README:** new "Spec 13" section with the Part B sentence verbatim and
+  the things-to-know. Covers: detachment vs onset (P-Delta off gives "≤ 0",
+  stricter), remove-and-re-assemble (not slice), frozen backbone, the
+  zero-input + zero-state restart (R11), both-axes restart, the cap of 4,
+  hold-not-NaN, the 1-based `story` vs 0-based `collapse_events`,
+  `surviving_columns = []` / `hinge_column`, cost, collapse disabled on
+  deploy, and that the UI cannot yet reach a detachment. Also fixed a stale
+  "Open Building Parameters" (the button is in Collapse Analysis).
+- **Math PDF Part I** (I1–I6) in `generate_math_pdf.py`, plus
+  `claude_scripts/math-pdf-sections-goal13.md`. Rebuilt to 39 pages.
+- **knowledge/:** `mdof_response`, `server`,
+  `data_flow_and_wire_formats` (the contract field by field, and the hold),
+  `index_html`, `spec_history`.
+- **specs/COURSE-CONCEPTS.md:** row 13 "Delivered".
+- **Check 12:** `verify_handoff.py 12` PASS. The Part B sentence is
+  verbatim in README and in the PDF text (whitespace-normalised search).

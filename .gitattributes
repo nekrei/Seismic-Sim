@@ -1,0 +1,2 @@
+# Never line-ending-convert binaries (core.autocrlf mangled the math PDF).
+*.pdf binary

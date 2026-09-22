@@ -27,7 +27,7 @@ from mdof_response import (
     SECTION_STIFFNESS_PRESETS, DEFAULT_SECTION_STIFFNESS_MODE,
     SOFT_STORY_HEIGHT_RATIO, GravityInstabilityError,
     MDOF_Building3N, pair_components, ComponentPairingError,
-    tangent_eccentricity,
+    tangent_eccentricity, solve_with_detachment, handoff_header,
 )
 
 # Frame-geometry defaults -- MUST match mdof_response.py's __main__
@@ -347,9 +347,7 @@ def compute():
         )
 
     def respond(building, acceleration, displacement):
-        if nonlinear:
-            return building.compute_response_nonlinear(acceleration, displacement, dt,
-                record=record, **nonlinear_params)
+        # Elastic only; nonlinear requests go through solve_with_detachment.
         return building.compute_response(acceleration*nonlinear_params['intensity_scale'],
             displacement*nonlinear_params['intensity_scale'], dt)
 
@@ -365,20 +363,32 @@ def compute():
                                  y_orient=ground["y_orient_deg"])
             scale = nonlinear_params['intensity_scale']
             if nonlinear:
-                b3.compute_response_nonlinear(pc.accel_x, pc.disp_x,
-                    pc.accel_y, pc.disp_y, dt, record=record,
+                # Spec 13: the nonlinear solve restarts the surviving
+                # structure at each detachment (a no-detachment run is the
+                # plain spec-12 solve, untouched).
+                solve_with_detachment(b3, pc.accel_x, pc.disp_x,
+                    pc.accel_y, pc.disp_y, dt=dt, record=record,
                     **nonlinear_params)
             else:
                 b3.compute_response(pc.accel_x*scale, pc.disp_x*scale,
                                     pc.accel_y*scale, pc.disp_y*scale, dt)
             time_arr = b3.time
             gdisp_x, abs_x = building_x.ground_disp, building_x.floor_disp_abs
+        elif nonlinear:
+            # Spec 13 C-4: detachment is a property of the story, so both
+            # axes are solved together and restart at the earliest event.
+            solve_with_detachment(building_x, accel_x, disp_x,
+                scaled("Y") if has_y else None, scaled("Y_disp") if has_y else None,
+                dt=dt, building_y=building_y if has_y else None, record=record,
+                **nonlinear_params)
+            time_arr, gdisp_x, abs_x = (building_x.time, building_x.ground_disp,
+                                        building_x.floor_disp_abs)
         else:
             time_arr, gdisp_x, _, abs_x = respond(building_x, accel_x, disp_x)
         furn_x, npts_dec_x, q_x, rate_x = building_x.get_decimated_furniture()
 
         if has_y:
-            if b3 is not None:
+            if b3 is not None or nonlinear:
                 gdisp_y, abs_y = building_y.ground_disp, building_y.floor_disp_abs
             else:
                 accel_y = scaled("Y")
@@ -516,6 +526,13 @@ def compute():
             reason='' if converged else 'Collapse analysis did not converge; no collapse is inferred.',
             collapse_axis=min(events,key=lambda event:event['time'])['axis'] if events and converged else None,
             collapse_events=events if converged else [])
+        # Spec 13: the versioned hand-off contract (1-based `story`, metres,
+        # physics frame). Floors above a failure plane HOLD their last
+        # structural value in abs_x/abs_y/theta_z from `t_detach` on; these
+        # timestamps are the authoritative "no longer structural" signal.
+        header['collapse'].update(handoff_header(
+            b3 if b3 is not None else building_x,
+            None if b3 is not None or not has_y else building_y))
     # Spec 12 C1. Every new key is emitted ONLY when torsion was requested,
     # so a torsion=false payload is byte-identical to spec 11's, header and
     # pad included (verification check 9, correction V-7) -- not merely

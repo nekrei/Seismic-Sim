@@ -9,6 +9,8 @@ import os
 import sys
 import copy
 from collections import namedtuple
+from time import perf_counter
+from types import SimpleNamespace
 
 # Constants
 G_TO_MS2 = 9.80665
@@ -1405,6 +1407,9 @@ class HFTDResult:
     segments: int = 1
     padding_capped: bool = False
     reason: str = ''
+    # Spec 13: the pre-downsampling solve-grid histories (and the refined
+    # traces, when factor 4) kept so a restart can recover the exact state.
+    solve_grid: dict = None
 
 
 def _hysteresis_history(drift, bb, initial_state=None):
@@ -1477,13 +1482,16 @@ HysteresisAux = namedtuple(
     'HysteresisAux', 'state story_drift column_drift force tangent damage')
 
 
-def _per_axis_constitutive(bb):
+def _per_axis_constitutive(bb, initial=None):
     """Spec 11's one-drift-per-story constitutive law, as a callable.
 
     The drift broadcast across the column axis is a view, not arithmetic,
     so every number downstream is bit-identical to the pre-spec-12 code.
+    `initial` is the state a call with no state starts from: None (virgin)
+    for a from-rest solve, the frozen state for a spec-13 restart.
     """
     def constitutive(u, state=None):
+        state = initial if state is None else state
         story = np.diff(u, axis=0, prepend=np.zeros((1, u.shape[1])))
         drift = np.broadcast_to(story[:, None, :], (*bb['k0'].shape, u.shape[1]))
         force, tangent, damage, defect, machine = _hysteresis_history(drift, bb, state)
@@ -1492,7 +1500,7 @@ def _per_axis_constitutive(bb):
     return constitutive
 
 
-def _torsion_constitutive(bb_x, bb_y, positions):
+def _torsion_constitutive(bb_x, bb_y, positions, initial=None):
     """Spec 12 B2+B3: two independent per-column state machines, one placement.
 
     The two bending axes of a column are kept independent -- one state
@@ -1504,6 +1512,7 @@ def _torsion_constitutive(bb_x, bb_y, positions):
     deliberately out of scope (spec 12 B2).
     """
     def constitutive(u, state=None):
+        state = initial if state is None else state
         sx, sy = state if state is not None else (None, None)
         dx, dy = column_drift_3N(u, positions)
         fx, tx, gx, ex, mx = _hysteresis_history(dx, bb_x, sx)
@@ -1517,11 +1526,14 @@ def _torsion_constitutive(bb_x, bb_y, positions):
     return constitutive
 
 
-def evaluate_collapse_criteria(result, building):
+def evaluate_collapse_criteria(result, building, k_g=None):
     """Physical thresholds evaluated only after the fixed point converges.
 
     Global drift thresholds are descriptive FEMA 356 commentary values;
     crossing them is a model onset flag, not a validated failure prediction.
+    `k_g` optionally overrides `building.k_g` with a per-sample (N, npts)
+    history: after a spec-13 restart the survivor carries reduced gravity,
+    and the gravity criterion must use the P/h actually in force.
     """
     r, p, bb = result, result.backbones['params'], result.backbones
     drift = r.story_drift
@@ -1539,7 +1551,7 @@ def evaluate_collapse_criteria(result, building):
     for i in range(building.N):
         masks = [np.max(abs(col[i]),axis=0)/building.h[i] > p['drift_limit_cp'],
                  np.max(mu[i],axis=0) > p['collapse_mu_cap'],
-                 kt[i] <= (building.k_g[i] if building.p_delta else 0.)]
+                 kt[i] <= ((building.k_g[i] if k_g is None else k_g[i]) if building.p_delta else 0.)]
         hits = [(int(np.argmax(m)),name) for m,name in zip(masks,('drift','ductility','gravity')) if np.any(m)] if r.converged else []
         if hits:
             t,name = min(hits, key=lambda pair:pair[0])
@@ -1682,7 +1694,7 @@ def _causal_fft_predictor(building, base, constitutive, convolution, dt, max_ite
 
 
 
-def _hftd_fixed_point(building, base, constitutive, convolution, dt, p, dy_min):
+def _hftd_fixed_point(building, base, constitutive, convolution, dt, p, dy_min, offset=None):
     """The shared pseudo-force fixed point: causally seeded, Anderson-mixed.
 
     DOF-agnostic. `base` is the elastic response on whatever DOF set the
@@ -1695,6 +1707,9 @@ def _hftd_fixed_point(building, base, constitutive, convolution, dt, p, dy_min):
 
     Returns the converged force, the displacement history it produced, the
     last constitutive `HysteresisAux`, and the loop's own diagnostics.
+    `offset` (spec 13) is a force already accounted for in `base`: the
+    iteration solves for the remainder, but convergence is still measured
+    relative to the total pseudo-force, exactly as without it.
     """
     n = base.shape[1]
     force = np.zeros_like(base)
@@ -1725,7 +1740,7 @@ def _hftd_fixed_point(building, base, constitutive, convolution, dt, p, dy_min):
         residual = candidate-force
         change=p['hftd_relaxation']*residual
         updated=force+change
-        norm=float(np.linalg.norm(change)/max(np.linalg.norm(updated),1e-30))
+        norm=float(np.linalg.norm(change)/max(np.linalg.norm(updated if offset is None else updated+offset),1e-30))
         history.append(norm)
         if not np.isfinite(norm) or not np.all(np.isfinite(u)):
             break
@@ -1774,18 +1789,14 @@ def solve_hftd(building, accel, disp, dt, params=None):
     if np.all(np.max(abs(drift), axis=1)[:, None] <= bb['dy']):
         result = _solve_hftd_grid(building, accel, disp, dt, p)
         result.summary['sampling_factor'] = 1
+        result.solve_grid = _solve_grid(result, 1, dt, None)
         return result
 
-    from scipy.signal import resample
     factor = 4
-    n = len(a)
-    settle = 5 / (building.zeta * building.omega_n[0])
-    length = min(4*n, n + int(np.ceil(settle/dt)))
-    count = (n-1)*factor + 1
-    fine_a = resample(np.pad(a, (0, length-n)), length*factor)[:count]
-    fine_d = resample(np.pad(d, (0, length-n)), length*factor)[:count]
+    fine_a, fine_d = _refine_traces(building, (a, d), dt, factor)
     result = _solve_hftd_grid(building, fine_a, fine_d, dt/factor,
                               {**p, 'intensity_scale': 1.})
+    grid = _solve_grid(result, factor, dt/factor, (fine_a, fine_d))
     # Restore the native input/time metadata consumed by furniture and the
     # server; compute_response_nonlinear installs the returned floor arrays.
     building.compute_response(a, d, dt, nonlinear=False)
@@ -1804,7 +1815,49 @@ def solve_hftd(building, accel, disp, dt, params=None):
     result.summary.update(sampling_factor=factor,
                           predictor_iterations=predictor_iterations,
                           causality_error=causality_error)
+    result.solve_grid = grid
     return result
+
+
+def _refine_traces(building, traces, dt, factor=4):
+    """Band-limited `factor`x interpolation of already-scaled ground traces.
+
+    Shared by both sampling wrappers and by the spec-13 restart, which must
+    slice the SAME fine traces the original solve used rather than
+    re-resample a segment that starts mid-shake (that would add Gibbs
+    ringing at the restart the original solve never had).
+    """
+    from scipy.signal import resample
+    n = len(traces[0])
+    settle = 5 / (building.zeta * building.omega_n[0])
+    length = min(4*n, n + int(np.ceil(settle/dt)))
+    count = (n-1)*factor + 1
+    return [resample(np.pad(t, (0, length-n)), length*factor)[:count]
+            for t in traces]
+
+
+def _solve_grid(result, factor, dt, traces):
+    """References (not copies) to a result's solve-grid histories."""
+    views = (result.x, result.y) if isinstance(result, HFTD3NResult) else (result,)
+    return dict(factor=factor, dt=dt, traces=traces, u=result.u_rel,
+                velocity=result.velocity,
+                column_drift=[v.column_drift for v in views],
+                column_force=[v.column_force for v in views])
+
+
+def _base_velocity(building, a, dt):
+    """Velocity of the elastic base on compute_response's frequency grid."""
+    n, N = len(a), building.N
+    settle = 5/(building.zeta*building.omega_n[0])
+    old_len = min(4*n,n+int(np.ceil(settle/dt)))
+    old_w = 2*np.pi*fftfreq(old_len,dt)
+    af = fft(a,n=old_len)
+    base_vel=np.zeros((N, n))
+    for i in range(N):
+        old_den=building.omega_n[i]**2-old_w**2+2j*building.zeta*building.omega_n[i]*old_w
+        q=(-building.Gamma[i]/old_den)*af
+        base_vel+=np.outer(building.phi[:,i],np.real(ifft(1j*old_w*q))[:n])
+    return base_vel
 
 
 def _solve_hftd_grid(building, accel, disp, dt, params=None):
@@ -1826,17 +1879,9 @@ def _solve_hftd_grid(building, accel, disp, dt, params=None):
     base = building.floor_disp_rel.copy()
     base_acc = building.floor_accel_rel.copy()
     n, N = len(a), building.N
-    settle = 5/(building.zeta*building.omega_n[0])
     convolution = _HFTDConvolution(building,n,dt,p['hftd_segment_seconds'])
     # Velocity of the unchanged elastic base on its original frequency grid.
-    old_len = min(4*n,n+int(np.ceil(settle/dt)))
-    old_w = 2*np.pi*fftfreq(old_len,dt)
-    af = fft(a,n=old_len)
-    base_vel=np.zeros_like(base)
-    for i in range(N):
-        old_den=building.omega_n[i]**2-old_w**2+2j*building.zeta*building.omega_n[i]*old_w
-        q=(-building.Gamma[i]/old_den)*af
-        base_vel+=np.outer(building.phi[:,i],np.real(ifft(1j*old_w*q))[:n])
+    base_vel = _base_velocity(building, a, dt)
     force, u, aux, iteration, history, converged, predictor_iterations, causality_error = \
         _hftd_fixed_point(building, base, constitutive, convolution, dt, p,
                           float(np.min(bb['dy'])))
@@ -1923,6 +1968,7 @@ class HFTD3NResult:
     segments: int = 1
     padding_capped: bool = False
     reason: str = ''
+    solve_grid: dict = None
 
     @property
     def theta(self):
@@ -2074,19 +2120,15 @@ def solve_hftd_3N(building, ax, dx, ay, dy, dt, params=None):
             and np.all(np.max(abs(cdy), axis=-1) <= bb_y['dy'])):
         result = _solve_hftd_grid_3N(building, ax, dx, ay, dy, dt, p)
         result.summary['sampling_factor'] = 1
+        result.solve_grid = _solve_grid(result, 1, dt, None)
         return result
 
-    from scipy.signal import resample
     factor = 4
-    n = len(a_x)
-    settle = 5/(building.zeta*building.omega_n[0])
-    length = min(4*n, n + int(np.ceil(settle/dt)))
-    count = (n-1)*factor + 1
-    fine = [resample(np.pad(np.asarray(t, dtype=float)*p['intensity_scale'], (0, length-n)),
-                     length*factor)[:count]
-            for t in (ax, dx, ay, dy)]
+    fine = _refine_traces(building, [np.asarray(t, dtype=float)*p['intensity_scale']
+                                     for t in (ax, dx, ay, dy)], dt, factor)
     result = _solve_hftd_grid_3N(building, *fine, dt/factor,
                                  {**p, 'intensity_scale': 1.})
+    result.solve_grid = _solve_grid(result, factor, dt/factor, tuple(fine))
     building.compute_response(a_x, np.asarray(dx, dtype=float)*p['intensity_scale'],
                               a_y, np.asarray(dy, dtype=float)*p['intensity_scale'],
                               dt, nonlinear=False)
@@ -2118,6 +2160,652 @@ def solve_hftd_3N(building, ax, dx, ay, dy, dt, params=None):
                           predictor_iterations=predictor_iterations,
                           causality_error=causality_error)
     return result
+
+
+# --- Spec 13: post-detachment re-solve --------------------------------------
+#
+# Story indices below are 0-based, like every spec-11 array. The 1-based
+# `story` of the hand-off contract is produced once, in its builder.
+
+def free_vibration(building, u0, v0, tau):
+    """Closed-form zero-input response of each mode (spec 13 C-3).
+
+        q_n(tau) = e^{-zeta w_n tau} [q_n(0) cos w_d tau
+                   + (q'_n(0) + zeta w_n q_n(0))/w_d sin w_d tau]
+
+    with q_n(0) = phi_n^T M u0 and q'_n(0) = phi_n^T M v0 (phi mass-
+    normalised). Returns physical (u, v, a), each (ndof, len(tau)), on the
+    building's own DOF ordering -- one function for both building classes.
+    """
+    z = building.zeta
+    if not 0 <= z < 1:
+        raise ValueError('free_vibration needs an underdamped modal set')
+    w = building.omega_n[:, None]
+    wd = w * np.sqrt(1 - z * z)
+    q0 = (building.phi.T @ (building.M @ np.asarray(u0, dtype=float)))[:, None]
+    qd0 = (building.phi.T @ (building.M @ np.asarray(v0, dtype=float)))[:, None]
+    t = np.asarray(tau, dtype=float)[None, :]
+    e, c, s = np.exp(-z * w * t), np.cos(wd * t), np.sin(wd * t)
+    q = e * (q0 * c + (qd0 + z * w * q0) / wd * s)
+    qd = e * (qd0 * c - (w * w * q0 + z * w * qd0) / wd * s)
+    qdd = -2 * z * w * qd - w * w * q
+    return building.phi @ q, building.phi @ qd, building.phi @ qdd
+
+
+def ground_velocity(disp, dt):
+    """Ground velocity as j*omega times the transform of the displacement.
+
+    The trace is extended evenly (d, reversed d) first, so the periodic
+    signal the DFT sees has no jump at the wrap. Never a time-domain
+    difference of the displacement (spec 13 C-2, AGENTS.md).
+    """
+    d = np.asarray(disp, dtype=float)
+    ext = np.concatenate([d, d[::-1]])
+    w = 2 * np.pi * fftfreq(len(ext), dt)
+    return np.real(ifft(1j * w * fft(ext)))[:len(d)]
+
+
+def survivor_building(building, stories):
+    """The building with only its lowest `stories` stories, RE-ASSEMBLED.
+
+    Every per-floor array is sliced and the frame is condensed again from
+    geometry; `K` is never sliced -- the original condensation baked the
+    removed stories' restraint into the rows below (spec 13 A2). Mass and
+    P-Delta loads follow from the sliced masses, so gravity is reduced.
+    `k0_profile` is overridden to the original rows: surviving columns keep
+    their frozen backbone, and the energy/coupling split must use the same
+    k0 as the pseudo-force (C-5). Works for both building classes.
+    """
+    s = int(stories)
+    if not 1 <= s < building.N:
+        raise ValueError(f'survivor needs 1..{building.N - 1} stories, got {s}')
+    src = building.bx if isinstance(building, MDOF_Building3N) else building
+    m = np.asarray(building.m, dtype=float)
+    kw = dict(mass_per_floor=m if m.ndim == 0 else m[:s].copy(), zeta=building.zeta,
+              story_height=src.h[:s], column_depth_x=src.column_depth_x[:s],
+              column_depth_y=src.column_depth_y[:s], beam_depth=src.beam_depth[:s],
+              E=src.E, plan_span_x=src.plan_span_x, plan_span_y=src.plan_span_y,
+              section_stiffness_mode=src.section_stiffness_mode,
+              cracked_factor_column=src.cracked_factor_column,
+              cracked_factor_beam=src.cracked_factor_beam, p_delta=src.p_delta,
+              f_y=src.f_y, f_c=src.f_c, rho_longitudinal=src.rho_longitudinal,
+              concrete_cover=src.concrete_cover, phi_axial=src.phi_axial,
+              axial_cap_factor=src.axial_cap_factor)
+    if isinstance(building, MDOF_Building3N):
+        out = MDOF_Building3N(s, **kw)
+        out.bx.k0_profile = building.bx.k0_profile[:s].copy()
+        out.by.k0_profile = building.by.k0_profile[:s].copy()
+        out.k0_profile_x, out.k0_profile_y = out.bx.k0_profile, out.by.k0_profile
+    else:
+        out = MDOF_ShearBuilding(s, axis=building.axis, **kw)
+        out.k0_profile = building.k0_profile[:s].copy()
+    return out
+
+
+def slice_backbones(bb, stories):
+    """Row slice of every (N, 4) backbone array -- the frozen backbone."""
+    return {k: (v[:stories].copy() if isinstance(v, np.ndarray) else v)
+            for k, v in bb.items()}
+
+
+class _RestartConvolution:
+    """The survivor's convolution operator, zero-input-corrected at tau=0.
+
+    A pseudo-force placed after the restart is convolved on the FULL-record
+    grid (so its band-limited response joins the fixed prefix without a
+    truncation jump), and the closed-form free vibration of its own value
+    and velocity at tau=0 is subtracted. Every iterate therefore starts from
+    exactly the handed-over state: continuity is a property of the operator,
+    not a patch on the stitched sample. Still linear, so the fixed point is
+    unchanged.
+    """
+
+    def __init__(self, convolution, start, building, tau):
+        self.convolution, self.start = convolution, start
+        self.building, self.tau = building, tau
+        self.compliance = convolution.compliance
+        self.segments = convolution.segments
+        self.padding_capped = convolution.padding_capped
+
+    def apply(self, force, derivatives=False):
+        full = np.zeros((force.shape[0], self.convolution.npts))
+        full[:, self.start:] = force
+        d, v, a = (x[:, self.start:] for x in self.convolution.apply(full, True))
+        fu, fv, fa = free_vibration(self.building, -d[:, 0], -v[:, 0], self.tau)
+        return d + fu, (v + fv if derivatives else None), (a + fa if derivatives else None)
+
+
+def _restart_solve(survivor, constitutive, base_full, vel_full, acc_full, start,
+                   prefix, u0, v0, dt, p, dy_min):
+    """Survivor response from sample `start`: zero-state + zero-input (C-3).
+
+    The particular (zero-state) part runs over the whole record on the
+    survivor: its elastic response to the full ground traces, plus the
+    convolution of `prefix`, the surviving columns' actual pseudo-force
+    before the restart. Both are continuous across `start`, so nothing is
+    truncated there. The closed-form free vibration of the survivor's modes
+    then carries the state difference `u0 - w(start)`, `v0 - w'(start)`.
+    Restricted to tau >= 0 that is exactly "free vibration from (u0, v0) +
+    convolution of the forcing after the restart". A from-rest FFT solve
+    that starts at the restart instead half-counts the first sample (a
+    band-limited pulse centred on tau=0), which breaks velocity continuity
+    by about a0*dt/2. The pseudo-force after `start` is found by the shared
+    fixed point.
+    """
+    nf = base_full.shape[1]
+    convolution = _HFTDConvolution(survivor, nf, dt, p['hftd_segment_seconds'])
+    if prefix is not None and np.any(prefix):
+        full = np.zeros_like(base_full)
+        full[:, :start] = prefix
+        d, v, a = convolution.apply(full, True)
+        base_full, vel_full, acc_full = base_full + d, vel_full + v, acc_full + a
+    tau = np.arange(nf - start) * dt
+    fu, fv, fa = free_vibration(survivor, u0 - base_full[:, start],
+                                v0 - vel_full[:, start], tau)
+    operator = _RestartConvolution(convolution, start, survivor, tau)
+    base = base_full[:, start:] + fu
+    velocity = vel_full[:, start:] + fv
+    acceleration = acc_full[:, start:] + fa
+    # Continuity fixes u(0) = u0, so with the frozen state the pseudo-force
+    # at tau=0 is already determined. Solve for the remainder g = p - p0,
+    # which is 0 at tau=0: the operator's tau=0 correction then nearly
+    # vanishes, so the plain causal predictor seeds it consistently (without
+    # this the coupled survivor's seed missed by ~1e-3 and the outer
+    # iteration stalled there). A change of variables, not of the problem.
+    p0 = constitutive(np.asarray(u0, dtype=float)[:, None])[0]
+    hold = None
+    if np.any(p0):
+        hold = np.repeat(p0, nf - start, axis=1)
+        d, v, a = operator.apply(hold, True)
+        base, velocity, acceleration = base + d, velocity + v, acceleration + a
+
+    def remainder(u, state=None):
+        candidate, aux = constitutive(u, state)
+        return candidate - p0, aux
+
+    force, u, aux, iteration, history, converged, predictor_iterations, causality_error = \
+        _hftd_fixed_point(survivor, base, remainder, operator, dt, p, dy_min, offset=hold)
+    if np.any(force):
+        _, cv, ca = operator.apply(force, True)
+        velocity, acceleration = velocity + cv, acceleration + ca
+    if hold is not None:
+        force = force + hold
+    return dict(u=u, velocity=velocity, acceleration=acceleration, aux=aux,
+                force=force, iterations=iteration, residual_history=history,
+                converged=converged, predictor_iterations=predictor_iterations,
+                causality_error=causality_error, segments=convolution.segments,
+                padding_capped=convolution.padding_capped)
+
+
+def _restart_axis(survivor, bb, state, traces, dt, start, prefix_defect, u0, v0, p):
+    """Per-axis restart. `prefix_defect` is the story defect (s, start).
+    All returned histories are relative to the ground and start at `start`."""
+    a, d = traces
+    survivor.compute_response(a, d, dt, nonlinear=False)
+    prefix = None if prefix_defect is None else assemble_pseudo_force(prefix_defect)
+    out = _restart_solve(survivor, _per_axis_constitutive(bb, state),
+                         survivor.floor_disp_rel.copy(), _base_velocity(survivor, a, dt),
+                         survivor.floor_accel_rel.copy(), start, prefix, u0, v0, dt, p,
+                         float(np.min(bb['dy'])))
+    return out
+
+
+def _restart_3N(survivor, bb_x, bb_y, state, traces, dt, start, prefix_defect, u0, v0, p):
+    """Coupled restart. `prefix_defect` is the per-column (ex, ey), (s, 4, start)."""
+    ax, dx, ay, dy = traces
+    survivor.compute_response(ax, dx, ay, dy, dt, nonlinear=False)
+    positions = survivor.column_positions
+    prefix = None if prefix_defect is None else assemble_pseudo_force_3N(*prefix_defect, positions)
+    out = _restart_solve(survivor, _torsion_constitutive(bb_x, bb_y, positions, state),
+                         survivor.floor_disp_rel.copy(), survivor.floor_vel_rel.copy(),
+                         survivor.floor_accel_rel.copy(), start, prefix, u0, v0, dt, p,
+                         float(min(np.min(bb_x['dy']), np.min(bb_y['dy']))))
+    return out
+
+
+MAX_DETACHMENT_EVENTS = 4   # TO VERIFY -- a budget, not physics (spec 13 A4)
+
+# Per-story histories (first axis = story) that freeze for a detached story.
+_STORY_ARRAYS = ('story_drift', 'story_shear', 'k_t_ratio', 'damage_state',
+                 'column_damage', 'column_force', 'column_tangent', 'column_drift')
+
+
+def _find_detachment(views, kg_hist, p_delta, stories, start):
+    """Earliest (sample, story, axes) at which a story detaches (spec 13 A1).
+
+    Every column of the story has failed -- |delta| > du at some sample so
+    far, in global time, so columns that failed before a restart count --
+    AND the summed tangent is <= P/h: spec 11's gravity criterion, with the
+    P/h actually in force (reduced after a restart). With p_delta off that
+    test degenerates to <= 0, which is stricter, not equivalent. Ties go to
+    the lowest story; `axes` lists every axis tripping at that sample.
+    """
+    hits = {}
+    for axis, v in views:
+        broke = np.abs(v.column_drift[:stories]) > v.backbones['du'][:stories, :, None]
+        failed = np.logical_or.accumulate(broke, axis=-1).all(axis=1)[:, start:]
+        kt = v.column_tangent[:stories, :, start:].sum(axis=1)
+        mask = failed & (kt <= (kg_hist[:stories, start:] if p_delta else 0.))
+        for i in np.flatnonzero(mask.any(axis=1)):
+            hits.setdefault((int(mask[i].argmax()) + start, int(i)), []).append(axis)
+    if not hits:
+        return None
+    k, story = min(hits)
+    return k, story, hits[(k, story)]
+
+
+def _state_at(segment, k):
+    """Hysteresis state after a segment's own samples before native `k`.
+
+    Re-runs the constitutive law on the retained solve-grid history (4x
+    when refined), not on downsampled drift, which would miss peaks
+    between samples (plan R5).
+    """
+    local = (k - segment['k0']) * segment['factor']
+    if local == 0:
+        return segment['state0']
+    return segment['law'](segment['u'][:, :local])[1].state
+
+
+def _hold_rows(arrays, rows, k):
+    """Floors/stories `rows` keep their value at sample k from then on."""
+    for a in arrays:
+        a[rows, ..., k + 1:] = a[rows, ..., k:k + 1]
+
+
+def solve_with_detachment(building, accel_x, disp_x, accel_y=None, disp_y=None,
+                          dt=None, building_y=None,
+                          max_events=MAX_DETACHMENT_EVENTS, **params):
+    """Nonlinear solve that restarts the surviving structure at detachment.
+
+    `building` is an MDOF_Building3N (coupled, both components), or the X
+    MDOF_ShearBuilding with an optional `building_y` for Y. The first pass
+    is exactly `compute_response_nonlinear`; a run that never detaches is
+    returned untouched, bit for bit.
+
+    At the earliest detachment across axes, BOTH axes restart on the
+    re-assembled survivor (C-4). Floors above the failure plane HOLD their
+    absolute position (and theta) from the detachment sample on, with zero
+    absolute velocity and acceleration. They are no longer structural, and
+    a hold is bounded where NaN would poison every consumer (C3). Survivor
+    segments are always solved on the 4x grid, with the fine traces of the
+    original solve. Repeats until nothing detaches, story 1 detaches
+    (nothing left to solve) or `max_events` binds (`cap_reached`). The
+    result is installed on the buildings; the event list (0-based stories)
+    is returned and kept as `.detachment`.
+    """
+    import dataclasses
+    torsional = isinstance(building, MDOF_Building3N)
+    F = 4
+    started = perf_counter()
+    if torsional:
+        building.compute_response_nonlinear(accel_x, disp_x, accel_y, disp_y, dt, **params)
+        first = building.hftd_result
+        per = [('X', building.bx, first.x, accel_x, disp_x),
+               ('Y', building.by, first.y, accel_y, disp_y)]
+        owners = [building]
+    else:
+        building.compute_response_nonlinear(accel_x, disp_x, dt, **params)
+        per = [('X', building, building.hftd_result, accel_x, disp_x)]
+        if building_y is not None:
+            building_y.compute_response_nonlinear(accel_y, disp_y, dt, **params)
+            per.append(('Y', building_y, building_y.hftd_result, accel_y, disp_y))
+        owners = [b for _, b, _, _, _ in per]
+    p = {**HFTD_DEFAULTS, **building.nonlinear_params, **params}
+    N, n = building.N, len(accel_x)
+    converged = all(v.summary['converged'] for _, _, v, _, _ in per)
+    info = dict(events=[], cap_reached=False, surviving_stories=N,
+                converged=converged, reason='', segments=[],
+                first_pass_seconds=perf_counter() - started)
+    for b in owners:
+        b.detachment = info
+    kg_hist = np.repeat(np.asarray(per[0][1].k_g, dtype=float)[:, None], n, axis=1)
+    p_delta = building.p_delta
+    hit = _find_detachment([(a, v) for a, _, v, _, _ in per], kg_hist, p_delta, N, 0) \
+        if converged else None
+    if hit is None:
+        return info
+
+    scale = p['intensity_scale']
+    ground = {a: dict(a=np.asarray(ag, dtype=float)*scale, d=np.asarray(dg, dtype=float)*scale)
+              for a, _, _, ag, dg in per}
+    for g in ground.values():
+        g['v'] = ground_velocity(g['d'], dt)
+    info['ground'] = ground
+
+    # Stitched native histories: independent copies of the first pass.
+    S = {}
+    for a, b, v, _, _ in per:
+        S[a] = {name: np.array(getattr(v, name)) for name in
+                ('u_rel', 'u_abs', 'velocity', 'acceleration', 'p_nl') + _STORY_ARRAYS}
+    # Fine-grid per-column defect k0*delta - V: the survivor's fixed prefix.
+    grids = [first.solve_grid] if torsional else [v.solve_grid for _, _, v, _, _ in per]
+    defect = {}
+    for j, (a, b, v, _, _) in enumerate(per):
+        g = grids[0] if torsional else grids[j]
+        c = j if torsional else 0
+        nf = (n - 1) * F + 1
+        defect[a] = (v.backbones['k0'][:, :, None] * g['column_drift'][c] - g['column_force'][c]
+                     if g['factor'] == F else np.zeros((N, 4, nf)))
+    if torsional:
+        g = first.solve_grid
+        fine = g['traces'] if g['factor'] == F else tuple(_refine_traces(
+            building, [ground[a][q] for a in 'XY' for q in 'ad'], dt, F))
+        S3 = dict(u=np.array(first.u_rel), v=np.array(first.velocity),
+                  a=np.array(first.acceleration), p=np.array(first.p_nl))
+        positions = building.column_positions
+        segments = {'3N': dict(k0=0, factor=g['factor'], u=g['u'], state0=None,
+                               law=_torsion_constitutive(first.x.backbones, first.y.backbones, positions))}
+    else:
+        fine, segments = {}, {}
+        for (a, b, v, _, _), g in zip(per, grids):
+            fine[a] = g['traces'] if g['factor'] == F else tuple(_refine_traces(
+                b, (ground[a]['a'], ground[a]['d']), dt, F))
+            segments[a] = dict(k0=0, factor=g['factor'], u=g['u'], state0=None,
+                               law=_per_axis_constitutive(v.backbones))
+
+    def fresh_or(state, bb, s):
+        return ColumnHysteresis(slice_backbones(bb, s)) if state is None \
+            else slice_hysteresis_state(state, s)
+
+    s_cur = N
+    while hit is not None:
+        k, story, axes = hit
+        if len(info['events']) >= max_events:
+            info['cap_reached'] = True
+            break
+        info['events'].append(dict(story=story, k=k, time=float(k * dt), axis=axes[0],
+                                   axes_tripped=list(axes), stories_before=s_cur))
+        s_cur = story
+        info['surviving_stories'] = story
+        rows = slice(story, N)
+        # Hold: absolute position (and theta) frozen, absolute velocity and
+        # acceleration zero; per-story histories of detached stories frozen.
+        for a, _, _, _, _ in per:
+            A, g = S[a], ground[a]
+            A['u_abs'][rows, k + 1:] = A['u_abs'][rows, k:k + 1]
+            A['u_rel'][rows, k + 1:] = A['u_abs'][rows, k + 1:] - g['d'][None, k + 1:]
+            A['velocity'][rows, k + 1:] = -g['v'][None, k + 1:]
+            A['acceleration'][rows, k + 1:] = 0.
+            _hold_rows([A['p_nl']] + [A[x] for x in _STORY_ARRAYS], rows, k)
+        if torsional:
+            for c, a in enumerate(('X', 'Y')):
+                blk = slice(c * N + story, (c + 1) * N)
+                S3['u'][blk, k + 1:] = S[a]['u_rel'][rows, k + 1:]
+                S3['v'][blk, k + 1:] = S[a]['velocity'][rows, k + 1:]
+                S3['a'][blk, k + 1:] = -ground[a]['a'][None, k + 1:]
+            th = slice(2 * N + story, 3 * N)
+            _hold_rows([S3['u']], th, k)
+            _hold_rows([S3['p']], np.r_[story:N, N + story:2 * N, 2 * N + story:3 * N], k)
+            S3['v'][th, k + 1:] = 0.
+            S3['a'][th, k + 1:] = 0.
+        if story == 0:
+            break
+
+        K = F * k
+        seg_log = dict(k=k, stories=story)
+        tick = perf_counter()
+        if torsional:
+            surv = survivor_building(building, story)
+            bbx = slice_backbones(first.x.backbones, story)
+            bby = slice_backbones(first.y.backbones, story)
+            st = _state_at(segments['3N'], k)
+            state = (fresh_or(None if st is None else st[0], first.x.backbones, story),
+                     fresh_or(None if st is None else st[1], first.y.backbones, story))
+            idx = np.r_[0:story, N:N + story, 2 * N:2 * N + story]
+            out = _restart_3N(surv, bbx, bby, state, fine, dt / F, K,
+                              (defect['X'][:story, :, :K], defect['Y'][:story, :, :K]),
+                              S3['u'][idx, k], S3['v'][idx, k], p)
+            outs = {'3N': out}
+            S3['u'][idx, k:] = out['u'][:, ::F]
+            S3['v'][idx, k:] = out['velocity'][:, ::F]
+            S3['a'][idx, k:] = out['acceleration'][:, ::F]
+            S3['p'][idx, k:] = out['force'][:, ::F]
+            for c, (a, b, v, _, _) in enumerate(per):
+                A, blk = S[a], slice(c * story, (c + 1) * story)
+                A['u_rel'][:story, k:] = out['u'][blk, ::F]
+                A['velocity'][:story, k:] = out['velocity'][blk, ::F]
+                A['acceleration'][:story, k:] = (out['acceleration'][blk] + fine[2 * c][None, K:])[:, ::F]
+                A['p_nl'][:story, k:] = out['force'][blk, ::F]
+            aux_of = {a: tuple(getattr(out['aux'], f)[c] for f in
+                               ('story_drift', 'column_drift', 'force', 'tangent', 'damage'))
+                      for c, a in enumerate(('X', 'Y'))}
+            segments['3N'] = dict(k0=k, factor=F, u=out['u'], state0=state,
+                                  law=_torsion_constitutive(bbx, bby, surv.column_positions, state))
+            kg_new = surv.k_g
+        else:
+            outs, aux_of = {}, {}
+            for a, b, v, _, _ in per:
+                surv = survivor_building(b, story)
+                bb = slice_backbones(v.backbones, story)
+                state = fresh_or(_state_at(segments[a], k), v.backbones, story)
+                A = S[a]
+                out = _restart_axis(surv, bb, state, fine[a], dt / F, K,
+                                    defect[a][:story, :, :K].sum(axis=1),
+                                    A['u_rel'][:story, k], A['velocity'][:story, k], p)
+                outs[a] = out
+                A['u_rel'][:story, k:] = out['u'][:, ::F]
+                A['velocity'][:story, k:] = out['velocity'][:, ::F]
+                A['acceleration'][:story, k:] = (out['acceleration'] + fine[a][0][None, K:])[:, ::F]
+                A['p_nl'][:story, k:] = out['force'][:, ::F]
+                x = out['aux']
+                aux_of[a] = (x.story_drift, x.column_drift, x.force, x.tangent, x.damage)
+                segments[a] = dict(k0=k, factor=F, u=out['u'], state0=state,
+                                   law=_per_axis_constitutive(bb, state))
+                kg_new = surv.k_g
+        seg_log['seconds'] = perf_counter() - tick
+        seg_log['iterations'] = {a: o['iterations'] for a, o in outs.items()}
+        seg_log['converged'] = all(o['converged'] for o in outs.values())
+        seg_log['residual_history'] = {a: o['residual_history'] for a, o in outs.items()}
+        seg_log['predictor_iterations'] = {a: o['predictor_iterations'] for a, o in outs.items()}
+        info['segments'].append(seg_log)
+        for a, b, v, _, _ in per:
+            A = S[a]
+            drift, col, force, tangent, damage = aux_of[a]
+            A['u_abs'][:story, k:] = A['u_rel'][:story, k:] + ground[a]['d'][None, k:]
+            A['story_drift'][:story, k:] = drift[:, ::F]
+            A['column_drift'][:story, :, k:] = col[..., ::F]
+            A['column_force'][:story, :, k:] = force[..., ::F]
+            A['column_tangent'][:story, :, k:] = tangent[..., ::F]
+            A['column_damage'][:story, :, k:] = damage[..., ::F]
+            A['story_shear'][:story, k:] = force.sum(axis=1)[:, ::F]
+            A['k_t_ratio'][:story, k:] = (tangent.sum(axis=1) / b.k0_profile[:story, None])[:, ::F]
+            A['damage_state'][:story, k:] = np.max(damage, axis=1)[:, ::F]
+            defect[a][:story, :, K:] = v.backbones['k0'][:story, :, None] * col - force
+        kg_hist[:story, k:] = np.asarray(kg_new, dtype=float)[:, None]
+        if not seg_log['converged']:
+            info['converged'] = False
+            info['reason'] = ('Post-detachment re-solve did not converge; '
+                              'no further detachment is inferred.')
+            break
+        views = [(a, SimpleNamespace(column_drift=S[a]['column_drift'],
+                                     column_tangent=S[a]['column_tangent'],
+                                     backbones=v.backbones)) for a, _, v, _, _ in per]
+        hit = _find_detachment(views, kg_hist, p_delta, story, k)
+
+    held = [None] * N
+    for e in info['events']:
+        for i in range(e['story'], N):
+            held[i] = e['k'] if held[i] is None else held[i]
+    for _, b, _, _, _ in per:
+        b.held_from = held
+    # Package: the stitched histories replace the first pass on each view,
+    # and spec 11's criteria are re-evaluated on them with the P/h in force.
+    results = {}
+    for a, b, v, _, _ in per:
+        r = dataclasses.replace(v, **S[a], collapse_events=[], summary={},
+                                converged=info['converged'], solve_grid=None,
+                                reason=info['reason'] or v.reason)
+        evaluate_collapse_criteria(r, b, k_g=kg_hist)
+        for key in ('sampling_factor', 'predictor_iterations', 'causality_error'):
+            if key in v.summary:
+                r.summary[key] = v.summary[key]
+        results[a] = r
+    if torsional:
+        rx, ry = results['X'], results['Y']
+        r3 = dataclasses.replace(first, u_rel=S3['u'], velocity=S3['v'], acceleration=S3['a'],
+                                 p_nl=S3['p'], x=rx, y=ry, converged=info['converged'],
+                                 reason=info['reason'] or first.reason, solve_grid=None,
+                                 collapse_events=rx.collapse_events + ry.collapse_events)
+        r3.summary = {**first.summary, 'x': rx.summary, 'y': ry.summary,
+                      'converged': info['converged'], 'reason': r3.reason,
+                      'collapse_events': r3.collapse_events,
+                      'peak_rotation': float(np.max(abs(r3.theta))),
+                      'residual_rotation': r3.theta[:, -1].tolist()}
+        building._install_nonlinear(r3)
+    else:
+        for a, b, _, _, _ in per:
+            b._install_nonlinear(results[a])
+    return info
+
+
+HANDOFF_VERSION = 1
+
+HANDOFF_EVENT_FIELDS = (
+    'story', 't_detach', 'axis', 'axes_tripped', 'direction', 'criterion',
+    'failed_columns', 'surviving_columns', 'hinge_column', 'floor_state_frame',
+    'floor_state', 'ground_state', 'upper_mass', 'upper_cm_height',
+    'upper_inertia_cm', 'story_height_at_failure', 'P_cap_below',
+    'residual_drift_below', 'surviving_stories')
+
+
+def build_detachment_events(building, building_y=None):
+    """The versioned hand-off contract, one dict per event (spec 13 C2).
+
+    Everything the animation may use, in metres / seconds / radians in the
+    physics frame (never scene units). This is the ONE place where 0-based
+    story indices become the contract's 1-based `story` / `floor`; `column`
+    stays 0-based, indexing `column_plan_positions()` (CCW from +x,+y).
+
+    - `floor_state` is ABSOLUTE (`floor_state_frame`), matching the payload's
+      floor arrays; `ground_state` beside it lets a consumer change frame.
+      `z` is 0.0 (no vertical DOF); `theta_z`/`omega_z` are 0.0 off the
+      torsional path.
+    - `surviving_columns` is empty by definition: detachment requires every
+      column of the story to have failed (A1). What the simulation does
+      determine is failure ORDER, so `hinge_column` names the column that
+      failed last on the tripped axis (held longest), and each failed
+      column carries `t_fail_x`/`t_fail_y` (null where that axis had not
+      failed by `t_detach`).
+    - `upper_cm_height` is measured from the failure plane (the top of floor
+      m-1, where the block lands after dropping `story_height_at_failure`).
+    - `P_cap_below` / `residual_drift_below` are null only for story 1.
+    """
+    info = getattr(building, 'detachment', None)
+    if not info or not info['converged'] or not info['events']:
+        return []
+    torsional = isinstance(building, MDOF_Building3N)
+    N = building.N
+    if torsional:
+        r = building.hftd_result
+        views, src = {'X': r.x, 'Y': r.y}, building.bx
+        theta, omega = r.theta, r.velocity[2 * N:]
+    else:
+        views, src = {'X': building.hftd_result}, building
+        if building_y is not None:
+            views['Y'] = building_y.hftd_result
+        theta = omega = None
+    ground = info['ground']
+    h = np.asarray(src.h, dtype=float)
+    z = np.cumsum(h)
+    m = np.broadcast_to(np.asarray(building.m, dtype=float), (N,))
+    a, b = float(src.plan_span_x), float(src.plan_span_y)
+    positions = column_plan_positions(a, b)
+    P_cap = np.broadcast_to(np.asarray(src.P_cap_profile, dtype=float), (N,))
+    events = []
+    for e in info['events']:
+        s, k, t_d, ax = e['story'], e['k'], e['time'], e['axis']
+        v = views[ax]
+        tf = {A: views[A].summary['t_fail'][s] for A in views}
+
+        def by_detach(t):
+            return None if t is None or t > t_d else float(t)
+
+        failed = [dict(story=s + 1, column=j, t_fail=float(tf[ax][j]),
+                       t_fail_x=by_detach(tf['X'][j]),
+                       t_fail_y=by_detach(tf['Y'][j]) if 'Y' in tf else None,
+                       plan_x=float(positions[j, 0]), plan_y=float(positions[j, 1]))
+                  for j in range(4)]
+        hinge = max(range(4), key=lambda j: (tf[ax][j], -j))
+        heights = z[s:] - (z[s - 1] if s else 0.0)
+        mass = float(m[s:].sum())
+        h_cm = float((m[s:] * heights).sum() / mass)
+
+        def lateral(A, f):
+            if A not in views:
+                return 0.0, 0.0
+            V = views[A]
+            return float(V.u_abs[f, k]), float(V.velocity[f, k] + ground[A]['v'][k])
+
+        floors = []
+        for f in range(s, N):
+            x, vx = lateral('X', f)
+            y, vy = lateral('Y', f)
+            floors.append(dict(floor=f + 1, x=x, y=y, z=0.0,
+                               theta_z=float(theta[f, k]) if torsional else 0.0,
+                               vx=vx, vy=vy,
+                               omega_z=float(omega[f, k]) if torsional else 0.0))
+        gs = {q: 0.0 for q in ('x', 'y', 'vx', 'vy')}
+        for A, key in (('X', 'x'), ('Y', 'y')):
+            if A in ground:
+                gs[key] = float(ground[A]['d'][k])
+                gs['v' + key] = float(ground[A]['v'][k])
+        residual = None
+        if s:
+            residual = {A.lower(): float(views[A].story_drift[s - 1, -1]) if A in views else 0.0
+                        for A in ('X', 'Y')}
+        drift = v.story_drift[s, k]
+        events.append(dict(
+            story=s + 1, t_detach=float(t_d), axis=ax, axes_tripped=list(e['axes_tripped']),
+            direction=1 if drift >= 0 else -1, criterion=v.summary['collapse_criterion'][s],
+            failed_columns=failed, surviving_columns=[], hinge_column=hinge,
+            floor_state_frame='absolute', floor_state=floors, ground_state=gs,
+            upper_mass=mass, upper_cm_height=h_cm,
+            upper_inertia_cm=float((m[s:] * ((a * a + b * b) / 12 + (heights - h_cm) ** 2)).sum()),
+            story_height_at_failure=float(h[s]),
+            P_cap_below=float(P_cap[s - 1]) if s else None,
+            residual_drift_below=residual, surviving_stories=s))
+    return events
+
+
+def handoff_header(building, building_y=None):
+    """The `collapse.*` keys spec 13 adds to the /compute header."""
+    info = getattr(building, 'detachment', None) or {}
+    ok = info.get('converged', False)
+    return dict(handoff_version=HANDOFF_VERSION,
+                detachment_events=build_detachment_events(building, building_y),
+                cap_reached=bool(info.get('cap_reached', False)) and ok,
+                surviving_stories=int(info.get('surviving_stories', building.N)) if ok else building.N)
+
+
+def validate_handoff(collapse):
+    """Reference consumer: refuse an unknown version rather than guess.
+
+    Spec 15's JavaScript mirrors this. Raises ValueError on a version it
+    does not know or a missing field; returns the event list otherwise.
+    """
+    version = collapse.get('handoff_version')
+    if version != HANDOFF_VERSION:
+        raise ValueError(f'unknown handoff_version {version!r}; this consumer reads '
+                         f'version {HANDOFF_VERSION} only')
+    for key in ('detachment_events', 'cap_reached', 'surviving_stories'):
+        if key not in collapse:
+            raise ValueError(f'hand-off contract is missing {key!r}')
+    for event in collapse['detachment_events']:
+        missing = [key for key in HANDOFF_EVENT_FIELDS if key not in event]
+        if missing:
+            raise ValueError(f'detachment event is missing {missing}')
+    return collapse['detachment_events']
+
+
+def slice_hysteresis_state(machine, stories):
+    """Row slice of a ColumnHysteresis state; peaks and slopes untouched."""
+    out = copy.copy(machine)
+    for key, value in vars(machine).items():
+        if isinstance(value, np.ndarray):
+            setattr(out, key, value[:stories].copy())
+    out.bb = slice_backbones(machine.bb, stories)
+    return out
 
 
 class MDOF_ShearBuilding:
@@ -2476,6 +3164,9 @@ class MDOF_ShearBuilding:
     def compute_response_nonlinear(self, acceleration, displacement, dt, **params):
         result = solve_hftd(self, acceleration, displacement, dt,
                             {**self.nonlinear_params, **params})
+        return self._install_nonlinear(result)
+
+    def _install_nonlinear(self, result):
         self.hftd_result = result
         self.floor_disp_rel = result.u_rel
         self.floor_disp_abs = result.u_abs
@@ -2512,6 +3203,15 @@ class MDOF_ShearBuilding:
         drift[0, :] = u[0, :]
         if self.N > 1:
             drift[1:, :] = u[1:, :] - u[:-1, :]
+        # Spec 13: a detached story stops being structural at its t_detach
+        # sample (set by solve_with_detachment). Past it, its drift is held
+        # floor minus moving survivor, and the held floors carry zero
+        # acceleration, so a peak landing there would divide by a zero
+        # story shear. Its drift is held at that sample, like its HFTD
+        # story histories.
+        for i, k in enumerate(getattr(self, 'held_from', None) or ()):
+            if k is not None:
+                drift[i, k + 1:] = drift[i, k]
         self.story_drift = drift
 
         t_star = np.argmax(np.abs(drift), axis=1)
@@ -3101,6 +3801,9 @@ class MDOF_Building3N:
         """
         result = solve_hftd_3N(self, accel_x, disp_x, accel_y, disp_y, dt,
                                {**self.nonlinear_params, **params})
+        return self._install_nonlinear(result)
+
+    def _install_nonlinear(self, result):
         self.hftd_result = result
         N = self.N
         self.floor_disp_rel = result.u_rel
