@@ -2650,6 +2650,375 @@
                 hingeMoment: e => header[`V_p_per_story_N_${e.axis}`][e.story - 1] * heights[e.story - 1] / 8,
             };
         }
+        // ---- small vector/quaternion helpers (plain arrays, f64) ----
+        const v3add = (p, q) => [p[0] + q[0], p[1] + q[1], p[2] + q[2]];
+        const v3sub = (p, q) => [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+        const v3cross = (p, q) => [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
+        const v3dot = (p, q) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+        const m3v = (m, v) => [0, 1, 2].map(r => m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2]);
+        function inv3(m) {
+            const [[a, b, c], [d, e, f], [g, h, i]] = m;
+            const A = e * i - f * h, B = f * g - d * i, C = d * h - e * g, det = a * A + b * B + c * C;
+            return [[A / det, (c * h - b * i) / det, (b * f - c * e) / det],
+                [B / det, (a * i - c * g) / det, (c * d - a * f) / det],
+                [C / det, (b * g - a * h) / det, (a * e - b * d) / det]];
+        }
+        const qMul = (p, q) => [ // quaternions as [x, y, z, w]
+            p[3] * q[0] + p[0] * q[3] + p[1] * q[2] - p[2] * q[1],
+            p[3] * q[1] - p[0] * q[2] + p[1] * q[3] + p[2] * q[0],
+            p[3] * q[2] + p[0] * q[1] - p[1] * q[0] + p[2] * q[3],
+            p[3] * q[3] - p[0] * q[0] - p[1] * q[1] - p[2] * q[2]];
+        const qConj = q => [-q[0], -q[1], -q[2], q[3]];
+        const qYaw = psi => [0, Math.sin(psi / 2), 0, Math.cos(psi / 2)];
+        const qRot = (q, v) => { const r = qMul(qMul(q, [v[0], v[1], v[2], 0]), qConj(q)); return [r[0], r[1], r[2]]; };
+        const rq = q => ({ x: q[0], y: q[1], z: q[2], w: q[3] });
+        const rv = v => ({ x: v[0], y: v[1], z: v[2] });
+        // Shortest rotation taking +Y onto the unit vector d.
+        function qFromUp(d) {
+            const w = 1 + d[1];
+            if (w < 1e-12) return [1, 0, 0, 0];
+            const q = [d[2], 0, -d[0], w], n = Math.hypot(...q);
+            return q.map(c => c / n);
+        }
+
+        // Inertia tensor of an a x t x b plate yawed by psi about +Y. A
+        // floor's world-frame yaw is -theta_z: the scene's z = physics y
+        // flips handedness (the same sign displayYaw() uses).
+        function plateInertia(m, a, t, b, psi) {
+            const Ix = m * (t * t + b * b) / 12, Iy = m * (a * a + b * b) / 12, Iz = m * (a * a + t * t) / 12;
+            const c = Math.cos(psi), s = Math.sin(psi);
+            return [[c * c * Ix + s * s * Iz, 0, c * s * (Iz - Ix)],
+                [0, Iy, 0],
+                [c * s * (Iz - Ix), 0, s * s * Ix + c * c * Iz]];
+        }
+
+        // R4: the rigid body that best carries the lumped floors' motion.
+        // v_cm from linear momentum; omega = I^-1 L from angular momentum
+        // about the CM, with I and KE taken over the SAME mass distribution
+        // (one slab plate per floor) that the engine builds. The rigid part
+        // of a velocity field never carries more kinetic energy than the
+        // field itself, so KE_rigid <= KE_struct by construction: no energy
+        // is invented at the hand-off (check 1 asserts the ratio).
+        function rigidSeed(model, states) {
+            const m = model.floorMass, t = COLLAPSE_PHYS.SLAB_T, n = states.length, M = n * m;
+            const r = states.map(s => [s.x, model.levelsM[s.floor - 1], s.y]);
+            const v = states.map(s => [s.vx, 0, s.vy]);
+            const w = states.map(s => [0, -s.omega_z, 0]);
+            const psi = states.map(s => -s.theta_z);
+            const avg = rows => [0, 1, 2].map(c => rows.reduce((acc, p) => acc + p[c], 0) / n);
+            const cm = avg(r), vcm = avg(v);
+            const I = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], L = [0, 0, 0];
+            let KE = 0;
+            states.forEach((s, i) => {
+                const d = v3sub(r[i], cm), Ip = plateInertia(m, model.a, t, model.b, psi[i]), dd = v3dot(d, d);
+                for (let p = 0; p < 3; p++) for (let q = 0; q < 3; q++) {
+                    I[p][q] += Ip[p][q] + m * ((p === q ? dd : 0) - d[p] * d[q]);
+                }
+                const Lp = m3v(Ip, w[i]), Ld = v3cross(d, v3sub(v[i], vcm));
+                for (let c = 0; c < 3; c++) L[c] += Lp[c] + m * Ld[c];
+                KE += 0.5 * m * v3dot(v[i], v[i]) + 0.5 * v3dot(w[i], Lp);
+            });
+            const omega = m3v(inv3(I), L);
+            return {
+                mass: M, cm, v: vcm, w: omega, I, psi,
+                local: r.map(p => v3sub(p, cm)),
+                KE_struct: KE, KE_rigid: 0.5 * M * v3dot(vcm, vcm) + 0.5 * v3dot(omega, m3v(I, omega)),
+            };
+        }
+
+        // Structural absolute motion of floor f (-1 = ground) at time t,
+        // linearly interpolated between samples: the stump's kinematic path.
+        function trackAt(track, f, t) {
+            const n = track.time.length, dt = (track.time[n - 1] - track.time[0]) / (n - 1);
+            const u = Math.min(Math.max((t - track.time[0]) / dt, 0), n - 1);
+            const i = Math.min(Math.floor(u), n - 2), s = u - i;
+            const lerp = arr => (arr ? arr[i] + (arr[i + 1] - arr[i]) * s : 0);
+            if (f < 0) return { x: lerp(track.groundX), y: lerp(track.groundY), theta: 0 };
+            return { x: lerp(track.floorX[f]), y: lerp(track.floorY?.[f]), theta: lerp(track.floorTheta?.[f]) };
+        }
+        function trackVel(track, f, t) {
+            const h = COLLAPSE_PHYS.DT, p = trackAt(track, f, t - h), q = trackAt(track, f, t + h);
+            return [(q.x - p.x) / (2 * h), 0, (q.y - p.y) / (2 * h), -(q.theta - p.theta) / (2 * h)];
+        }
+
+        // Run the engine ONCE, at a fixed step, from spec 13's hand-off.
+        // Returns a stepper: step(n) advances n physics steps (the caller
+        // chunks; the result never depends on the chunk size), `done`,
+        // `progress`, and the keyframe buffer. Nothing is live at playback.
+        //
+        // Mechanism (ruling R1): at a computed detachment of story k the
+        // detached floors are ONE compound rigid body (a slab collider and
+        // the lumped mass per floor), and story k's four failed columns are
+        // dynamic struts, spherical-jointed at both ends: a sidesway
+        // mechanism. Only the hinge column's strut resists, with the decaying
+        // moment M_p e^-(t-t_d)/tau (assumed). The block sways over in its
+        // computed direction and drops (P-Delta). Struts collide with
+        // nothing; at the block's first impact they are crushed (joints
+        // removed). An animated cascade (B3) releases the floor that was hit
+        // as a free body (its columns crushed axially, so no struts) and is
+        // recorded ONLY in animated_cascade_events, never in the computed list.
+        function buildCollapseSim(RAPIER, model, events, track) {
+            const P = COLLAPSE_PHYS, DT = P.DT, T = P.SLAB_T, N = model.N;
+            const t0 = events[0].t_detach, tEnd = events[events.length - 1].t_detach + P.MAX_SECONDS;
+            const K = Math.ceil((tEnd - t0) / DT - 1e-9);
+            const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+            world.timestep = DT;
+            const queue = new RAPIER.EventQueue(true);
+            const colliderFloor = new Map();   // collider handle -> floor index (-1 = foundation)
+            const floorBody = new Array(N).fill(null);   // the body currently carrying each floor
+            const kinematic = new Set();       // floors still on the structural track
+            const bodies = [], struts = [], cascades = [], hit = new Set();
+            const density = model.floorMass / (model.a * T * model.b);
+            let k = 0, lowestDynamic = N;      // floors >= lowestDynamic are dynamic
+
+            const tr = b => { const p = b.translation(); return [p.x, p.y, p.z]; };
+            const rot = b => { const q = b.rotation(); return [q.x, q.y, q.z, q.w]; };
+            const worldPoint = (b, l) => v3add(tr(b), qRot(rot(b), l));
+            const localPoint = (b, p) => qRot(qConj(rot(b)), v3sub(p, tr(b)));
+            const slabDesc = () => RAPIER.ColliderDesc.cuboid(model.a / 2, T / 2, model.b / 2)
+                .setDensity(density).setRestitution(P.RESTITUTION).setFriction(P.FRICTION)
+                .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+            const attach = (desc, body, f) => colliderFloor.set(world.createCollider(desc, body).handle, f);
+
+            // A fixed ground far below, then the foundation and every floor
+            // kinematic on the structural track.
+            const ground = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -T - 0.5, 0));
+            world.createCollider(RAPIER.ColliderDesc.cuboid(500, 0.5, 500).setFriction(P.FRICTION), ground);
+            const kinPose = (f, t) => {
+                const s = trackAt(track, f, t);
+                return { p: [s.x, f < 0 ? -T / 2 : model.levelsM[f], s.y], q: qYaw(-s.theta) };
+            };
+            const kinBody = f => {
+                const { p, q } = kinPose(f, t0);
+                const b = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased()
+                    .setTranslation(...p).setRotation(rq(q)));
+                attach(f < 0 ? RAPIER.ColliderDesc.cuboid(model.a / 2 + 1.5, T / 2, model.b / 2 + 1.5)
+                    .setRestitution(P.RESTITUTION).setFriction(P.FRICTION) : slabDesc(), b, f);
+                return b;
+            };
+            const foundation = kinBody(-1);
+            for (let f = 0; f < N; f++) { floorBody[f] = kinBody(f); kinematic.add(f); }
+            const supportOf = f => (f < 0 ? foundation : floorBody[f]);
+            const supportVel = (f, t, p) => {
+                if (f < 0 || kinematic.has(f)) return trackVel(track, f, t).slice(0, 3);
+                const b = floorBody[f], lv = b.linvel(), av = b.angvel();
+                return v3add([lv.x, lv.y, lv.z], v3cross([av.x, av.y, av.z], v3sub(p, tr(b))));
+            };
+
+            // A body enters the buffer at the current frame k. Frames before
+            // its activation hold its activation pose: zero motion (check 2).
+            function register(body, floors, tAct, source) {
+                const rec = { body, floors, tAct, kAct: k, source, data: new Float32Array((K + 1) * 7), mass: body.mass() };
+                write(rec);
+                const o = k * 7;
+                rec.p0 = Array.from(rec.data.subarray(o, o + 3));
+                rec.q0 = Array.from(rec.data.subarray(o + 3, o + 7));
+                for (let j = 0; j < k; j++) rec.data.copyWithin(j * 7, o, o + 7);
+                for (const f of floors) floorBody[f] = body;
+                bodies.push(rec);
+                return rec;
+            }
+            function write(rec) {
+                const p = rec.body.translation(), q = rec.body.rotation(), o = k * 7, d = rec.data;
+                d[o] = p.x; d[o + 1] = p.y; d[o + 2] = p.z; d[o + 3] = q.x; d[o + 4] = q.y; d[o + 5] = q.z; d[o + 6] = q.w;
+            }
+
+            // A computed detachment (a spec 13 event): floors story..lowestDynamic-1
+            // become one compound body seeded by rigidSeed(floor_state), with
+            // R1 struts for the failed story.
+            function releaseComputed(e) {
+                const floors = [];
+                for (let f = e.story - 1; f < lowestDynamic; f++) floors.push(f);
+                if (!floors.length) return;
+                const seed = rigidSeed(model, e.floor_state.filter(s => s.floor - 1 < lowestDynamic));
+                // Joints hanging off floors about to be replaced keep their
+                // world anchor and move to the new body.
+                const moving = struts.filter(st => st.bottomJoint && floors.includes(st.bottomFloor));
+                for (const st of moving) st.anchorWorld = worldPoint(floorBody[st.bottomFloor], st.bottomLocal);
+                for (const f of floors) {
+                    const b = floorBody[f];
+                    for (let i = 0; i < b.numColliders(); i++) colliderFloor.delete(b.collider(i).handle);
+                    world.removeRigidBody(b);   // removes its joints too
+                    kinematic.delete(f);
+                }
+                const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(...seed.cm).setCcdEnabled(true));
+                floors.forEach((f, i) => attach(slabDesc().setTranslation(...seed.local[i]).setRotation(rq(qYaw(seed.psi[i]))), body, f));
+                // The block's own (unfailed) columns, as massless contact
+                // geometry: without them the block is two plates with empty
+                // stories between, and a slab can slip into the gap. Zero
+                // density keeps the mass and inertia exactly the lumped
+                // model's (check 1).
+                for (let i = 1; i < floors.length; i++) {
+                    const lo = seed.local[i - 1], hi = seed.local[i], [dx, dy] = model.strutSection[floors[i]];
+                    const hh = (hi[1] - lo[1] - T) / 2;
+                    for (const [px, pz] of model.columnPlan) {
+                        attach(RAPIER.ColliderDesc.cuboid(dx / 2, hh, dy / 2).setDensity(0)
+                            .setRestitution(P.RESTITUTION).setFriction(P.FRICTION)
+                            .setTranslation((lo[0] + hi[0]) / 2 + px, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2 + pz), body, floors[i]);
+                    }
+                }
+                body.setLinvel(rv(seed.v), true);
+                body.setAngvel(rv(seed.w), true);
+                const rec = register(body, floors, e.t_detach, { kind: 'computed', story: e.story });
+                rec.seed = seed;
+                for (const st of moving) {
+                    st.bottomLocal = localPoint(body, st.anchorWorld);
+                    st.bottomJoint = world.createImpulseJoint(RAPIER.JointData.spherical(
+                        rv(st.bottomLocal), { x: 0, y: -st.L / 2, z: 0 }), body, st.body, true);
+                }
+                lowestDynamic = e.story - 1;
+                addStruts(e, rec);
+            }
+
+            function addStruts(e, rec) {
+                const s = e.story - 1, bottomFloor = s - 1, below = supportOf(bottomFloor), seed = rec.seed;
+                const [dx, dy] = model.strutSection[s];
+                const iTop = rec.floors.indexOf(s);
+                model.columnPlan.forEach(([px, pz], j) => {
+                    const bottomLocal = bottomFloor < 0 ? [px, T / 2, pz] : [px, 0, pz];
+                    const bottom = worldPoint(below, bottomLocal);
+                    const topLocal = v3add(seed.local[iTop], qRot(qYaw(seed.psi[iTop]), [px, 0, pz]));
+                    const top = v3add(seed.cm, topLocal);
+                    const d = v3sub(top, bottom), L = Math.hypot(...d);
+                    const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+                        .setTranslation(...[0, 1, 2].map(i => (top[i] + bottom[i]) / 2))
+                        .setRotation(rq(qFromUp(d.map(c => c / L)))));
+                    world.createCollider(RAPIER.ColliderDesc.cuboid(dx / 2, L / 2, dy / 2)
+                        .setDensity(P.STRUT_DENSITY).setCollisionGroups(0), body);
+                    // Rigid-link velocity: each end moves with the body it joins.
+                    const vb = supportVel(bottomFloor, e.t_detach, bottom);
+                    const vt = v3add(seed.v, v3cross(seed.w, topLocal));
+                    body.setLinvel(rv([0, 1, 2].map(i => (vb[i] + vt[i]) / 2)), true);
+                    body.setAngvel(rv(v3cross(d, v3sub(vt, vb)).map(c => c / (L * L))), true);
+                    struts.push({
+                        body, L, column: j, story: e.story, bottomFloor, bottomLocal,
+                        hinge: j === e.hinge_column ? { Mp: model.hingeMoment(e), t_d: e.t_detach } : null,
+                        bottomJoint: world.createImpulseJoint(RAPIER.JointData.spherical(
+                            rv(bottomLocal), { x: 0, y: -L / 2, z: 0 }), below, body, true),
+                        topJoint: world.createImpulseJoint(RAPIER.JointData.spherical(
+                            { x: 0, y: L / 2, z: 0 }, rv(topLocal)), body, rec.body, true),
+                    });
+                });
+            }
+
+            function crushStruts(story) {
+                for (const st of struts) {
+                    if (st.story !== story || !st.topJoint) continue;
+                    if (st.bottomJoint) world.removeImpulseJoint(st.bottomJoint, true);
+                    world.removeImpulseJoint(st.topJoint, true);
+                    st.bottomJoint = st.topJoint = null;
+                    st.body.setEnabled(false);
+                }
+            }
+
+            // B3: a falling body lands on kinematic floor f (-1 = foundation).
+            // F = M_u v / CONTACT_DT against story (f+1)'s P_cap: computed
+            // trigger, assumed impulse model. The first touch crushes the
+            // struts of the story that landed; every new contact is tested
+            // until the floor gives way (a grazing first touch must not use
+            // the test up).
+            function onImpact(f, vImpact, t) {
+                if (!hit.has(f)) { hit.add(f); crushStruts(f + 2); }
+                if (f < 0 || !kinematic.has(f)) return;
+                const Mu = (N - 1 - f) * model.floorMass;
+                const F = Mu * vImpact / P.CONTACT_DT, cap = model.P_cap[f];
+                if (!(F > cap)) return;
+                const b = floorBody[f], v = trackVel(track, f, t);
+                kinematic.delete(f);
+                b.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+                b.enableCcd(true);
+                b.setLinvel(rv(v), true);
+                b.setAngvel({ x: 0, y: v[3], z: 0 }, true);
+                register(b, [f], t, { kind: 'cascade', story: f + 1 });
+                lowestDynamic = f;
+                cascades.push(deepFreeze({ story: f + 1, t, v_impact: vImpact, F_impact: F, P_cap: cap, M_u: Mu,
+                    label: 'animated cascade (post-failure kinematics, not computed)' }));
+            }
+
+            let nextEvent = 0;
+            function releaseDue(t) {
+                while (nextEvent < events.length && events[nextEvent].t_detach <= t + DT / 2) releaseComputed(events[nextEvent++]);
+            }
+            releaseDue(t0);
+
+            function step(nSteps) {
+                for (let s = 0; s < nSteps && k < K; s++) {
+                    const t = t0 + k * DT, t1 = t + DT;
+                    for (const f of [-1, ...kinematic]) {
+                        const { p, q } = kinPose(f, t1), b = supportOf(f);
+                        b.setNextKinematicTranslation(rv(p));
+                        b.setNextKinematicRotation(rq(q));
+                    }
+                    for (const st of struts) {
+                        st.body.resetTorques(true);
+                        if (!st.hinge || !st.topJoint) continue;
+                        const u = qRot(rot(st.body), [0, 1, 0]), sn = Math.hypot(u[0], u[2]);
+                        if (sn < 1e-9) continue;
+                        // Restoring toward vertical about up x u, ramped over the
+                        // first 0.02 rad so a near-vertical strut does not chatter.
+                        const Mres = st.hinge.Mp * Math.exp(-(t - st.hinge.t_d) / P.HINGE_TAU)
+                            * Math.min(1, Math.atan2(sn, u[1]) / 0.02);
+                        st.body.addTorque({ x: -Mres * u[2] / sn, y: 0, z: Mres * u[0] / sn }, true);
+                    }
+                    const vPrev = new Map(bodies.map(r => [r.body.handle, r.body.linvel().y]));
+                    world.step(queue);
+                    k++;
+                    // Collected, then handled: the engine swallows exceptions
+                    // thrown inside its callback, and the world must not be
+                    // edited mid-drain.
+                    const started = [];
+                    queue.drainCollisionEvents((h1, h2, on) => { if (on) started.push([h1, h2]); });
+                    for (const [h1, h2] of started) {
+                        const a = colliderFloor.get(h1), b = colliderFloor.get(h2);
+                        if (a === undefined || b === undefined) continue;
+                        for (const [dyn, sup] of [[a, b], [b, a]]) {
+                            if (dyn < 0 || kinematic.has(dyn) || !(sup < 0 || kinematic.has(sup))) continue;
+                            const vy = vPrev.get(floorBody[dyn].handle) ?? 0;
+                            onImpact(sup, Math.abs(vy - trackVel(track, sup, t1)[1]), t1);
+                        }
+                    }
+                    releaseDue(t1);
+                    for (const r of bodies) write(r);
+                }
+                return k >= K;
+            }
+
+            return {
+                t0, dt: DT, K, bodies, struts, cascades, world,
+                step, get done() { return k >= K; }, get progress() { return k / K; },
+            };
+        }
+
+        // Buffer lookup: a pure function of t (checks 3 and 4). Linear in
+        // position, normalised lerp in rotation. null before activation.
+        function sampleBody(sim, rec, t) {
+            if (t < rec.tAct - sim.dt / 2) return null;
+            const u = Math.min(Math.max((t - sim.t0) / sim.dt, 0), sim.K);
+            const i = Math.min(Math.floor(u), sim.K - 1), s = u - i, d = rec.data, a = i * 7, b = a + 7;
+            const p = [0, 1, 2].map(c => d[a + c] + (d[b + c] - d[a + c]) * s);
+            const sign = d[a + 3] * d[b + 3] + d[a + 4] * d[b + 4] + d[a + 5] * d[b + 5] + d[a + 6] * d[b + 6] < 0 ? -1 : 1;
+            const q = [3, 4, 5, 6].map(c => d[a + c] + (sign * d[b + c] - d[a + c]) * s);
+            const n = Math.hypot(...q);
+            return { p, q: q.map(c => c / n) };
+        }
+
+        // Scene matrix (column-major, THREE.Matrix4 order) that carries a
+        // floor from its pose at activation to the body's pose now:
+        // D = T(pivot + S dp) . S R S^-1 . T(-pivot), S = diag(u, 1, u),
+        // `pivot` = the body's CM at activation in scene units. At the
+        // activation frame dp = 0 and R = I exactly, so D = I: no teleport.
+        function displayMatrix(rec, sample, pivot, u) {
+            const [x, y, z, w] = qMul(sample.q, qConj(rec.q0));
+            const r = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]];
+            const s = [u, 1, u];
+            const A = [0, 1, 2].map(i => [0, 1, 2].map(j => s[i] * r[i][j] / s[j]));
+            const dp = v3sub(sample.p, rec.p0), tgt = [pivot[0] + u * dp[0], pivot[1] + dp[1], pivot[2] + u * dp[2]];
+            const tv = [0, 1, 2].map(i => tgt[i] - v3dot(A[i], pivot));
+            return [A[0][0], A[1][0], A[2][0], 0, A[0][1], A[1][1], A[2][1], 0,
+                A[0][2], A[1][2], A[2][2], 0, tv[0], tv[1], tv[2], 1];
+        }
         // ---8<--- COLLAPSE-PHYSICS-END
 
         function createBuilding(numFloors, storyHeights, frame, folderName) {
