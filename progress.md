@@ -2918,3 +2918,39 @@ behaviour was confirmed identical at `ab06d2c`, at `main` and at HEAD.
   (3 900 208 / 1 766 744 / 2 032 616 bytes; params in
   `pre_spec14_params.json`). Check 1's byte-identity reference; the script
   refuses to overwrite them.
+
+### Task 1 — server damage blocks (Part A) + helpers (2026-09-22)
+
+- `mdof_response.py`: post-processing only. `DAMAGE_CODES`,
+  `DAMAGE_CODE_OF_BRANCH`, `DRIFT_LIMIT_IO/LS` (1 %/2 %, FEMA 356 C1-3),
+  `accumulated_damage()`, `subsample_nearest()`.
+- `server.py`: `damage_blocks` request field (unknown name or non-list →
+  400), wire order `story_drift, story_shear, stiffness_ratio, p_nl,
+  damage_state, column_damage` (float32 first, uint8 padded to 4),
+  `has_<name>` flags, `header.damage` (codes, raw branches, map, drift
+  limits, per-axis per-column backbones, blocks with dtype/shape/npts/
+  rate_hz/pad_bytes). Only on nonlinear requests. `column_depth_{x,y}_per_story`
+  echoed only when a profile was sent (R5).
+- `claude_scripts/check_damage_blocks.py` (new): ALL CHECKS PASSED — empty
+  request byte-identical to the three pre-spec-14 fixtures; all 64 subsets
+  walk to zero trailing bytes (L-AQUILA.A_AZ009, damage_state pad = 2);
+  demo contents == HFTDResult; codes monotone; column max == story code;
+  failed code never before t_fail; every block frozen after t_detach
+  (stories 2, 3); V-4 onset idx 2 + 1 == detach story 3.
+- `check_ground_accel_block.py` parse walks the damage blocks; §10's
+  detaching requests now carry all six blocks (V-1): ALL CHECKS PASSED.
+- Sizes (NIIGATA_AKTH04, npts 31 600): N=7 none 3.74 / default 8.28 /
+  all 10.05 MB; N=20 none 9.52 / default 22.50 / all 27.55 MB.
+
+Rulings:
+- **R1 amended → three codes, not four.** `RESIDUAL` only occurs from
+  `t_fail` on (`failed_pos/neg` trip on the same `|δ| > du` test as
+  `t_fail`), so a separate "residual" level would be dead. Codes:
+  0 elastic, 1 yielded (BACKBONE_±/UNLOAD/RELOAD), 2 failed (RESIDUAL,
+  forced from `t_fail`), accumulated with `cummax`.
+- **R9 — `k_t/k₀` > 1 is real model output.** Demo X reaches 1.25. The
+  connecting segment from the unload zero to the pinch point can be
+  steeper than k₀. It is not a wrong-branch read. Check 2 asserts that
+  values above 1 occur only where a column is on UNLOAD/RELOAD, and that
+  the ratio is exactly 1 while all columns are elastic. The renderer
+  clamps `1 − k_t/k₀` to [0, 1].
