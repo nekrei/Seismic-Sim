@@ -3040,3 +3040,22 @@ Ruling:
 
 Ruling:
 - **R13 — the printed "E_h" is the work ∫V dδ so far, labelled as such.** It includes the elastic energy momentarily stored in the story. Separating out the dissipated part would need the unloading stiffness, which is inference the panel should not do. The label says "work ∫V dδ", not "dissipated energy".
+
+### Task 6 — C7 timeline markers + C8 elastic ghost (2026-09-22)
+
+- C7: `timelineMarkers()` (in `COLLAPSE-HELPERS`) turns every non-null `axes[*].t_collapse` (0-based → story i+1) and every `detachment_events` entry (already 1-based) into a sorted marker list.
+  - `renderSeekMarkers()` draws the ticks under the seek track (`.seek-track`/`#seekMarkers`). A tick sits where the thumb centre sits at t, via a `--thumb`/`--f` calc.
+  - Onset ticks are amber, detachment ticks red. The `title` tooltip names the story, axis, criterion and time; a click seeks there.
+- C8: `requestParams(folder)` is split out of `liveRecompute` (a pure move). `elasticBuildingKey()` = request params + the current magnitude.
+  - `holdElastic()` keeps the last elastic load's `floorX/floorY` (static and live paths).
+  - `attachGhost()` shows it only when a collapse run's building key matches, scaled by `intensity_scale` (R6, labelled "elastic × 20 (linear)").
+  - Per-floor slab-outline `LineSegments` (`ghostFloors`) are moved in `animate()` by time lookup with the same display gain. `#ghostToggle` defaults to on.
+- `check_collapse_readout.mjs` extended: ALL CHECKS PASSED (markers onset X 35.50, onset Y 35.82, detachment 80.54, all story 3; V-4 JS side).
+- The other JS checks pass; `check_index_syntax` parses.
+- **Browser smoke test** (built-in Browser pane, `server.py` from the worktree; NOT the Task 7 pass):
+  - fresh load → Load collapse demo sets KOCAELI_AYD / N=4 / story 3 / 0.70 m / 20× / 8.0 M;
+  - Run collapse analysis converges in 3 iterations; readout, markers and ghost label as expected;
+  - the legend reads "Max story drift now: 8.52 % (story 3)", with marks IO 1 %@25 %, LS 2 %@50 %, CP 4 %@100 %;
+  - the screenshot at 85 s shows the red weak story with thin S-bent columns and hinge glows;
+  - the Hysteresis tab draws an opening, ratcheting loop;
+  - zero console errors.
