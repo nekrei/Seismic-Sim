@@ -866,9 +866,110 @@ header keys.
 **Limits you should know.**
 - A detaching run costs about 1.3–2.2× a normal collapse run. The deployed
   backend keeps collapse analysis disabled, so run it locally.
-- The panel's own sliders cannot currently reach a converged detachment. The
-  collapse request has no intensity or weak-story control, and it uses 40
-  solver iterations. Reaching one needs a request such as a 4-story building
-  with story 3's columns at 0.7 m, intensity ×20, magnitude 8.0. Spec 14
-  adds those controls, and spec 15 draws the fall.
-- Nothing new is drawn yet: the floors above the break simply freeze.
+- At the time this section was written, the panel's own sliders could not
+  reach a converged detachment — no intensity or weak-story control existed
+  yet, and nothing above a `story_drift`/`stiffness_ratio` freeze was drawn.
+  **Spec 14 (below) closes that gap**: intensity, weak-story and weak-column
+  controls, a one-click demo preset, a readout, timeline markers and real
+  damage visuals. Spec 15 still owns the animated fall itself.
+
+## Spec 14: scenario controls, a readout, and honest damage visuals
+
+Spec 13 made the physics of detachment real, but the UI still couldn't
+*reach* one: the sliders had no intensity, weak-story or weak-column
+control, and nothing above `story_drift`/`stiffness_ratio` numbers was drawn.
+Spec 14 closes both gaps — a scenario the user can actually trigger, and a
+building that visibly bends, cracks, and shows where it failed.
+
+**Part F — scenario controls, demo preset, readout.** The Collapse Analysis
+panel gained:
+- **Intensity** — a stepped multiplier (0.05× to 20×, always including 1×
+  and 20×) applied to the ground motion for the collapse request only. It is
+  *not* the live-recompute Magnitude slider elsewhere in the UI; intensity
+  scales the input record, Magnitude re-derives it from source-distance
+  physics.
+- **Weak story** and **Weak columns (m)** — pick one story and shrink its
+  column depth in both directions, independent of the regular Building
+  Parameters sliders, so a single story can be made deliberately softer
+  than the rest without touching the whole building.
+- **Load collapse demo** — one click sets a known-detaching configuration
+  (record, story count, weak story, weak columns, intensity) so a first-time
+  reader doesn't have to hunt for parameters that actually converge to a
+  detachment.
+- **The readout** — plain text naming, per axis, the first onset story and
+  time, then (if it happened) the detached story, its time and axis, framed
+  by the same honesty sentence spec 13 introduced: *"Structural solve; the
+  fall is not animated yet."*
+- **Timeline markers** on the seek bar — amber for onset, red for
+  detachment, each with a tooltip naming the story and criterion, so
+  scrubbing the record lines up with the readout's numbers instead of
+  requiring a second lookup.
+- **Elastic ghost** — a faint outline of how the same building would have
+  swayed with no yielding, replayed alongside the real (possibly detaching)
+  building, so degradation is visible by contrast rather than by memory. It
+  rebuilds only when the underlying elastic run actually changes (load,
+  floor, axis, resize) — never every frame.
+- Every one of these controls changes the collapse result's cache key, so
+  switching Weak story or Intensity invalidates a stale cached run instead
+  of silently reusing it.
+
+**New optional payload blocks (`damage_blocks`, nonlinear requests only).**
+`story_drift`, `story_shear` and `p_nl` arrive at the *full* sample rate —
+undecimated, because a filtered peak would round off the exact instant a
+column fails and make the hysteresis loop wrong in the one place it
+matters. `stiffness_ratio`, `damage_state` and `column_damage` are
+nearest-neighbour subsampled (never FIR-filtered: a categorical damage code
+has no meaningful "in-between" value). Damage codes are the six
+`ColumnHysteresis` branches; the *displayed* `damage_state`/`column_damage`
+are a running max over time per column, so a column that briefly shows a
+higher stiffness ratio on UNLOAD/RELOAD (real, not a bug) never appears to
+"heal" on screen. Requesting no blocks reproduces spec 13's payload
+byte-for-byte; the new blocks always append after `theta_z`
+(`has_floor_rotation`), never before it.
+
+**The building now visibly bends and shows where it broke.** Every column
+in every story is one `InstancedMesh` (`COLUMN_SEGMENTS = 8` bending
+segments each) instead of a separate mesh per column — so this doesn't cost
+extra draw calls as story count grows; verified live at N=20 with every
+damage visual on: **≈1454 draw calls/frame, about the same as the pre-spec
+straight-column baseline (≈1542) at the same N**. Each segment's joint sits
+on a cubic (`3ξ²−2ξ³`, derived in the math PDF's Part J) fixed-fixed
+deflected shape between the column's two floor endpoints, so the S-curve
+gets sharpest at the ends, matching a real fixed-fixed frame column rather
+than a straight sliding tray.
+
+- **Drift colouring** — every column continuously tinted along a
+  cyan→green→amber→red ramp keyed to its story's drift ratio, with IO/LS/CP
+  marks (1%/2%/4%, FEMA 356 descriptive guidance, not a calibrated collapse
+  prediction) on the legend.
+- **Damage shade** — darker once a column has yielded, darkest once it has
+  failed (computed, not painted from drift alone).
+- **Hinge glow** — a marker at a column's end lights up at the exact
+  instant that end's material state first goes non-elastic, never earlier.
+- **Crack bands** — accumulate and never un-accumulate on a forward play,
+  sized by the column's own computed stiffness loss `1 − k_t/k₀`.
+- Per-story, per-column tint also varies slightly within one story — the
+  legend says plainly this represents *assumed* 10% material variability,
+  not something measured.
+
+**All four of the above are driven by already-computed numbers
+(drift, stiffness ratio, damage code) but are themselves cosmetic layers —
+none of them feed back into the structural solve.** The bending shape is
+the same kind of thing: a kinematic interpolation between two real,
+solved endpoints, not a new stiffness computation (see the math PDF's Part
+J2 for the distinction spelled out).
+
+**A fourth drawer tab, Hysteresis**, plots one story's force–drift loop as
+it plays: an exact, undecorated polyline through the transmitted samples —
+never smoothed, never re-fit into an envelope, because a degrading loop can
+self-intersect and the reversal points are the physically meaningful part.
+It shows the running peaks (`V_max`, `δ_max`) and the work `∫V dδ` done so
+far (explicitly labelled as work, not "dissipated energy" — separating out
+the truly dissipated part would need the unloading stiffness, which the
+panel does not infer), overlaid on the story's real backbone from
+`build_backbones()`.
+
+**Honesty boundary, reaffirmed.** Every visual above only ever reflects a
+value the solver already computed at or before the frame being shown — check
+5 in the verification doc exists specifically to catch a hinge or crack
+rendered even one frame early. The fall itself is still spec 15's job.

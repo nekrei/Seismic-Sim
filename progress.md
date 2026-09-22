@@ -2902,3 +2902,247 @@ behaviour was confirmed identical at `ab06d2c`, at `main` and at HEAD.
 - **specs/COURSE-CONCEPTS.md:** row 13 "Delivered".
 - **Check 12:** `verify_handoff.py 12` PASS. The Part B sentence is
   verbatim in README and in the PDF text (whitespace-normalised search).
+
+## Spec 14 — damage visualization + collapse scenario controls
+
+### Task 0 — worktree, spec numbers, baseline fixtures (2026-09-22)
+
+- Worktree `.worktrees/goal-14-damage-visualization`, branch
+  `goal/14-damage-visualization` off `main` @ `4cfbca3`.
+- Spec 14 gains Correction C-6: the F4 demo re-measured on `main` (onset
+  35.50 s X / 35.82 s Y, story index 2, gravity; story 3 detaches 80.54 s,
+  axis X; 3 iterations; ~51 s; 2.21 MB).
+- Pre-spec-14 `/compute` payloads captured by
+  `claude_scripts/make_pre_spec14_fixtures.py` into
+  `claude_scripts/fixtures/pre_spec14_{elastic,nonlinear,torsion}.bin`
+  (3 900 208 / 1 766 744 / 2 032 616 bytes; params in
+  `pre_spec14_params.json`). Check 1's byte-identity reference; the script
+  refuses to overwrite them.
+
+### Task 1 — server damage blocks (Part A) + helpers (2026-09-22)
+
+- `mdof_response.py`: post-processing only. `DAMAGE_CODES`,
+  `DAMAGE_CODE_OF_BRANCH`, `DRIFT_LIMIT_IO/LS` (1 %/2 %, FEMA 356 C1-3),
+  `accumulated_damage()`, `subsample_nearest()`.
+- `server.py`: `damage_blocks` request field (unknown name or non-list →
+  400), wire order `story_drift, story_shear, stiffness_ratio, p_nl,
+  damage_state, column_damage` (float32 first, uint8 padded to 4),
+  `has_<name>` flags, `header.damage` (codes, raw branches, map, drift
+  limits, per-axis per-column backbones, blocks with dtype/shape/npts/
+  rate_hz/pad_bytes). Only on nonlinear requests. `column_depth_{x,y}_per_story`
+  echoed only when a profile was sent (R5).
+- `claude_scripts/check_damage_blocks.py` (new): ALL CHECKS PASSED — empty
+  request byte-identical to the three pre-spec-14 fixtures; all 64 subsets
+  walk to zero trailing bytes (L-AQUILA.A_AZ009, damage_state pad = 2);
+  demo contents == HFTDResult; codes monotone; column max == story code;
+  failed code never before t_fail; every block frozen after t_detach
+  (stories 2, 3); V-4 onset idx 2 + 1 == detach story 3.
+- `check_ground_accel_block.py` parse walks the damage blocks; §10's
+  detaching requests now carry all six blocks (V-1): ALL CHECKS PASSED.
+- Sizes (NIIGATA_AKTH04, npts 31 600): N=7 none 3.74 / default 8.28 /
+  all 10.05 MB; N=20 none 9.52 / default 22.50 / all 27.55 MB.
+
+Rulings:
+- **R1 amended → three codes, not four.** `RESIDUAL` only occurs from
+  `t_fail` on (`failed_pos/neg` trip on the same `|δ| > du` test as
+  `t_fail`), so a separate "residual" level would be dead. Codes:
+  0 elastic, 1 yielded (BACKBONE_±/UNLOAD/RELOAD), 2 failed (RESIDUAL,
+  forced from `t_fail`), accumulated with `cummax`.
+- **R9 — `k_t/k₀` > 1 is real model output.** Demo X reaches 1.25. The
+  connecting segment from the unload zero to the pinch point can be
+  steeper than k₀. It is not a wrong-branch read. Check 2 asserts that
+  values above 1 occur only where a column is on UNLOAD/RELOAD, and that
+  the ratio is exactly 1 while all columns are elastic. The renderer
+  clamps `1 − k_t/k₀` to [0, 1].
+
+### Task 2 — Part F: scenario controls, readout, parser (2026-09-22)
+
+- `index.html` Collapse Analysis section:
+  - Intensity slider (stepped list 0.05–20, `INTENSITY_STEPS`). Collapse-only; a change drops the collapse cache.
+  - Weak-story `<select>` (none / story 1..N, rebuilt with the Stories slider) and a weak-column depth slider.
+  - "Load collapse demo" button.
+  - `#collapseReadout`.
+- Collapse requests add `intensity_scale`, `hftd_max_iterations: 200` and the fixed R4 block set.
+- The weak-story profile is sent on elastic and collapse requests alike (R5). `buildingParamsAtDefault()` requires weak story = none.
+- The snapshot/restore on a dismissed 422/400 covers the weak-story controls.
+- The overlay counts elapsed seconds during a collapse run (`startElapsed`/`stopElapsed`). An aborted request never stops a newer request's counter.
+- The payload parser reads `header.damage.blocks` after `theta_z` as typed-array views (float32 / uint8 + declared pad). It passes `damage` and `collapse` to `applyLoadedData` (`damageData`, `collapseData`).
+- `normalizeFrame` carries `column_depth_{x,y}_per_story`. `createBuilding` draws each story's columns at the echoed depth.
+- The folder `change` handler is now the named `onFolderChange` so the demo loader can await it.
+- New `COLLAPSE-HELPERS` sentinel: `INTENSITY_STEPS`, `weakStoryProfile`, `firstOnset`, `formatCollapseReadout`.
+- `claude_scripts/check_collapse_readout.mjs` (new): ALL CHECKS PASSED against the real demo payload header. Readout: converged in 3; X/Y first onset story 3 at 35.50/35.82 s (gravity); "Story 3 detached at 80.54 s (axis X) — floors 3–4 no longer structural"; honesty line.
+- `check_index_syntax`, `check_time_domain`, `check_story_heights`, `check_floor_rotation`, `check_footprint_area`, `check_sway_gain` and `check_furniture_gain` all pass. `fft_check.mjs` runs.
+
+Rulings:
+- **R10 — the weak story is a depth in metres, not a factor.** It uses the column sliders' 0.30–1.50 m / 0.05 grid. A factor slider cannot reach the verified 0.70 m against 1.10 m columns exactly (0.7/1.1 is not on any sane grid). The weak depth applies to both axes.
+- **R11 (spec 14) — the intensity control is a stepped list, not a continuous log slider.** The stepped list makes 1× and the demo's 20× exact positions.
+- **F6 "stays dismissible"** is read as: messages stay dismissible, as before. A running solve is not cancellable from the overlay, and no abort UI was added.
+
+### Task 3 — Part B: instanced, segmented columns (2026-09-22)
+
+- `index.html`:
+  - New `COLUMN-HELPERS` sentinel with `COLUMN_SEGMENTS = 8`, `shapeFn` (3ξ²−2ξ³), `columnPoint` (returns the end objects themselves at ξ = 0, 1) and `segmentTransform`.
+  - Columns are ONE `InstancedMesh` (`columnInstances`, instance = column·S + segment, per-column tint as the instance colour, white material, `frustumCulled = false`). They replace the 4N per-column meshes.
+  - `columnMeshes` is renamed `columnDefs` (it gains `storyIndex`, `cornerIndex` and `baseColor`).
+  - `updateColumnTransforms` writes `setMatrixAt` per segment. It keeps the mean-yaw twist per column, skipped at 0.
+- `claude_scripts/check_column_shape.mjs` (new, check 4 + V-3) runs main's real `updateColumnTransforms` (via `git show main:index.html`) and this branch's against the same r160 stand-ins. ALL CHECKS PASSED:
+  - S=1 bit-identical, untwisted (12 704 columns) and twisted (12 168 columns, every config twisted);
+  - shapeFn error 4.4e-16;
+  - S=8 joints on u(ξ) of the rotated corners to 1.3e-15;
+  - ends exact;
+  - one-sided end slopes O(h) (3e-6 at h = 1e-6).
+- The other JS checks pass.
+
+Ruling:
+- **R12 — check 4's "segment midpoints on u(y)" is read as segment JOINTS on u(y).** Each rendered segment is a straight chord between two points of the curve. A chord's midpoint lies on the chord, not on the curve (off by O(1/S²)), so the joints are what the renderer places on the shape. The check recovers each joint from the instance's own position, direction (quaternion) and length.
+
+### Task 4 — damage visuals C1–C5 + legend (2026-09-22)
+
+- New `DAMAGE-HELPERS` sentinel: `DAMAGE_SHADE` [1, 0.72, 0.38], `decimationFactor`, `decimatedIndex` (latest decimated sample at or before the frame), `hingeOn` (code ≥ 1), `crackEnvelope` (running max of clamp(1 − k_t/k₀, 0, 1)) and `driftRampColor` (continuous, with stops exactly at 0/IO/LS/CP).
+- `prepareDamageView()` is built once per load. `updateDamageVisuals(idx)` runs every frame from `animate()`, and is a no-op without blocks.
+  - C1: story drift (max over axes, /h) colours that story's columns and the beams topping it (`beamMats`, one per floor).
+  - C2: the column shade multiplies the column colour by its accumulated code.
+  - C3: two emissive hinge spheres per column (`hingeInstances`) at ξ = 0.06/0.94 on the bent shape. Zero scale until code ≥ 1.
+  - C4: two dark crack bands per column (`crackInstances`). Height ∝ the story's crack envelope; the tilt is seeded per (record, story, column) through `hashSeed`/`mulberry32`.
+  - C5 (floor yaw): unchanged from spec 12.
+  - Held stories freeze automatically, because their data is held.
+- Legend `#damageLegend` in Collapse Analysis: the ramp bar with IO/LS/CP marks placed from `header.damage.drift_limits`, a live "Max story drift now" line, and the computed-vs-cosmetic notes, including "modelled material variability (assumed 10% CoV), not measured".
+- `claude_scripts/check_damage_render.mjs` (new, check 5 renderer half): ALL CHECKS PASSED on the demo fixture.
+  - `decimatedIndex` is never early and at most one period late.
+  - For all 8 yielding columns, the hinge is off one frame before and on at the first yielded sample.
+  - The failed shade never appears before `t_fail` (4 failing columns).
+  - The crack envelope is monotone and in [0, 1].
+  - Ramp stops are distinct, clamped beyond CP, continuous at IO, and the red channel is non-decreasing.
+- The other JS checks pass.
+
+### Task 5 — C6 Hysteresis tab (2026-09-22)
+
+- `index.html`:
+  - Third drawer tab "Hysteresis" (`#hysteresisPane`, `#hysteresisCanvas`). The canvas is added to BOTH the `width:100%; height:100%` sizing rule and the reduced-motion list.
+  - The tab routes through `redrawAnalysisTab()`. `animate()` draws it while the drawer is open on that tab.
+  - It reuses the shared Floor/Axis selectors: floor f+1 shows story f+1, the story below it.
+  - Placeholder until a collapse run's blocks exist.
+- New `HYSTERESIS-HELPERS` sentinel:
+  - `selectTrail` (exact indices strided back from the playhead, ≤ 2000, always the latest);
+  - `hysteresisPeaks` (whole-run V_max/δ_max plus work ∫V dδ so far);
+  - `storyBackbone` (JS mirror of `ColumnHysteresis.backbone`, virgin, summed over the 4 columns);
+  - `makeHysteresisPanel` (ghost rebuilt only on a key change: load serial | floor | axis | wrapper size).
+  - The cost-model comment says why this is a polyline and not an envelope.
+- The ghost (axes, dashed backbone, whole loop) is drawn once to an offscreen canvas. Each frame blits it and draws the trail, the current point and the label (V_max, δ_max). The note line gives the work so far and the torsion caveat.
+- `claude_scripts/make_hysteresis_fixture.py` builds the demo building directly. It dumps `build_backbones()` and `ColumnHysteresis.backbone` summed per story to `claude_scripts/fixtures/spec14_backbone.json`.
+- `claude_scripts/check_hysteresis_panel.mjs` (new, check 6): ALL CHECKS PASSED.
+  - Trail selection is exact and shrinks on scrub-back.
+  - 0 ghost rebuilds over 300 frames, and 1 per key change.
+  - Under a gain of 3, V_max/δ_max scale ×3 and work ×9.
+  - The header backbones equal the independent `build_backbones()` exactly.
+  - The JS backbone matches Python with worst relative error 0.0.
+  - The CSS rule is parsed from the stylesheet text.
+
+Ruling:
+- **R13 — the printed "E_h" is the work ∫V dδ so far, labelled as such.** It includes the elastic energy momentarily stored in the story. Separating out the dissipated part would need the unloading stiffness, which is inference the panel should not do. The label says "work ∫V dδ", not "dissipated energy".
+
+### Task 6 — C7 timeline markers + C8 elastic ghost (2026-09-22)
+
+- C7: `timelineMarkers()` (in `COLLAPSE-HELPERS`) turns every non-null `axes[*].t_collapse` (0-based → story i+1) and every `detachment_events` entry (already 1-based) into a sorted marker list.
+  - `renderSeekMarkers()` draws the ticks under the seek track (`.seek-track`/`#seekMarkers`). A tick sits where the thumb centre sits at t, via a `--thumb`/`--f` calc.
+  - Onset ticks are amber, detachment ticks red. The `title` tooltip names the story, axis, criterion and time; a click seeks there.
+- C8: `requestParams(folder)` is split out of `liveRecompute` (a pure move). `elasticBuildingKey()` = request params + the current magnitude.
+  - `holdElastic()` keeps the last elastic load's `floorX/floorY` (static and live paths).
+  - `attachGhost()` shows it only when a collapse run's building key matches, scaled by `intensity_scale` (R6, labelled "elastic × 20 (linear)").
+  - Per-floor slab-outline `LineSegments` (`ghostFloors`) are moved in `animate()` by time lookup with the same display gain. `#ghostToggle` defaults to on.
+- `check_collapse_readout.mjs` extended: ALL CHECKS PASSED (markers onset X 35.50, onset Y 35.82, detachment 80.54, all story 3; V-4 JS side).
+- The other JS checks pass; `check_index_syntax` parses.
+- **Browser smoke test** (built-in Browser pane, `server.py` from the worktree; NOT the Task 7 pass):
+  - fresh load → Load collapse demo sets KOCAELI_AYD / N=4 / story 3 / 0.70 m / 20× / 8.0 M;
+  - Run collapse analysis converges in 3 iterations; readout, markers and ghost label as expected;
+  - the legend reads "Max story drift now: 8.52 % (story 3)", with marks IO 1 %@25 %, LS 2 %@50 %, CP 4 %@100 %;
+  - the screenshot at 85 s shows the red weak story with thin S-bent columns and hinge glows;
+  - the Hysteresis tab draws an opening, ratcheting loop;
+  - zero console errors.
+
+### Task 7 — verification sweep (2026-09-22)
+
+- **Python checks (checks 1-3, V-1, V-2, V-4):** `check_damage_blocks.py`
+  ALL CHECKS PASSED (payload layout/alignment/back-compat, block contents
+  vs `HFTDResult`, decimation, F4 demo contents both axes, V-4 onset-idx
+  2 + 1 == detach story 3); `check_ground_accel_block.py` ALL CHECKS
+  PASSED including section 9/10 (V-1: new blocks after `theta_z`, zero
+  trailing bytes with torsion+detachment+damage all on); `verify_spectrum.py`
+  OVERALL PASS (FFT/transfer-function identity, spectrum.json
+  recomputation, modal peaks).
+- **Node checks (check 4-6 + regression set, V-3):** `check_collapse_readout.mjs`,
+  `check_column_shape.mjs` (V-3: S=1 bit-identical for BOTH untwisted
+  (12704 columns) and TWISTED (12168 columns, independent polar rotation)
+  configs, 0 differ each), `check_damage_render.mjs`, `check_hysteresis_panel.mjs`,
+  `fft_check.mjs` + `fft_check_scipy.py` (rel_err ~3e-14), `check_time_domain.mjs`
+  (7176 comparisons), `check_index_syntax.mjs`, `check_footprint_area.mjs`,
+  `check_sway_gain.mjs`, `check_furniture_gain.mjs`, `check_story_heights.mjs`,
+  `check_floor_rotation.mjs` — ALL PASSED, no regressions.
+- **`out/` regeneration:** `mdof_response.py` + `plot_response.py` re-run
+  clean (no warnings); `git status --short out/` reported **zero diff**.
+- **Check 8 (frame-rate budget):** measured live via a temporary
+  `window.__renderer/__scene/__camera` exposure added right after
+  `renderer.domElement` is created, used only for this measurement and
+  reverted before committing (`git status --short` clean afterward).
+  - N=20, KOCAELI_AYD, weak story 3 @ 0.70 m, intensity 7x (chosen over
+    the full 20x/N=20 F4-style demo, which was still iterating past 800s
+    of wall time on this machine — not a hang, `/compute` was still
+    pending per `read_network_requests`, but far outside any reasonable
+    interactive budget; 7x converges in 3 iterations at ~140s and still
+    exercises real nonlinear damage, onset at X 79.87s/Y 83.11s, no
+    detachment). All damage visuals on, Hysteresis tab open (story 7,
+    axis X), playback running.
+  - **After (spec 14):** ~1454 draw calls/frame, ~80 156 triangles/frame,
+    69.0 fps measured over 139 frames (2 s window; the Browser pane isn't
+    vsync-locked to a real monitor so this is a relative, not absolute,
+    number — see below).
+  - **Before (pre-spec-14, `main`@`4cfbca3`):** same N=20 elastic building,
+    measured the identical way after temporarily patching the same debug
+    hook into a scratch copy of `main`'s `index.html`
+    (`git show 4cfbca3:index.html`, served from the worktree, deleted
+    after measuring): ~1542 draw calls/frame, ~37 340 triangles/frame,
+    54.4 fps over 109 frames.
+  - **Verdict: draw calls did NOT grow because of this spec** (1454 <
+    1542) — the instanced-column requirement held in the live renderer,
+    consistent with `check_column_shape.mjs`'s structural guarantee (one
+    `InstancedMesh`, bit-identical geometry, twisted included). The
+    triangle count roughly doubled (37k → 80k) from the per-segment
+    column mesh (`COLUMN_SEGMENTS = 8`) replacing a straight box, which
+    is expected and cheap relative to draw-call count on modern GPUs.
+  - **Mobile (375x812):** same N=20 build, 67.2 fps over 135 frames (2s),
+    1434 draw calls/frame — comfortably above the 30 fps floor; no
+    fallback needed.
+  - Frame budget target (60 fps, floor 30 fps): **met** at both desktop
+    and mobile widths, both before and after this spec.
+- **Check 9 + V-5/V-6 (real-browser pass, Claude in Chrome, no fetch
+  wrapper):** fresh `http://127.0.0.1:8000/` load → Collapse Analysis
+  panel → "Load collapse demo" (KOCAELI_AYD, N=4, intensity 20x, weak
+  story 3, weak columns 0.70 m) → "Run collapse analysis", all through
+  real UI clicks.
+  - Converged in 3 iterations; readout text: "X: first onset story 3 at
+    35.50 s (gravity)", "Y: first onset story 3 at 35.82 s (gravity)",
+    "Story 3 detached at 80.54 s (axis X) — floors 3-4 no longer
+    structural" — matches the known header values exactly (V-5 item 2).
+  - Weak story's columns visibly thinner than the stories above/below at
+    high zoom (V-5 item 3).
+  - Changing "Weak story" from 3 to 2 live cleared the seek markers and
+    the elastic-ghost label, confirming the collapse cache key changed
+    with the control (V-5 item 4).
+  - Item 5 (elastic-only-backend message) verified by code inspection
+    rather than a live network fault: `index.html` ~L4560,
+    `if (!header.collapse) showRecomputeError('This backend does not
+    support collapse analysis yet.')` — the exact condition a
+    collapse-disabled backend (e.g. the deployed `seismic-sim-backend`)
+    hits.
+  - Seeking to t=86s (past the 80.54s detachment) showed story 3's
+    columns rendered deep red (failed shade), bent into pronounced
+    S-curves, gold hinge-glow markers at both ends, floors 3-4 held as a
+    rigid detached unit above the surviving structure below — items 1, 3,
+    4, 5, 10 all visually confirmed together.
+  - Hysteresis tab (Floor 3, axis X): loop opens with a dashed backbone
+    envelope visible mid-record (item 7).
+  - Zero console errors across the whole session (fresh load, demo,
+    run, floor/speed/seek changes) — checked twice, both empty.
+- **Cleanup:** the temporary `window.__renderer` exposure and the
+  `pre_spec14_index_scratch.html` scratch file were both removed;
+  `git status --short` in the worktree is clean.
