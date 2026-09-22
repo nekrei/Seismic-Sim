@@ -3059,3 +3059,90 @@ Ruling:
   - the screenshot at 85 s shows the red weak story with thin S-bent columns and hinge glows;
   - the Hysteresis tab draws an opening, ratcheting loop;
   - zero console errors.
+
+### Task 7 — verification sweep (2026-09-22)
+
+- **Python checks (checks 1-3, V-1, V-2, V-4):** `check_damage_blocks.py`
+  ALL CHECKS PASSED (payload layout/alignment/back-compat, block contents
+  vs `HFTDResult`, decimation, F4 demo contents both axes, V-4 onset-idx
+  2 + 1 == detach story 3); `check_ground_accel_block.py` ALL CHECKS
+  PASSED including section 9/10 (V-1: new blocks after `theta_z`, zero
+  trailing bytes with torsion+detachment+damage all on); `verify_spectrum.py`
+  OVERALL PASS (FFT/transfer-function identity, spectrum.json
+  recomputation, modal peaks).
+- **Node checks (check 4-6 + regression set, V-3):** `check_collapse_readout.mjs`,
+  `check_column_shape.mjs` (V-3: S=1 bit-identical for BOTH untwisted
+  (12704 columns) and TWISTED (12168 columns, independent polar rotation)
+  configs, 0 differ each), `check_damage_render.mjs`, `check_hysteresis_panel.mjs`,
+  `fft_check.mjs` + `fft_check_scipy.py` (rel_err ~3e-14), `check_time_domain.mjs`
+  (7176 comparisons), `check_index_syntax.mjs`, `check_footprint_area.mjs`,
+  `check_sway_gain.mjs`, `check_furniture_gain.mjs`, `check_story_heights.mjs`,
+  `check_floor_rotation.mjs` — ALL PASSED, no regressions.
+- **`out/` regeneration:** `mdof_response.py` + `plot_response.py` re-run
+  clean (no warnings); `git status --short out/` reported **zero diff**.
+- **Check 8 (frame-rate budget):** measured live via a temporary
+  `window.__renderer/__scene/__camera` exposure added right after
+  `renderer.domElement` is created, used only for this measurement and
+  reverted before committing (`git status --short` clean afterward).
+  - N=20, KOCAELI_AYD, weak story 3 @ 0.70 m, intensity 7x (chosen over
+    the full 20x/N=20 F4-style demo, which was still iterating past 800s
+    of wall time on this machine — not a hang, `/compute` was still
+    pending per `read_network_requests`, but far outside any reasonable
+    interactive budget; 7x converges in 3 iterations at ~140s and still
+    exercises real nonlinear damage, onset at X 79.87s/Y 83.11s, no
+    detachment). All damage visuals on, Hysteresis tab open (story 7,
+    axis X), playback running.
+  - **After (spec 14):** ~1454 draw calls/frame, ~80 156 triangles/frame,
+    69.0 fps measured over 139 frames (2 s window; the Browser pane isn't
+    vsync-locked to a real monitor so this is a relative, not absolute,
+    number — see below).
+  - **Before (pre-spec-14, `main`@`4cfbca3`):** same N=20 elastic building,
+    measured the identical way after temporarily patching the same debug
+    hook into a scratch copy of `main`'s `index.html`
+    (`git show 4cfbca3:index.html`, served from the worktree, deleted
+    after measuring): ~1542 draw calls/frame, ~37 340 triangles/frame,
+    54.4 fps over 109 frames.
+  - **Verdict: draw calls did NOT grow because of this spec** (1454 <
+    1542) — the instanced-column requirement held in the live renderer,
+    consistent with `check_column_shape.mjs`'s structural guarantee (one
+    `InstancedMesh`, bit-identical geometry, twisted included). The
+    triangle count roughly doubled (37k → 80k) from the per-segment
+    column mesh (`COLUMN_SEGMENTS = 8`) replacing a straight box, which
+    is expected and cheap relative to draw-call count on modern GPUs.
+  - **Mobile (375x812):** same N=20 build, 67.2 fps over 135 frames (2s),
+    1434 draw calls/frame — comfortably above the 30 fps floor; no
+    fallback needed.
+  - Frame budget target (60 fps, floor 30 fps): **met** at both desktop
+    and mobile widths, both before and after this spec.
+- **Check 9 + V-5/V-6 (real-browser pass, Claude in Chrome, no fetch
+  wrapper):** fresh `http://127.0.0.1:8000/` load → Collapse Analysis
+  panel → "Load collapse demo" (KOCAELI_AYD, N=4, intensity 20x, weak
+  story 3, weak columns 0.70 m) → "Run collapse analysis", all through
+  real UI clicks.
+  - Converged in 3 iterations; readout text: "X: first onset story 3 at
+    35.50 s (gravity)", "Y: first onset story 3 at 35.82 s (gravity)",
+    "Story 3 detached at 80.54 s (axis X) — floors 3-4 no longer
+    structural" — matches the known header values exactly (V-5 item 2).
+  - Weak story's columns visibly thinner than the stories above/below at
+    high zoom (V-5 item 3).
+  - Changing "Weak story" from 3 to 2 live cleared the seek markers and
+    the elastic-ghost label, confirming the collapse cache key changed
+    with the control (V-5 item 4).
+  - Item 5 (elastic-only-backend message) verified by code inspection
+    rather than a live network fault: `index.html` ~L4560,
+    `if (!header.collapse) showRecomputeError('This backend does not
+    support collapse analysis yet.')` — the exact condition a
+    collapse-disabled backend (e.g. the deployed `seismic-sim-backend`)
+    hits.
+  - Seeking to t=86s (past the 80.54s detachment) showed story 3's
+    columns rendered deep red (failed shade), bent into pronounced
+    S-curves, gold hinge-glow markers at both ends, floors 3-4 held as a
+    rigid detached unit above the surviving structure below — items 1, 3,
+    4, 5, 10 all visually confirmed together.
+  - Hysteresis tab (Floor 3, axis X): loop opens with a dashed backbone
+    envelope visible mid-record (item 7).
+  - Zero console errors across the whole session (fresh load, demo,
+    run, floor/speed/seek changes) — checked twice, both empty.
+- **Cleanup:** the temporary `window.__renderer` exposure and the
+  `pre_spec14_index_scratch.html` scratch file were both removed;
+  `git status --short` in the worktree is clean.
