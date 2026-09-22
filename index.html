@@ -1587,7 +1587,8 @@
 
         // --- State ---
         let buildingGroups = [];   // N floor groups (index f = floor f+1), NOT including a separate roof group -- the roof rides as a child of the topmost floor group.
-        let columnMeshes = [];     // flat list of {mesh, storyIndex, cornerX, cornerZ} -- columns live at scene top level, not inside a floor group, since each spans two differently-displaced levels (spec 5, Part C3).
+        let columnDefs = [];       // flat list of {storyIndex, cornerIndex, cornerX, cornerZ, thicknessX/Z, bottomSource, topSource} -- columns live at scene top level, not inside a floor group, since each spans two differently-displaced levels (spec 5, Part C3).
+        let columnInstances = null; // spec 14: ONE InstancedMesh, COLUMN_SEGMENTS instances per columnDefs entry
         let lightSphere = null;
         let foundationSlab = null;
         let timeData = [];
@@ -2133,6 +2134,8 @@
         const UP_VECTOR = new THREE.Vector3(0, 1, 0);
         const _dirVec = new THREE.Vector3();
         const _twistQuat = new THREE.Quaternion();
+        const _segPos = new THREE.Vector3(), _segScale = new THREE.Vector3();
+        const _segQuat = new THREE.Quaternion(), _segMatrix = new THREE.Matrix4();
 
         // --- Building creation (spec 5, Part A/C -- open-cutaway frame) ---
         // Structure: opaque thin floor SLABS (furniture needs something to
@@ -2301,11 +2304,49 @@
         }
         // ---8<--- COLLAPSE-HELPERS-END
 
+        // ---8<--- COLUMN-HELPERS-BEGIN
+        // Spec 14 Part B: columns bend. Each column is COLUMN_SEGMENTS
+        // straight chords between points of the fixed-fixed shear shape
+        // u(xi) = u_b + (u_t - u_b)(3xi^2 - 2xi^3): the exact static deflected
+        // shape of a column whose ends translate but do not rotate (zero end
+        // slope). Curvature peaks at the ends -- where hinges form (C3).
+        // Its own sentinel block, extracted by claude_scripts/
+        // check_column_shape.mjs. COLUMN_SEGMENTS = 1 must reproduce the
+        // pre-spec-14 straight column bit for bit, which is why the ends are
+        // returned as the endpoint objects themselves, never recomputed.
+        const COLUMN_SEGMENTS = 8;
+
+        function shapeFn(xi) {
+            return xi * xi * (3 - 2 * xi);
+        }
+
+        // Point at height fraction xi of the column from end b to end t
+        // (both ROTATED corner positions from columnEndpoint -- spec 12's
+        // trap). Horizontal offset follows the shape; height is linear.
+        function columnPoint(b, t, xi) {
+            if (xi === 0) return b;
+            if (xi === 1) return t;
+            const s = shapeFn(xi);
+            return { x: b.x + (t.x - b.x) * s, y: b.y + (t.y - b.y) * xi, z: b.z + (t.z - b.z) * s };
+        }
+
+        // Segment k of S: the straight-column math (midpoint, length,
+        // direction) applied to one chord.
+        function segmentTransform(b, t, k, S) {
+            const p = columnPoint(b, t, k / S), q = columnPoint(b, t, (k + 1) / S);
+            const dx = q.x - p.x, dy = q.y - p.y, dz = q.z - p.z;
+            return {
+                px: (p.x + q.x) / 2, py: (p.y + q.y) / 2, pz: (p.z + q.z) / 2,
+                length: Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6, dx, dy, dz,
+            };
+        }
+        // ---8<--- COLUMN-HELPERS-END
+
         function createBuilding(numFloors, storyHeights, frame, folderName) {
             for (const obj of sceneObjects) scene.remove(obj);
             sceneObjects = [];
             buildingGroups = [];
-            columnMeshes = [];
+            columnDefs = [];
             furnitureItems = [];
 
             const groups = [];
@@ -2441,18 +2482,10 @@
                     const colSeed = hashSeed(`${folderName || 'unknown'}#col#${f}#${cornerIndex}`);
                     const colRand = mulberry32(colSeed);
                     const tintFactor = 1 + (colRand() * 2 - 1) * 0.04; // +/-4%
-                    const colMat = new THREE.MeshStandardMaterial({
-                        color: colBaseColor.clone().multiplyScalar(tintFactor),
-                        roughness: 0.45,
-                        metalness: 0.25,
-                    });
-                    const mesh = new THREE.Mesh(columnGeo, colMat);
-                    mesh.castShadow = true;
-                    mesh.receiveShadow = true;
-                    scene.add(mesh);
-                    sceneObjects.push(mesh);
-                    columnMeshes.push({
-                        mesh,
+                    columnDefs.push({
+                        storyIndex: f,
+                        cornerIndex,
+                        baseColor: colBaseColor.clone().multiplyScalar(tintFactor),
                         cornerX: cx,
                         cornerZ: cz,
                         thicknessX: frame.columnDepthXPerStory
@@ -2464,6 +2497,23 @@
                     });
                 }
             }
+            // Spec 14 Part B: all column segments in one InstancedMesh. The
+            // per-column tint is the instance colour (the material colour is
+            // white, so the product is the old per-mesh colour exactly).
+            // Not frustum-culled: the instances move every frame, and a
+            // bounding sphere computed once would go stale.
+            columnInstances = new THREE.InstancedMesh(columnGeo,
+                new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.45, metalness: 0.25 }),
+                columnDefs.length * COLUMN_SEGMENTS);
+            columnInstances.castShadow = true;
+            columnInstances.receiveShadow = true;
+            columnInstances.frustumCulled = false;
+            columnDefs.forEach((c, ci) => {
+                for (let k = 0; k < COLUMN_SEGMENTS; k++) columnInstances.setColorAt(ci * COLUMN_SEGMENTS + k, c.baseColor);
+            });
+            columnInstances.instanceColor.needsUpdate = true;
+            scene.add(columnInstances);
+            sceneObjects.push(columnInstances);
 
             // Roof cap (decorative -- antenna + blinking light) rides as a
             // child of the topmost floor group, so it needs no separate
@@ -2524,26 +2574,31 @@
             return { x: g.position.x, y: g.position.y, z: g.position.z, yaw: g.rotation.y };
         }
 
+        // Spec 14 Part B: every column is COLUMN_SEGMENTS instances of one
+        // InstancedMesh (instance = column * COLUMN_SEGMENTS + segment), so
+        // the draw-call count does not grow with N.
         function updateColumnTransforms() {
-            for (const c of columnMeshes) {
+            let i = 0;
+            for (const c of columnDefs) {
                 const lb = sourceWorldPos(c.bottomSource), lt = sourceWorldPos(c.topSource);
                 const b = columnEndpoint(lb, c.cornerX, c.cornerZ);
                 const t = columnEndpoint(lt, c.cornerX, c.cornerZ);
-                const bx = b.x, by = b.y, bz = b.z;
-                const tx = t.x, ty = t.y, tz = t.z;
-                const dx = tx - bx, dy = ty - by, dz = tz - bz;
-                const length = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
-                c.mesh.position.set((bx + tx) / 2, (by + ty) / 2, (bz + tz) / 2);
-                c.mesh.scale.set(c.thicknessX, length, c.thicknessZ);
-                _dirVec.set(dx, dy, dz).normalize();
-                c.mesh.quaternion.setFromUnitVectors(UP_VECTOR, _dirVec);
                 // A rectangular section turns with the floors it joins; the
                 // mean of its two ends' yaw keeps its faces flush with both
                 // slab corners. Skipped at zero so the untwisted path is the
                 // pre-spec-12 one exactly.
                 const twist = (lb.yaw + lt.yaw) / 2;
-                if (twist !== 0) c.mesh.quaternion.multiply(_twistQuat.setFromAxisAngle(UP_VECTOR, twist));
+                for (let k = 0; k < COLUMN_SEGMENTS; k++, i++) {
+                    const s = segmentTransform(b, t, k, COLUMN_SEGMENTS);
+                    _segPos.set(s.px, s.py, s.pz);
+                    _segScale.set(c.thicknessX, s.length, c.thicknessZ);
+                    _dirVec.set(s.dx, s.dy, s.dz).normalize();
+                    _segQuat.setFromUnitVectors(UP_VECTOR, _dirVec);
+                    if (twist !== 0) _segQuat.multiply(_twistQuat.setFromAxisAngle(UP_VECTOR, twist));
+                    columnInstances.setMatrixAt(i, _segMatrix.compose(_segPos, _segQuat, _segScale));
+                }
             }
+            columnInstances.instanceMatrix.needsUpdate = true;
         }
 
         // --- Render-time sway gain (see swayDisplayGain()) -------------------

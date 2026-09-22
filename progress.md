@@ -2977,3 +2977,21 @@ Rulings:
 - **R10 — the weak story is a depth in metres, not a factor.** It uses the column sliders' 0.30–1.50 m / 0.05 grid. A factor slider cannot reach the verified 0.70 m against 1.10 m columns exactly (0.7/1.1 is not on any sane grid). The weak depth applies to both axes.
 - **R11 (spec 14) — the intensity control is a stepped list, not a continuous log slider.** The stepped list makes 1× and the demo's 20× exact positions.
 - **F6 "stays dismissible"** is read as: messages stay dismissible, as before. A running solve is not cancellable from the overlay, and no abort UI was added.
+
+### Task 3 — Part B: instanced, segmented columns (2026-09-22)
+
+- `index.html`:
+  - New `COLUMN-HELPERS` sentinel with `COLUMN_SEGMENTS = 8`, `shapeFn` (3ξ²−2ξ³), `columnPoint` (returns the end objects themselves at ξ = 0, 1) and `segmentTransform`.
+  - Columns are ONE `InstancedMesh` (`columnInstances`, instance = column·S + segment, per-column tint as the instance colour, white material, `frustumCulled = false`). They replace the 4N per-column meshes.
+  - `columnMeshes` is renamed `columnDefs` (it gains `storyIndex`, `cornerIndex` and `baseColor`).
+  - `updateColumnTransforms` writes `setMatrixAt` per segment. It keeps the mean-yaw twist per column, skipped at 0.
+- `claude_scripts/check_column_shape.mjs` (new, check 4 + V-3) runs main's real `updateColumnTransforms` (via `git show main:index.html`) and this branch's against the same r160 stand-ins. ALL CHECKS PASSED:
+  - S=1 bit-identical, untwisted (12 704 columns) and twisted (12 168 columns, every config twisted);
+  - shapeFn error 4.4e-16;
+  - S=8 joints on u(ξ) of the rotated corners to 1.3e-15;
+  - ends exact;
+  - one-sided end slopes O(h) (3e-6 at h = 1e-6).
+- The other JS checks pass.
+
+Ruling:
+- **R12 — check 4's "segment midpoints on u(y)" is read as segment JOINTS on u(y).** Each rendered segment is a straight chord between two points of the curve. A chord's midpoint lies on the chord, not on the curve (off by O(1/S²)), so the joints are what the renderer places on the shape. The check recovers each joint from the instance's own position, direction (quaternion) and length.
