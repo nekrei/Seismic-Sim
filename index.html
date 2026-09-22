@@ -2615,6 +2615,7 @@
             CONTACT_DT: 0.02,     // s, impulse duration for the cascade test -- assumed
             HINGE_TAU: 0.5,       // s, decay of the hinge column's residual moment -- assumed
             STRUT_DENSITY: 2400,  // kg/m^3, failed-column strut mass -- assumed
+            FURNITURE_DENSITY: 150, // kg/m^3 over an item's bounding box (mostly air) -- assumed
             SLAB_T: 0.10,         // m, slab collider thickness (the drawn slab)
         });
         const HANDOFF_VERSION = 1;
@@ -2781,7 +2782,12 @@
         // removed). An animated cascade (B3) releases the floor that was hit
         // as a free body (its columns crushed axially, so no struts) and is
         // recorded ONLY in animated_cascade_events, never in the computed list.
-        function buildCollapseSim(RAPIER, model, events, track) {
+        // `furniture` (optional, B4): { items: [{ key, floor, half: [hx, hy, hz] }],
+        // localAt(item, t) -> [x, z] } -- the item's floor-local plan offset in
+        // metres at time t (the viewer passes where it is DRAWN, sway included,
+        // so the release is teleport-free). An item becomes a body at the same
+        // instant as its floor; items on surviving floors are never touched.
+        function buildCollapseSim(RAPIER, model, events, track, furniture = null) {
             const P = COLLAPSE_PHYS, DT = P.DT, T = P.SLAB_T, N = model.N;
             const t0 = events[0].t_detach, tEnd = events[events.length - 1].t_detach + P.MAX_SECONDS;
             const K = Math.ceil((tEnd - t0) / DT - 1e-9);
@@ -2831,7 +2837,7 @@
 
             // A body enters the buffer at the current frame k. Frames before
             // its activation hold its activation pose: zero motion (check 2).
-            function register(body, floors, tAct, source) {
+            function register(body, floors, tAct, source, floorFrame = null) {
                 const rec = { body, floors, tAct, kAct: k, source, data: new Float32Array((K + 1) * 7), mass: body.mass() };
                 write(rec);
                 const o = k * 7;
@@ -2840,7 +2846,26 @@
                 for (let j = 0; j < k; j++) rec.data.copyWithin(j * 7, o, o + 7);
                 for (const f of floors) floorBody[f] = body;
                 bodies.push(rec);
+                if (furniture && floorFrame) spawnFurniture(rec, floorFrame);
                 return rec;
+            }
+            // Items on the floors a new body carries: small boxes resting on
+            // the slab, moving with it at the instant of release.
+            function spawnFurniture(floorRec, floorFrame) {
+                for (const it of furniture.items) {
+                    const i = floorRec.floors.indexOf(it.floor);
+                    if (i < 0) continue;
+                    const { local, psi } = floorFrame(i), [x, z] = furniture.localAt(it, floorRec.tAct);
+                    const p = worldPoint(floorRec.body, v3add(local, qRot(qYaw(psi), [x, T / 2 + it.half[1], z])));
+                    const b = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(...p)
+                        .setRotation(rq(qMul(rot(floorRec.body), qYaw(psi)))));
+                    world.createCollider(RAPIER.ColliderDesc.cuboid(...it.half).setDensity(P.FURNITURE_DENSITY)
+                        .setRestitution(P.RESTITUTION).setFriction(P.FRICTION), b);
+                    const lv = floorRec.body.linvel(), av = floorRec.body.angvel();
+                    b.setLinvel(rv(v3add([lv.x, lv.y, lv.z], v3cross([av.x, av.y, av.z], v3sub(p, tr(floorRec.body))))), true);
+                    b.setAngvel(av, true);
+                    register(b, [], floorRec.tAct, { kind: 'furniture', story: it.floor + 1, key: it.key, tEvent: floorRec.tAct });
+                }
             }
             function write(rec) {
                 const p = rec.body.translation(), q = rec.body.rotation(), o = k * 7, d = rec.data;
@@ -2883,7 +2908,8 @@
                 }
                 body.setLinvel(rv(seed.v), true);
                 body.setAngvel(rv(seed.w), true);
-                const rec = register(body, floors, e.t_detach, { kind: 'computed', story: e.story });
+                const rec = register(body, floors, e.t_detach, { kind: 'computed', story: e.story, tEvent: e.t_detach },
+                    i => ({ local: seed.local[i], psi: seed.psi[i] }));
                 rec.seed = seed;
                 for (const st of moving) {
                     st.bottomLocal = localPoint(body, st.anchorWorld);
@@ -2953,7 +2979,7 @@
                 b.enableCcd(true);
                 b.setLinvel(rv(v), true);
                 b.setAngvel({ x: 0, y: v[3], z: 0 }, true);
-                register(b, [f], t, { kind: 'cascade', story: f + 1 });
+                register(b, [f], t, { kind: 'cascade', story: f + 1, tEvent: t }, () => ({ local: [0, 0, 0], psi: 0 }));
                 lowestDynamic = f;
                 cascades.push(deepFreeze({ story: f + 1, t, v_impact: vImpact, F_impact: F, P_cap: cap, M_u: Mu,
                     label: 'animated cascade (post-failure kinematics, not computed)' }));
@@ -3570,7 +3596,9 @@
             return physicalPeak > 0 ? amplify * (displayPeak / physicalPeak) : amplify;
         }
 
-        function updateFurnitureOffsets(tSeconds, gainRatio) {
+        // `items` defaults to every item; spec 15 passes one item to read
+        // where it is DRAWN at its release time (the same code, no copy).
+        function updateFurnitureOffsets(tSeconds, gainRatio, items = furnitureItems) {
             if (!furnitureItems.length || !furnitureData || furnitureRateHz <= 0) return;
 
             // Cap the GAIN, never the individual samples. furnitureAmplify is
@@ -3597,7 +3625,7 @@
             const i0 = Math.floor(fIdxFloat);
             const frac = fIdxFloat - i0;
 
-            for (const item of furnitureItems) {
+            for (const item of items) {
                 const seriesX = furnitureData.X?.[item.className]?.[item.floorIndex];
                 const seriesZ = furnitureData.Y?.[item.className]?.[item.floorIndex];
 
@@ -5304,7 +5332,37 @@
         // the world is freed: playback and scrubbing only read the buffer.
         let collapseAnim = null;
         let collapseBuildToken = 0;
+        // Spec A4. The mobile check IS the bottom-sheet breakpoint (600px), not a second device test.
+        const COLLAPSE_MOBILE = matchMedia('(max-width: 600px)');
+        const COLLAPSE_BUDGET = { desktop: { bodies: 400, debris: 300, dust: 2000 }, mobile: { bodies: 120, debris: 60, dust: 400 } };
+        const _itemMat = new THREE.Matrix4(), _itemBox = new THREE.Box3();
+        // animate()'s furniture gainRatio at the R3-pinned display gain.
+        const collapseGainRatio = () => (amplify > 0 ? SCENE_UNITS_PER_METRE / amplify : 1);
+
+        // Furniture as the engine sees it: floor-local plan offsets in metres
+        // (drawn scene offset / SCENE_UNITS_PER_METRE -- where it is DRAWN at
+        // the release time) and a box the size of the item's rotated bounds.
+        function furnitureForSim() {
+            const u = SCENE_UNITS_PER_METRE;
+            const items = furnitureItems.map((it, key) => {
+                const c = it.mesh.clone();   // rotated + scaled, at the origin
+                c.position.set(0, 0, 0);
+                c.updateMatrixWorld(true);
+                _itemBox.setFromObject(c, true);
+                const size = _itemBox.getSize(new THREE.Vector3());
+                return { key, floor: it.floorIndex, half: [size.x / (2 * u), size.y / 2, size.z / (2 * u)] };
+            });
+            return {
+                items,
+                localAt: (it, t) => {
+                    const item = furnitureItems[it.key];
+                    updateFurnitureOffsets(t, collapseGainRatio(), [item]);
+                    return [item.mesh.position.x / u, item.mesh.position.z / u];
+                },
+            };
+        }
         const _collapseMat = new THREE.Matrix4();
+        const _collapseBase = [];   // per floor: its activation pose, before D
         const collapseBanner = document.getElementById('collapseBanner');
         const analysisCollapseNote = document.getElementById('analysisCollapseNote');
 
@@ -5312,6 +5370,7 @@
             collapseBuildToken++;   // abandons an in-flight build
             collapseAnim = null;
             for (const g of buildingGroups) g.matrixAutoUpdate = true;
+            for (const it of furnitureItems) it.mesh.matrixAutoUpdate = true;
             collapseBanner.classList.remove('is-shown');
             collapseBanner.replaceChildren();
             analysisCollapseNote.hidden = true;
@@ -5344,7 +5403,12 @@
             // as soon as applyLoadedData() returns.
             recomputeText.textContent = 'Simulating collapse';
             recomputeOverlay.classList.add('is-active');
-            const sim = buildCollapseSim(RAPIER, model, events, track);
+            // A4 budgets: over budget, furniture rides its floor rigidly
+            // (coarsening). Floors, struts and failed columns are never dropped.
+            const budget = COLLAPSE_BUDGET[COLLAPSE_MOBILE.matches ? 'mobile' : 'desktop'];
+            const structural = model.N + 4 * events.length;
+            const furniture = structural + furnitureItems.length <= budget.bodies ? furnitureForSim() : null;
+            const sim = buildCollapseSim(RAPIER, model, events, track, furniture);
             // Chunked so the page never freezes; the result does not depend
             // on the chunk size (check 3), so yielding by timer is safe.
             while (!sim.step(200)) {
@@ -5363,7 +5427,19 @@
                 const idxAct = Math.min(Math.round(rec.tAct / dt), totalFrames - 1);
                 for (const f of rec.floors) floors.push({ f, rec, idxAct });
             }
-            collapseAnim = { sim, events, floors, tFirst: sim.bodies[0].tAct, cap: !!header.collapse.cap_reached };
+            const items = [];
+            for (const rec of sim.bodies) {
+                if (rec.source.kind !== 'furniture') continue;
+                const item = furnitureItems[rec.source.key], f = item.floorIndex;
+                const lift = model.levelsScene[f] - model.levelsM[f];
+                rec.pivot = [rec.p0[0] * SCENE_UNITS_PER_METRE, rec.p0[1] + lift, rec.p0[2] * SCENE_UNITS_PER_METRE];
+                // Its local pose on the slab at release, sway included.
+                updateFurnitureOffsets(rec.tAct, collapseGainRatio(), [item]);
+                item.mesh.updateMatrix();
+                items.push({ item, rec, local: item.mesh.matrix.clone() });
+            }
+            collapseAnim = { sim, events, floors, items, coarsened: !furniture && furnitureItems.length > 0,
+                             tFirst: sim.bodies[0].tAct, cap: !!header.collapse.cap_reached };
             renderCollapseBanner();
             recomputeElapsed.textContent = '';
             recomputeOverlay.classList.remove('is-active');
@@ -5385,8 +5461,20 @@
                 g.position.z = (floorYData[f]?.[idxAct] || 0) * scale;
                 g.rotation.y = floorRotData ? displayYaw(floorRotData[f]?.[idxAct] || 0, scale, SCENE_UNITS_PER_METRE) : 0;
                 g.updateMatrix();
+                (_collapseBase[f] ||= new THREE.Matrix4()).copy(g.matrix);
                 g.matrix.premultiply(_collapseMat.fromArray(displayMatrix(rec, sample, rec.pivot, SCENE_UNITS_PER_METRE)));
                 g.matrixAutoUpdate = false;
+            }
+            // A released item: world = D_item . (its floor's activation pose) . (its
+            // local pose at release); written as the child-local matrix of its
+            // floor group, whose own matrix was set just above.
+            for (const { item, rec, local } of A.items) {
+                const sample = sampleBody(A.sim, rec, animTime);
+                if (!sample) { item.mesh.matrixAutoUpdate = true; continue; }
+                const g = buildingGroups[item.floorIndex];
+                _itemMat.fromArray(displayMatrix(rec, sample, rec.pivot, SCENE_UNITS_PER_METRE));
+                item.mesh.matrix.copy(g.matrix).invert().multiply(_itemMat).multiply(_collapseBase[item.floorIndex]).multiply(local);
+                item.mesh.matrixAutoUpdate = false;
             }
             collapseBanner.classList.toggle('is-shown', animTime >= A.tFirst - A.sim.dt / 2);
         }
@@ -5404,7 +5492,7 @@
             };
             const rows = [
                 line('Post-failure rigid-body model with assumed contact parameters — not a solution of the structural equations of motion.', true),
-                line(`Assumed: restitution ${P.RESTITUTION} · friction ${P.FRICTION} · impact duration ${P.CONTACT_DT} s · hinge moment decay τ ${P.HINGE_TAU} s · strut density ${P.STRUT_DENSITY} kg/m³. Drawn at true scale.`),
+                line(`Assumed: restitution ${P.RESTITUTION} · friction ${P.FRICTION} · impact duration ${P.CONTACT_DT} s · hinge moment decay τ ${P.HINGE_TAU} s · strut density ${P.STRUT_DENSITY} kg/m³ · furniture density ${P.FURNITURE_DENSITY} kg/m³. Drawn at true scale.`),
             ];
             for (const e of A.events) {
                 rows.push(line(`Computed: story ${e.story} detached at ${e.t_detach.toFixed(2)} s (axis ${e.axis}, toward ${e.direction < 0 ? '−' : '+'}${e.axis.toLowerCase()}).`));
@@ -5412,6 +5500,7 @@
             for (const c of A.sim.cascades) {
                 rows.push(line(`Animated cascade, not computed: story ${c.story} at ${c.t.toFixed(2)} s (impact ${c.F_impact.toExponential(1)} N > P_cap ${c.P_cap.toExponential(1)} N).`));
             }
+            if (A.coarsened) rows.push(line('Over the body budget: furniture rides its floor rigidly.'));
             if (A.cap) rows.push(line('Detachment cap reached: the structural solve stopped counting, so this fall is incomplete.'));
             collapseBanner.replaceChildren(...rows);
         }
@@ -5421,6 +5510,9 @@
             get active() { return !!collapseAnim; },
             get bodies() { return collapseAnim ? collapseAnim.sim.bodies.length : 0; },
             get struts() { return collapseAnim ? collapseAnim.sim.struts.length : 0; },
+            get furnitureBodies() { return collapseAnim ? collapseAnim.items.length : 0; },
+            get coarsened() { return collapseAnim ? collapseAnim.coarsened : false; },
+            get budget() { return COLLAPSE_BUDGET[COLLAPSE_MOBILE.matches ? 'mobile' : 'desktop']; },
             get cascades() { return collapseAnim ? collapseAnim.sim.cascades.slice() : []; },
             get animTime() { return animTime; },
             get detachedGroups() { return buildingGroups.filter(g => !g.matrixAutoUpdate).length; },
