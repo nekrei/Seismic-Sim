@@ -1570,6 +1570,43 @@ def evaluate_collapse_criteria(result, building, k_g=None):
     return r.collapse_events
 
 
+# Spec 14: the damage code a viewer sees. `ColumnHysteresis.branch` is the
+# INSTANTANEOUS branch and cycles UNLOAD <-> RELOAD, so it is mapped to a
+# severity and accumulated (damage does not heal). RESIDUAL only occurs from
+# t_fail on (failed_pos/neg trip on the same |delta| > du test as t_fail), so
+# three levels are all the state machine can distinguish.
+DAMAGE_CODES = {0: 'elastic', 1: 'yielded', 2: 'failed'}
+DAMAGE_CODE_OF_BRANCH = np.array([0, 1, 1, 1, 1, 2], dtype=np.uint8)
+# Descriptive FEMA 356 Table C1-3 transient drifts for concrete frames,
+# Immediate Occupancy / Life Safety; CP is the `drift_limit_cp` parameter.
+DRIFT_LIMIT_IO, DRIFT_LIMIT_LS = 0.01, 0.02
+
+
+def accumulated_damage(column_damage, t_fail, dt):
+    """(N, 4, npts) raw branches -> accumulated codes (column, story max).
+
+    Code 2 is forced from each column's `t_fail` sample on, so the failed
+    code and the summary's t_fail can never disagree.
+    """
+    codes = DAMAGE_CODE_OF_BRANCH[column_damage]
+    for i, row in enumerate(t_fail):
+        for j, t in enumerate(row):
+            if t is not None:
+                codes[i, j, int(round(t / dt)):] = 2
+    codes = np.maximum.accumulate(codes, axis=-1)
+    return codes, codes.max(axis=1)
+
+
+def subsample_nearest(arr, q):
+    """Every q-th sample along time, no filter: each value is a real sample.
+
+    Right for categorical codes (a filtered category is meaningless) and for
+    the tangent ratio, which jumps at every branch switch -- an FIR filter
+    would ring those jumps past 1.
+    """
+    return np.ascontiguousarray(arr[..., ::q])
+
+
 class _HFTDConvolution:
     """Modal overlap-save convolution of a trial pseudo-force history.
 

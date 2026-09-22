@@ -28,8 +28,16 @@ from mdof_response import (
     SOFT_STORY_HEIGHT_RATIO, GravityInstabilityError,
     MDOF_Building3N, pair_components, ComponentPairingError,
     tangent_eccentricity, solve_with_detachment, handoff_header,
-    finite_or_none,
+    finite_or_none, furniture_decimation, accumulated_damage,
+    subsample_nearest, DAMAGE_CODES, DAMAGE_CODE_OF_BRANCH,
+    DRIFT_LIMIT_IO, DRIFT_LIMIT_LS,
 )
+
+# Spec 14 A1: optional per-story damage blocks, in WIRE order -- every
+# float32 block before every uint8 block, so the float offsets stay 4-byte
+# aligned; each uint8 block is zero-padded to 4 bytes (pad in the header).
+DAMAGE_BLOCKS = ("story_drift", "story_shear", "stiffness_ratio", "p_nl",
+                 "damage_state", "column_damage")
 
 # Frame-geometry defaults -- MUST match mdof_response.py's __main__
 # COLUMN_DEPTH_X/Y/BEAM_DEPTH constants AND index.html's slider defaults
@@ -163,6 +171,53 @@ def _validate_nonlinear(body):
     return nonlinear,p
 
 
+def _validate_damage_blocks(body):
+    """Spec 14 A2: the subset of DAMAGE_BLOCKS to send, in wire order."""
+    raw = body.get("damage_blocks") or []
+    if not isinstance(raw, list) or any(b not in DAMAGE_BLOCKS for b in raw):
+        raise ParamError(f"damage_blocks must be a list drawn from {list(DAMAGE_BLOCKS)}")
+    return [b for b in DAMAGE_BLOCKS if b in raw]
+
+
+def _damage_payload(results, dt, drift_limit_cp):
+    """Spec 14 blocks for the per-axis HFTDResults: (header dict, arrays).
+
+    drift/shear/p_nl go at the full rate (the hysteresis loop needs true
+    peaks); the tangent ratio and the codes are subsampled nearest-neighbour
+    to ~50 Hz -- no filter, so every transmitted value is a real sample.
+    """
+    q = furniture_decimation(dt)
+    arrays = {name: [] for name in DAMAGE_BLOCKS}
+    backbones = {}
+    for axis, r in results:
+        col, story = accumulated_damage(r.column_damage, r.summary["t_fail"], dt)
+        arrays["story_drift"].append(r.story_drift)
+        arrays["story_shear"].append(r.story_shear)
+        arrays["stiffness_ratio"].append(subsample_nearest(r.k_t_ratio, q))
+        arrays["p_nl"].append(r.p_nl)
+        arrays["damage_state"].append(subsample_nearest(story, q))
+        arrays["column_damage"].append(subsample_nearest(col, q))
+        # Per-column backbone parameters (N x 4), for the viewer's summed
+        # backbone overlay. du is inf on a bilinear backbone -> null.
+        bb = r.backbones
+        backbones[axis] = {k: bb[k].tolist() for k in ("k0", "vy", "dy", "dc", "vr")}
+        backbones[axis]["du"] = [finite_or_none(row) for row in bb["du"]]
+        backbones[axis].update(hardening=bb["params"]["backbone_hardening"],
+                               softening=bb["params"]["backbone_softening"])
+    arrays = {k: np.stack(v).astype(np.float32 if k in DAMAGE_BLOCKS[:4] else np.uint8)
+              for k, v in arrays.items()}
+    header = {
+        "version": 1,
+        "codes": {str(k): v for k, v in DAMAGE_CODES.items()},
+        "raw_branches": ["ELASTIC", "BACKBONE_POS", "BACKBONE_NEG", "UNLOAD", "RELOAD", "RESIDUAL"],
+        "code_of_branch": DAMAGE_CODE_OF_BRANCH.tolist(),
+        "drift_limits": {"IO": DRIFT_LIMIT_IO, "LS": DRIFT_LIMIT_LS, "CP": drift_limit_cp},
+        "axes": [axis for axis, _ in results],
+        "backbones": backbones,
+    }
+    return header, arrays, 1 / dt, 1 / (dt * q)
+
+
 def _validate_params(body, reference_magnitude=6.0):
     """Clamp incoming slider values to sane bounds -- protects against
     pathological compute times or degenerate models, not against malice.
@@ -250,6 +305,7 @@ def compute():
     try:
         p = _validate_params(body, reference_magnitude)
         nonlinear, nonlinear_params = _validate_nonlinear(body)
+        damage_blocks = _validate_damage_blocks(body)
     except (ParamError, ValueError, TypeError, OverflowError) as e:
         # 400, never a silently-truncated profile -- see ParamError.
         return jsonify({"error": "invalid_parameter", "detail": str(e)}), 400
@@ -537,6 +593,27 @@ def compute():
         header['collapse'].update(handoff_header(
             b3 if b3 is not None else building_x,
             None if b3 is not None or not has_y else building_y))
+    # Spec 14 R5: the per-story column depths actually built, echoed only
+    # when a profile was sent, so a no-profile payload stays byte-identical.
+    for axis in ("x", "y"):
+        if isinstance(p[f"column_depth_{axis}"], list):
+            header[f"column_depth_{axis}_per_story"] = p[f"column_depth_{axis}"]
+    # Spec 14: elastic requests never carry blocks -- there is no HFTDResult.
+    damage_arrays = {}
+    if nonlinear and damage_blocks:
+        damage, all_arrays, full_hz, dec_hz = _damage_payload(
+            [("X", building_x.hftd_result)]
+            + ([("Y", building_y.hftd_result)] if has_y else []),
+            dt, nonlinear_params["drift_limit_cp"])
+        damage["blocks"] = []
+        for name in damage_blocks:
+            a = damage_arrays[name] = all_arrays[name]
+            header[f"has_{name}"] = True
+            damage["blocks"].append(dict(
+                name=name, dtype=str(a.dtype), shape=list(a.shape), npts=a.shape[-1],
+                rate_hz=full_hz if a.shape[-1] == len(time_arr) else dec_hz,
+                pad_bytes=(-a.nbytes) % 4))
+        header["damage"] = damage
     # Spec 12 C1. Every new key is emitted ONLY when torsion was requested,
     # so a torsion=false payload is byte-identical to spec 11's, header and
     # pad included (verification check 9, correction V-7) -- not merely
@@ -628,6 +705,11 @@ def compute():
     # floor-major -- after everything else, gated by has_floor_rotation.
     if b3 is not None:
         parts.append(b3.floor_rot.astype(np.float32).tobytes())
+    # Spec 14: the requested damage blocks, already in wire order (float32
+    # first, then uint8, each uint8 block zero-padded to 4 bytes).
+    for a in damage_arrays.values():
+        parts.append(a.tobytes())
+        parts.append(b"\x00" * ((-a.nbytes) % 4))
 
     return Response(b"".join(parts), mimetype="application/octet-stream")
 
