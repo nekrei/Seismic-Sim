@@ -244,6 +244,19 @@
 
         .seek-row { display: flex; align-items: center; gap: 8px; }
         .seek-row .panel-value { min-width: 82px; }
+        /* Spec 14 C7. A marker at time t sits where the thumb CENTRE sits at
+           t: the thumb travels (100% - thumb width), offset by half a thumb. */
+        .seek-track { --thumb: 16px; position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+        #controls .seek-track input[type="range"] { width: 100%; flex: none; }
+        .seek-markers { position: relative; height: 0; }
+        .seek-markers span {
+            position: absolute; top: 3px; width: 3px; height: 8px; border-radius: 1px;
+            left: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--f));
+            transform: translateX(-50%); cursor: pointer;
+        }
+        .seek-markers .onset { background: #ffb347; }
+        .seek-markers .detach { background: #ff4d4d; height: 10px; }
+        @media (max-width: 600px) { .seek-track { --thumb: 22px; } }
 
         .intensity-track {
             flex: 1;
@@ -1018,7 +1031,12 @@
                     </div>
                 </div>
                 <div class="seek-row">
-                    <input type="range" id="seekSlider" min="0" max="1" step="0.001" value="0" />
+                    <!-- Spec 14 C7: collapse markers ride under the seek track
+                         itself -- no second timeline widget. -->
+                    <div class="seek-track">
+                        <input type="range" id="seekSlider" min="0" max="1" step="0.001" value="0" />
+                        <div class="seek-markers" id="seekMarkers"></div>
+                    </div>
                     <span class="panel-value" id="timeDisplay">0.0s / 0.0s</span>
                 </div>
                 <div class="ctrl-row">
@@ -1162,6 +1180,13 @@
                     <label class="panel-label" for="torsionToggle">Torsion in collapse</label>
                     <input type="checkbox" id="torsionToggle" />
                     <span class="panel-value" id="torsionLabel">off</span>
+                </div>
+                <!-- Spec 14 C8: the held elastic response of the same
+                     building, drawn as slab outlines beside the collapse run. -->
+                <div class="ctrl-row">
+                    <label class="panel-label" for="ghostToggle">Elastic ghost</label>
+                    <input type="checkbox" id="ghostToggle" checked />
+                    <span class="panel-value" id="ghostLabel">—</span>
                 </div>
                 <!-- Spec 14 Part F. Intensity scales the ground motion for the
                      collapse solve only (sent as intensity_scale). The weak
@@ -1355,6 +1380,7 @@
         const MAP_MAX_DEPTH_KM = 100; // matches epicenterDepthSlider's max
         const EPICENTER_MAX_RADIUS_PCT = 42; // keeps the (fixed-size) dot's own box inside the circle at max distance
         const seekSlider = document.getElementById('seekSlider');
+        const seekMarkers = document.getElementById('seekMarkers');
         const timeDisplay = document.getElementById('timeDisplay');
         const progressEl = document.getElementById('progress');
         const intensityFill = document.getElementById('intensityFill');
@@ -1398,6 +1424,8 @@
         const weakDepthSlider = document.getElementById('weakDepthSlider');
         const weakDepthLabel = document.getElementById('weakDepthLabel');
         const loadDemoBtn = document.getElementById('loadDemoBtn');
+        const ghostToggle = document.getElementById('ghostToggle');
+        const ghostLabel = document.getElementById('ghostLabel');
         const collapseReadout = document.getElementById('collapseReadout');
         const damageLegend = document.getElementById('damageLegend');
         const damageLegendBar = document.getElementById('damageLegendBar');
@@ -1637,6 +1665,7 @@
         let hingeInstances = null, crackInstances = null; // spec 14 C3/C4: 2 per column (bottom, top end)
         let beamMats = [];          // spec 14 C1: one beam material per floor (userData.base = its own colour)
         let damageView = null;      // spec 14: per-load lookups derived from damageData (see prepareDamageView)
+        let ghostFloors = [];       // spec 14 C8: elastic-ghost slab outlines, one per floor
         let lightSphere = null;
         let foundationSlab = null;
         let timeData = [];
@@ -2351,6 +2380,25 @@
             lines.push('Structural solve; the fall is not animated yet.');
             return lines;
         }
+
+        // C7: seek-slider markers. Every onset (0-based t_collapse index ->
+        // 1-based story) and every detachment (already 1-based), with the
+        // tooltip text naming the story and what tripped.
+        function timelineMarkers(c) {
+            if (!c?.converged) return [];
+            const out = [];
+            for (const ax of ['X', 'Y']) {
+                (c.axes?.[ax]?.t_collapse || []).forEach((t, i) => {
+                    if (t != null) out.push({ t, kind: 'onset', story: i + 1,
+                        title: `Onset · story ${i + 1} · axis ${ax} · ${c.axes[ax].collapse_criterion?.[i] ?? '?'} · ${t.toFixed(2)} s` });
+                });
+            }
+            for (const e of c.detachment_events || []) {
+                out.push({ t: e.t_detach, kind: 'detach', story: e.story,
+                    title: `Detachment · story ${e.story} · axis ${e.axis} · ${e.criterion} · ${e.t_detach.toFixed(2)} s` });
+            }
+            return out.sort((p, q) => p.t - q.t);
+        }
         // ---8<--- COLLAPSE-HELPERS-END
 
         // ---8<--- COLUMN-HELPERS-BEGIN
@@ -2700,6 +2748,19 @@
             scene.add(columnInstances);
             sceneObjects.push(columnInstances);
 
+            // Spec 14 C8: elastic-ghost slab outlines, one per floor, at scene
+            // top level (moved by updateGhost, hidden unless a ghost applies).
+            const ghostGeo = new THREE.EdgesGeometry(slabGeo);
+            const ghostMat = new THREE.LineBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.55, depthWrite: false });
+            ghostFloors = levels.y.slice(0, numFloors).map(y => {
+                const g = new THREE.LineSegments(ghostGeo, ghostMat);
+                g.position.y = y;
+                g.visible = false;
+                scene.add(g);
+                sceneObjects.push(g);
+                return g;
+            });
+
             // Spec 14 C3/C4: two hinge markers and two crack bands per column
             // (bottom end, top end), hidden (zero scale) until a collapse run's
             // data turns them on. Emissive materials, never lights: spec 4
@@ -2879,6 +2940,27 @@
                 damageLegendKey = key;
                 damageLegendNow.textContent = `Max story drift now: ${(maxRatio * 100).toFixed(2)} % (story ${maxStory + 1})`;
             }
+        }
+
+        // Spec 14 C7: onset/detachment ticks under the seek track (times
+        // straight from header.collapse; the 0-based -> 1-based story
+        // conversion lives in timelineMarkers). Hover names the story and
+        // criterion; a click seeks there.
+        function renderSeekMarkers(collapse) {
+            seekMarkers.replaceChildren(...timelineMarkers(collapse)
+                .filter(m => totalDuration > 0 && m.t <= totalDuration)
+                .map(m => {
+                    const el = document.createElement('span');
+                    el.className = m.kind;
+                    el.title = m.title;
+                    el.style.setProperty('--f', String(m.t / totalDuration));
+                    el.addEventListener('click', () => {
+                        seekSlider.value = m.t;
+                        seekSlider.dispatchEvent(new Event('input'));
+                        seekSlider.dispatchEvent(new Event('change'));
+                    });
+                    return el;
+                }));
         }
 
         // Legend marks at IO/LS/CP along a bar whose right end is CP.
@@ -3970,6 +4052,7 @@
                     referenceMagnitude: meta.reference_magnitude,
                     groundAccel: groundAccelFile,
                 });
+                holdElastic(folder, floorX, floorY, time); // spec 14 C8
                 progressEl.style.display = 'none';
                 console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
             } catch (err) {
@@ -4233,6 +4316,7 @@
             totalDuration = timeData[timeData.length - 1] - timeData[0];
             animTime = 0;
             currentIndex = 0;
+            renderSeekMarkers(collapseData); // spec 14 C7 -- empty unless a converged collapse run
 
             // Peak ground displacement (not floor -- this is about the raw
             // input shaking, not the building's response) drives the
@@ -4396,39 +4480,8 @@
             liveAbortController = new AbortController();
             const { signal } = liveAbortController;
 
-            const params = {
-                record: folder,
-                num_stories: parseInt(storiesSlider.value, 10),
-                mass_per_floor: parseFloat(massSlider.value),
-                zeta: parseFloat(zetaSlider.value),
-                column_depth_x: parseFloat(columnXSlider.value),
-                column_depth_y: parseFloat(columnYSlider.value),
-                beam_depth: parseFloat(beamSlider.value),
-                area_sqft: parseFloat(areaSlider.value),
-                soft_ground_story: softGroundStoryToggle.checked,
-                epicenter_distance_km: parseFloat(epicenterDistanceSlider.value),
-                epicenter_depth_km: parseFloat(epicenterDepthSlider.value),
-            };
-            // Spec 14 F2 / R5: a weak story is part of the building, so it is
-            // sent on elastic and collapse requests alike (the elastic ghost
-            // must be the same building). "none" sends no profile at all.
-            const weakStory = parseInt(weakStorySelect.value, 10);
-            const weakDepth = parseFloat(weakDepthSlider.value);
-            const profileX = weakStoryProfile(params.num_stories, weakStory, params.column_depth_x, weakDepth);
-            if (profileX) {
-                params.column_depth_x_profile = profileX;
-                params.column_depth_y_profile = weakStoryProfile(params.num_stories, weakStory, params.column_depth_y, weakDepth);
-            }
-            // Only send a magnitude once we know which record it belongs to.
-            // On a record switch currentReferenceMagnitude is null and the
-            // slider still holds the OUTGOING record's value -- sending that
-            // reshapes the incoming record to the wrong Richter magnitude
-            // (see folderSelect's handler). Omitting the field lets
-            // server.py fall back to this record's own reference_magnitude,
-            // which is exactly the identity transform we want.
-            if (currentReferenceMagnitude != null) {
-                params.richter_magnitude = parseFloat(richterSlider.value);
-            }
+            const params = requestParams(folder);
+            const buildingKey = elasticBuildingKey(params);
 
             // Loading overlay (spec 4, Part H) -- shown for the duration of
             // the in-flight request, hidden once applyLoadedData() has run
@@ -4613,6 +4666,8 @@
                     damage,
                     collapse: nonlinear ? header.collapse : null,
                 }, autoScaleAmplify);
+                if (nonlinear) attachGhost(buildingKey, params.intensity_scale);
+                else holdElastic(folder, floorX, floorY, time);
                 recomputeOverlay.classList.remove('is-active');
                 snapshotBuildingParams();
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
@@ -4632,6 +4687,82 @@
                     stopElapsed();
                 }
             }
+        }
+
+        // The building + earthquake part of a /compute request (everything
+        // but the collapse-only fields). Shared by liveRecompute and the
+        // elastic-ghost key (spec 14 C8).
+        function requestParams(folder) {
+            const params = {
+                record: folder,
+                num_stories: parseInt(storiesSlider.value, 10),
+                mass_per_floor: parseFloat(massSlider.value),
+                zeta: parseFloat(zetaSlider.value),
+                column_depth_x: parseFloat(columnXSlider.value),
+                column_depth_y: parseFloat(columnYSlider.value),
+                beam_depth: parseFloat(beamSlider.value),
+                area_sqft: parseFloat(areaSlider.value),
+                soft_ground_story: softGroundStoryToggle.checked,
+                epicenter_distance_km: parseFloat(epicenterDistanceSlider.value),
+                epicenter_depth_km: parseFloat(epicenterDepthSlider.value),
+            };
+            // Spec 14 F2 / R5: a weak story is part of the building, so it is
+            // sent on elastic and collapse requests alike (the elastic ghost
+            // must be the same building). "none" sends no profile at all.
+            const weakStory = parseInt(weakStorySelect.value, 10);
+            const weakDepth = parseFloat(weakDepthSlider.value);
+            const profileX = weakStoryProfile(params.num_stories, weakStory, params.column_depth_x, weakDepth);
+            if (profileX) {
+                params.column_depth_x_profile = profileX;
+                params.column_depth_y_profile = weakStoryProfile(params.num_stories, weakStory, params.column_depth_y, weakDepth);
+            }
+            // Only send a magnitude once we know which record it belongs to.
+            // On a record switch currentReferenceMagnitude is null and the
+            // slider still holds the OUTGOING record's value -- sending that
+            // reshapes the incoming record to the wrong Richter magnitude
+            // (see folderSelect's handler). Omitting the field lets
+            // server.py fall back to this record's own reference_magnitude,
+            // which is exactly the identity transform we want.
+            if (currentReferenceMagnitude != null) {
+                params.richter_magnitude = parseFloat(richterSlider.value);
+            }
+            return params;
+        }
+
+        // --- Spec 14 C8: elastic-vs-nonlinear ghost ---
+        // The elastic response the viewer already holds, re-used (no second
+        // request). An elastic system is LINEAR, so the elastic response to
+        // the collapse run's ground motion (x intensity) is exactly the held
+        // one times the intensity -- R6, and labelled that way. It is shown
+        // only when the held response is of the SAME building and quake.
+        function elasticBuildingKey(params) {
+            return JSON.stringify({ ...params, richter_magnitude: parseFloat(richterSlider.value) });
+        }
+        let elasticHeld = null;  // {key, floorX, floorY, dt} of the last elastic load
+        let ghostSource = null;  // elasticHeld + {scale} while a matching collapse run is shown
+        function holdElastic(folder, floorX, floorY, time) {
+            elasticHeld = { key: elasticBuildingKey(requestParams(folder)), floorX, floorY, dt: (time[1] - time[0]) || 0.01 };
+            ghostSource = null;
+            updateGhostLabel(false);
+        }
+        function attachGhost(buildingKey, intensity) {
+            ghostSource = elasticHeld?.key === buildingKey ? { ...elasticHeld, scale: intensity } : null;
+            updateGhostLabel(true);
+        }
+        function updateGhostLabel(collapseShown) {
+            ghostLabel.textContent = ghostSource
+                ? (ghostToggle.checked ? `elastic × ${ghostSource.scale} (linear)` : 'off')
+                : collapseShown ? 'no elastic run of this building' : '—';
+        }
+        function updateGhost(scale) {
+            const on = !!ghostSource && ghostToggle.checked;
+            ghostFloors.forEach((g, f) => {
+                g.visible = on;
+                if (!on) return;
+                const k = Math.min(ghostSource.floorX[f].length - 1, Math.floor(animTime / ghostSource.dt)); // by time
+                g.position.x = ghostSource.floorX[f][k] * ghostSource.scale * scale;
+                g.position.z = ghostSource.floorY[f][k] * ghostSource.scale * scale;
+            });
         }
 
         // Spec 14 F6: collapse runs take up to minutes, so the overlay counts
@@ -4883,6 +5014,7 @@
             // updateColumnTransforms()'s docstring.
             updateColumnTransforms();
             updateDamageVisuals(idx); // spec 14 Part C -- no-op without a collapse run's blocks
+            updateGhost(scale);       // spec 14 C8 -- same display gain as the real floors
 
             // Furniture's OWN relative-sway offset (spec B), on top of
             // whatever rigid motion it already inherits from its parent
@@ -5212,6 +5344,7 @@
             intensityLabel.textContent = formatIntensity();
             invalidateCollapseCache();
         });
+        ghostToggle.addEventListener('change', () => updateGhostLabel(!!collapseData));
         // The weak story changes the building, so the elastic view follows.
         weakStorySelect.addEventListener('change', () => scheduleLiveRecompute());
         weakDepthSlider.addEventListener('input', (e) => {
