@@ -2902,3 +2902,19 @@ behaviour was confirmed identical at `ab06d2c`, at `main` and at HEAD.
 - **specs/COURSE-CONCEPTS.md:** row 13 "Delivered".
 - **Check 12:** `verify_handoff.py 12` PASS. The Part B sentence is
   verbatim in README and in the PDF text (whitespace-normalised search).
+
+## Spec 14 — damage visualization + collapse scenario controls
+
+### Task 0 — worktree, spec numbers, baseline fixtures (2026-09-22)
+
+- Worktree `.worktrees/goal-14-damage-visualization`, branch
+  `goal/14-damage-visualization` off `main` @ `4cfbca3`.
+- Spec 14 gains Correction C-6: the F4 demo re-measured on `main` (onset
+  35.50 s X / 35.82 s Y, story index 2, gravity; story 3 detaches 80.54 s,
+  axis X; 3 iterations; ~51 s; 2.21 MB).
+- Pre-spec-14 `/compute` payloads captured by
+  `claude_scripts/make_pre_spec14_fixtures.py` into
+  `claude_scripts/fixtures/pre_spec14_{elastic,nonlinear,torsion}.bin`
+  (3 900 208 / 1 766 744 / 2 032 616 bytes; params in
+  `pre_spec14_params.json`). Check 1's byte-identity reference; the script
+  refuses to overwrite them.
