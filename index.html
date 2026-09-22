@@ -477,6 +477,25 @@
             transition: transform 0.35s ease;
         }
         .toast.is-shown { transform: translateX(0); }
+        /* Spec 15: the honesty banner, up from the first body activation. */
+        .collapse-banner {
+            position: fixed; left: 50%; top: 16px; z-index: 12;
+            width: min(520px, calc(100vw - 32px));
+            padding: 10px 14px; border-radius: 10px;
+            background: rgba(11, 11, 26, 0.85); backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 179, 71, 0.35);
+            color: rgba(255,255,255,0.72); font-size: 0.78rem; line-height: 1.45;
+            pointer-events: none; opacity: 0; transform: translate(-50%, -6px);
+            transition: opacity 200ms cubic-bezier(0.23, 1, 0.32, 1), transform 200ms cubic-bezier(0.23, 1, 0.32, 1);
+        }
+        .collapse-banner.is-shown { opacity: 1; transform: translate(-50%, 0); }
+        .collapse-banner strong { color: #ffd08a; font-weight: 600; }
+        .collapse-banner .cb-line { margin-top: 3px; }
+        @media (max-width: 600px) { .collapse-banner { top: 12px; font-size: 0.72rem; } }
+        @media (prefers-reduced-motion: reduce) {
+            .collapse-banner, .collapse-banner.is-shown { transform: translate(-50%, 0); transition: opacity 200ms ease; }
+        }
+        .drawer-note { color: #ffd08a; }
         .recompute-stack {
             display: flex;
             flex-direction: column-reverse;
@@ -996,6 +1015,7 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <div class="collapse-banner" id="collapseBanner" role="status" aria-live="polite"></div>
 
     <div id="controls">
         <!-- Collapsed strip: only shown/used under the mobile bottom-sheet
@@ -1286,6 +1306,7 @@
             <div>
                 <div class="panel-header">Signals</div>
                 <div class="drawer-subtitle" id="analysisSubtitle">ground motion in, floor motion out</div>
+                <div class="drawer-subtitle drawer-note" id="analysisCollapseNote" hidden>plots the structural solution, not the animation</div>
             </div>
             <button class="drawer-close-btn" id="analysisCloseBtn" aria-label="Close signals panel">✕</button>
         </div>
@@ -1348,7 +1369,8 @@
         {
             "imports": {
                 "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "@dimforge/rapier3d-compat": "https://unpkg.com/@dimforge/rapier3d-deterministic-compat@0.20.0/dist/rapier.mjs"
             }
         }
     </script>
@@ -2377,7 +2399,9 @@
                 lines.push(`Story ${e.story} detached at ${e.t_detach.toFixed(2)} s (axis ${e.axis}) — ${floors} no longer structural`);
             }
             if (c.cap_reached) lines.push('Detachment cap reached; later failures are not solved.');
-            lines.push('Structural solve; the fall is not animated yet.');
+            lines.push(c.detachment_events?.length
+                ? 'Structural solve up to each detachment; the fall after it is a rigid-body animation (see the banner).'
+                : 'Structural solve; nothing detached, so nothing is animated.');
             return lines;
         }
 
@@ -3021,6 +3045,8 @@
         }
         // ---8<--- COLLAPSE-PHYSICS-END
 
+        // Scene units between a story's top and the next slab: floorLevels(h, gap).
+        const FLOOR_RENDER_GAP = 0.04;
         function createBuilding(numFloors, storyHeights, frame, folderName) {
             for (const obj of sceneObjects) scene.remove(obj);
             sceneObjects = [];
@@ -3042,7 +3068,7 @@
             // relationship is inverted here: scale fixed, footprint varies.
             const width = frame.planSpanX * SCENE_UNITS_PER_METRE,
                 depth = frame.planSpanY * SCENE_UNITS_PER_METRE,
-                gap = 0.04;
+                gap = FLOOR_RENDER_GAP;
             // Per-floor story heights (spec 10, C1/C3). `storyHeights` is a
             // scalar or a length-numFloors array; a uniform one reproduces
             // the old single-height placement bit-for-bit -- see floorLevels().
@@ -3286,7 +3312,22 @@
                 };
             }
             const g = buildingGroups[source.index];
-            return { x: g.position.x, y: g.position.y, z: g.position.z, yaw: g.rotation.y };
+            return { x: g.position.x, y: g.position.y, z: g.position.z, yaw: g.rotation.y,
+                     m: g.matrixAutoUpdate ? null : g.matrix };
+        }
+        const _collapseEnd = new THREE.Vector3();
+        function matrixEndpoint(m, cx, cz) {
+            _collapseEnd.set(cx, 0, cz).applyMatrix4(m);
+            return { x: _collapseEnd.x, y: _collapseEnd.y, z: _collapseEnd.z };
+        }
+
+        function straightSegment(b, t, k, S) {
+            const u = k / S, v = (k + 1) / S;
+            const dx = (t.x - b.x) / S, dy = (t.y - b.y) / S, dz = (t.z - b.z) / S;
+            return {
+                px: b.x + (t.x - b.x) * (u + v) / 2, py: b.y + (t.y - b.y) * (u + v) / 2, pz: b.z + (t.z - b.z) * (u + v) / 2,
+                length: Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6, dx, dy, dz,
+            };
         }
 
         // Spec 14 Part B: every column is COLUMN_SEGMENTS instances of one
@@ -3296,8 +3337,9 @@
             let i = 0;
             for (const c of columnDefs) {
                 const lb = sourceWorldPos(c.bottomSource), lt = sourceWorldPos(c.topSource);
-                const b = columnEndpoint(lb, c.cornerX, c.cornerZ);
-                const t = columnEndpoint(lt, c.cornerX, c.cornerZ);
+                const b = lb.m ? matrixEndpoint(lb.m, c.cornerX, c.cornerZ) : columnEndpoint(lb, c.cornerX, c.cornerZ);
+                const t = lt.m ? matrixEndpoint(lt.m, c.cornerX, c.cornerZ) : columnEndpoint(lt, c.cornerX, c.cornerZ);
+                const straight = !!(lb.m || lt.m);
                 // A rectangular section turns with the floors it joins; the
                 // mean of its two ends' yaw keeps its faces flush with both
                 // slab corners. Skipped at zero so the untwisted path is the
@@ -3305,7 +3347,7 @@
                 const twist = (lb.yaw + lt.yaw) / 2;
                 c.b = b; c.t = t; // this frame's end points, reused by the hinge/crack markers
                 for (let k = 0; k < COLUMN_SEGMENTS; k++, i++) {
-                    const s = segmentTransform(b, t, k, COLUMN_SEGMENTS);
+                    const s = straight ? straightSegment(b, t, k, COLUMN_SEGMENTS) : segmentTransform(b, t, k, COLUMN_SEGMENTS);
                     _segPos.set(s.px, s.py, s.pz);
                     _segScale.set(c.thicknessX, s.length, c.thicknessZ);
                     _dirVec.set(s.dx, s.dy, s.dz).normalize();
@@ -3511,6 +3553,10 @@
         // how hard the current quake is being shown -- they did before,
         // which is why furniture looked either frozen or pinned.
         function swayDisplayGain() {
+            // Spec 15 R3: a detaching payload is drawn at TRUE scale (gain =
+            // SCENE_UNITS_PER_METRE). Exaggerated sway would draw a falling
+            // block metres off the stump it is physically landing on.
+            if (collapseData?.detachment_events?.length) return SCENE_UNITS_PER_METRE;
             const physicalPeak = currentPeakDisp * amplify;
             const baseline = swayBaseline;
             const maxPeak = currentTotalHeight > 0
@@ -4770,6 +4816,10 @@
             animTime = 0;
             currentIndex = 0;
             renderSeekMarkers(collapseData); // spec 14 C7 -- empty unless a converged collapse run
+            // Spec 15 Part C: a stale buffer surviving a load would drop the
+            // WRONG building. Discard first, always; then build for this one.
+            discardCollapseAnimation();
+            if (collapseData?.detachment_events?.length && extra.collapseHeader) startCollapseAnimation(extra.collapseHeader);
 
             // Peak ground displacement (not floor -- this is about the raw
             // input shaking, not the building's response) drives the
@@ -4917,6 +4967,7 @@
         let collapseCache = null;
         function invalidateCollapseCache() {
             collapseCache = null;
+            discardCollapseAnimation();
             renderCollapseReadout(null);
             if (liveAbortController) liveAbortController.abort();
             runCollapseBtn.disabled = false;
@@ -5118,6 +5169,7 @@
                     floorRot,
                     damage,
                     collapse: nonlinear ? header.collapse : null,
+                    collapseHeader: nonlinear ? header : null,
                 }, autoScaleAmplify);
                 if (nonlinear) attachGhost(buildingKey, params.intensity_scale);
                 else holdElastic(folder, floorX, floorY, time);
@@ -5245,6 +5297,134 @@
                 return div;
             }));
         }
+
+        // --- Spec 15: the collapse animation ---
+        // Built ONCE per detaching payload into a keyframe buffer (the engine
+        // runs at a fixed step, in chunks, behind the recompute overlay), then
+        // the world is freed: playback and scrubbing only read the buffer.
+        let collapseAnim = null;
+        let collapseBuildToken = 0;
+        const _collapseMat = new THREE.Matrix4();
+        const collapseBanner = document.getElementById('collapseBanner');
+        const analysisCollapseNote = document.getElementById('analysisCollapseNote');
+
+        function discardCollapseAnimation() {
+            collapseBuildToken++;   // abandons an in-flight build
+            collapseAnim = null;
+            for (const g of buildingGroups) g.matrixAutoUpdate = true;
+            collapseBanner.classList.remove('is-shown');
+            collapseBanner.replaceChildren();
+            analysisCollapseNote.hidden = true;
+        }
+
+        async function startCollapseAnimation(header) {
+            const token = ++collapseBuildToken;
+            let events, model;
+            try {
+                events = readHandoff(header.collapse);
+                model = collapseModel(header, events, FLOOR_RENDER_GAP);
+            } catch (err) {
+                showRecomputeError(`Collapse animation unavailable: ${err.message}. The detached floors hold.`);
+                return;
+            }
+            analysisCollapseNote.hidden = false;
+            const track = { time: timeData, groundX: groundXData, groundY: groundYData,
+                            floorX: floorXData, floorY: floorYData, floorTheta: floorRotData };
+            let RAPIER;
+            try {
+                RAPIER = (await import('@dimforge/rapier3d-compat')).default;
+                await RAPIER.init();
+            } catch (err) {
+                if (token !== collapseBuildToken) return;
+                showRecomputeError(`Could not load the physics engine (${err.message}). The detached floors hold.`);
+                return;
+            }
+            if (token !== collapseBuildToken) return;
+            // After the first await: the recompute path hides the overlay
+            // as soon as applyLoadedData() returns.
+            recomputeText.textContent = 'Simulating collapse';
+            recomputeOverlay.classList.add('is-active');
+            const sim = buildCollapseSim(RAPIER, model, events, track);
+            // Chunked so the page never freezes; the result does not depend
+            // on the chunk size (check 3), so yielding by timer is safe.
+            while (!sim.step(200)) {
+                recomputeElapsed.textContent = ` ${Math.round(sim.progress * 100)}%`;
+                await new Promise(r => setTimeout(r, 0));
+                if (token !== collapseBuildToken) { sim.world.free(); return; }
+            }
+            sim.world.free();
+            const dt = (timeData[1] - timeData[0]) || 0.01;
+            const floors = [];
+            for (const rec of sim.bodies) {
+                // Body CM at activation in scene units: plan at true scale,
+                // height lifted by the render gap the physics world omits.
+                const lift = rec.floors.reduce((a, f) => a + model.levelsScene[f] - model.levelsM[f], 0) / rec.floors.length;
+                rec.pivot = [rec.p0[0] * SCENE_UNITS_PER_METRE, rec.p0[1] + lift, rec.p0[2] * SCENE_UNITS_PER_METRE];
+                const idxAct = Math.min(Math.round(rec.tAct / dt), totalFrames - 1);
+                for (const f of rec.floors) floors.push({ f, rec, idxAct });
+            }
+            collapseAnim = { sim, events, floors, tFirst: sim.bodies[0].tAct, cap: !!header.collapse.cap_reached };
+            renderCollapseBanner();
+            recomputeElapsed.textContent = '';
+            recomputeOverlay.classList.remove('is-active');
+        }
+
+        // Per frame: each floor a body carries is drawn at its activation-
+        // time pose (held data, or the stump sample a cascade released it
+        // from), carried by D = S.[R|p].S^-1 from the buffer. Before its
+        // activation it stays on the ordinary kinematic path, untouched.
+        function applyCollapseFloors(scale) {
+            const A = collapseAnim;
+            if (!A) return;
+            for (const { f, rec, idxAct } of A.floors) {
+                const g = buildingGroups[f];
+                if (!g) continue;
+                const sample = sampleBody(A.sim, rec, animTime);
+                if (!sample) { g.matrixAutoUpdate = true; continue; }
+                g.position.x = (floorXData[f]?.[idxAct] || 0) * scale;
+                g.position.z = (floorYData[f]?.[idxAct] || 0) * scale;
+                g.rotation.y = floorRotData ? displayYaw(floorRotData[f]?.[idxAct] || 0, scale, SCENE_UNITS_PER_METRE) : 0;
+                g.updateMatrix();
+                g.matrix.premultiply(_collapseMat.fromArray(displayMatrix(rec, sample, rec.pivot, SCENE_UNITS_PER_METRE)));
+                g.matrixAutoUpdate = false;
+            }
+            collapseBanner.classList.toggle('is-shown', animTime >= A.tFirst - A.sim.dt / 2);
+        }
+
+        // Spec 13 Part B's sentence, the assumed parameters with their
+        // values, then the computed events and the animated cascades --
+        // each from its own list, never merged (check 5).
+        function renderCollapseBanner() {
+            const A = collapseAnim, P = COLLAPSE_PHYS;
+            const line = (text, strong) => {
+                const d = document.createElement('div');
+                d.className = 'cb-line';
+                if (strong) { const b = document.createElement('strong'); b.textContent = text; d.append(b); } else d.textContent = text;
+                return d;
+            };
+            const rows = [
+                line('Post-failure rigid-body model with assumed contact parameters — not a solution of the structural equations of motion.', true),
+                line(`Assumed: restitution ${P.RESTITUTION} · friction ${P.FRICTION} · impact duration ${P.CONTACT_DT} s · hinge moment decay τ ${P.HINGE_TAU} s · strut density ${P.STRUT_DENSITY} kg/m³. Drawn at true scale.`),
+            ];
+            for (const e of A.events) {
+                rows.push(line(`Computed: story ${e.story} detached at ${e.t_detach.toFixed(2)} s (axis ${e.axis}, toward ${e.direction < 0 ? '−' : '+'}${e.axis.toLowerCase()}).`));
+            }
+            for (const c of A.sim.cascades) {
+                rows.push(line(`Animated cascade, not computed: story ${c.story} at ${c.t.toFixed(2)} s (impact ${c.F_impact.toExponential(1)} N > P_cap ${c.P_cap.toExponential(1)} N).`));
+            }
+            if (A.cap) rows.push(line('Detachment cap reached: the structural solve stopped counting, so this fall is incomplete.'));
+            collapseBanner.replaceChildren(...rows);
+        }
+
+        // Read-only probe for the reset/budget checks (spec 15 checks 6, 8).
+        window.__collapseDebug = {
+            get active() { return !!collapseAnim; },
+            get bodies() { return collapseAnim ? collapseAnim.sim.bodies.length : 0; },
+            get struts() { return collapseAnim ? collapseAnim.sim.struts.length : 0; },
+            get cascades() { return collapseAnim ? collapseAnim.sim.cascades.slice() : []; },
+            get animTime() { return animTime; },
+            get detachedGroups() { return buildingGroups.filter(g => !g.matrixAutoUpdate).length; },
+        };
 
         // Gravity-instability / bad-parameter message on the recompute
         // overlay (spec 10, B3). The overlay stays up in its error state
@@ -5460,6 +5640,8 @@
                     ? displayYaw(floorRotData[f]?.[idx] || 0, scale, SCENE_UNITS_PER_METRE)
                     : 0;
             }
+
+            applyCollapseFloors(scale); // spec 15: detached floors from the keyframe buffer (no-op otherwise)
 
             // Columns span two differently-displaced levels, so their
             // transforms are re-derived every frame from the floor groups'
