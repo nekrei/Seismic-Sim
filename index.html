@@ -826,7 +826,7 @@
             flex: 1;
             min-height: 340px;
         }
-        #spectrumCanvas, #timeCanvas {
+        #spectrumCanvas, #timeCanvas, #hysteresisCanvas {
             width: 100%;
             height: 100%;
             display: block;
@@ -952,7 +952,7 @@
         }
 
         @media (prefers-reduced-motion: reduce) {
-            #analysisDrawer, #analysisToggleBtn, #spectrumCanvas, #timeCanvas,
+            #analysisDrawer, #analysisToggleBtn, #spectrumCanvas, #timeCanvas, #hysteresisCanvas,
             .tab-pane, .tab-strip button { transition-duration: 1ms; }
             .tab-pane { transform: none; }
         }
@@ -1272,6 +1272,7 @@
             <div class="tab-strip" id="analysisTabStrip" role="tablist">
                 <button type="button" role="tab" data-tab="time" class="active" aria-selected="true">Time</button>
                 <button type="button" role="tab" data-tab="frequency" aria-selected="false">Frequency</button>
+                <button type="button" role="tab" data-tab="hysteresis" aria-selected="false">Hysteresis</button>
             </div>
             <div class="ctrl-row">
                 <span class="panel-label">Floor</span>
@@ -1301,6 +1302,17 @@
                     <div class="spectrum-sampling-note" id="spectrumSamplingNote"></div>
                     <div class="spectrum-disabled-note" id="spectrumDisabledNote">
                         Frequency-domain data isn't available for this record/axis yet.
+                    </div>
+                </div>
+                <!-- Spec 14 C6: story shear vs story drift of the story BELOW
+                     the selected floor, from a collapse run's blocks. -->
+                <div class="tab-pane" id="hysteresisPane" role="tabpanel">
+                    <div class="spectrum-canvas-wrap">
+                        <canvas id="hysteresisCanvas"></canvas>
+                    </div>
+                    <div class="spectrum-sampling-note" id="hysteresisNote"></div>
+                    <div class="spectrum-disabled-note" id="hysteresisDisabledNote">
+                        Run a collapse analysis to see the story's hysteresis loop.
                     </div>
                 </div>
             </div>
@@ -1407,6 +1419,10 @@
         const analysisTabStrip = document.getElementById('analysisTabStrip');
         const timePane = document.getElementById('timePane');
         const frequencyPane = document.getElementById('frequencyPane');
+        const hysteresisPane = document.getElementById('hysteresisPane');
+        const hysteresisCanvas = document.getElementById('hysteresisCanvas');
+        const hysteresisNote = document.getElementById('hysteresisNote');
+        const hysteresisDisabledNote = document.getElementById('hysteresisDisabledNote');
         const timeCanvas = document.getElementById('timeCanvas');
         const timeSamplingNote = document.getElementById('timeSamplingNote');
         const timeDisabledNote = document.getElementById('timeDisabledNote');
@@ -2429,6 +2445,80 @@
             return DRIFT_RAMP_STOPS[k].map((v, i) => v + (DRIFT_RAMP_STOPS[k + 1][i] - v) * f);
         }
         // ---8<--- DAMAGE-HELPERS-END
+
+        // ---8<--- HYSTERESIS-HELPERS-BEGIN
+        // Spec 14 C6: story shear V_i vs story drift delta_i. Its own sentinel
+        // block, extracted by claude_scripts/check_hysteresis_panel.mjs.
+        //
+        // COST MODEL -- why this is a POLYLINE, not spec 9's per-pixel-column
+        // envelope: a hysteresis loop is a parametric curve (delta(t), V(t)),
+        // not a function of one axis, so an envelope over x is undefined for
+        // it -- "optimising" it into the Time tab's mechanism would silently
+        // destroy the loop. The budget comes instead from (a) a static ghost
+        // of the whole loop + backbone, rendered once to an offscreen canvas
+        // and rebuilt only on load / floor / axis / resize, and (b) a trail
+        // of at most maxPts exact samples drawn per frame.
+
+        // Exact sample indices up to the playhead, evenly strided back from
+        // it, so the latest sample is always drawn and nothing is interpolated.
+        function selectTrail(n, playIdx, maxPts = 2000) {
+            const last = Math.min(playIdx, n - 1);
+            const stride = Math.max(1, Math.ceil((last + 1) / maxPts));
+            const out = [];
+            for (let i = last; i >= 0 && out.length < maxPts; i -= stride) out.push(i);
+            return out.reverse();
+        }
+
+        // Printed numbers: whole-run peaks, and the work done on the story
+        // so far, W = integral of V d(delta) (trapezoid), which grows as the
+        // loop opens. Printed because a self-normalised loop looks the same
+        // under any flat gain (spec 7's invisible-slider trap, third time).
+        // ponytail: O(playIdx) per frame (~0.1 ms at 30k samples); cache a
+        // cumulative array if it ever shows in the profiler.
+        function hysteresisPeaks(drift, shear, playIdx) {
+            let vMax = 0, dMax = 0, work = 0;
+            for (let k = 0; k < drift.length; k++) {
+                vMax = Math.max(vMax, Math.abs(shear[k]));
+                dMax = Math.max(dMax, Math.abs(drift[k]));
+            }
+            for (let k = 1; k <= Math.min(playIdx, drift.length - 1); k++) {
+                work += 0.5 * (shear[k] + shear[k - 1]) * (drift[k] - drift[k - 1]);
+            }
+            return { vMax, dMax, work };
+        }
+
+        // JS mirror of mdof_response.ColumnHysteresis.backbone (virgin, no
+        // failure flags), summed over the story's four columns -- the faint
+        // reference curve the loop departs from. `bb` is one axis of
+        // header.damage.backbones (per-column N x 4 arrays + hardening /
+        // softening ratios).
+        function storyBackbone(delta, bb, s) {
+            const x = Math.abs(delta), a1 = bb.hardening, a2 = bb.softening;
+            let sum = 0;
+            for (let j = 0; j < bb.k0[s].length; j++) {
+                const k0 = bb.k0[s][j], vy = bb.vy[s][j], dy = bb.dy[s][j], dc = bb.dc[s][j], vr = bb.vr[s][j];
+                let value;
+                if (x <= dy) value = k0 * x;
+                else if (x <= dc || a2 === 0) value = vy + a1 * k0 * (x - dy);
+                else value = Math.max(vr, vy + a1 * k0 * (dc - dy) - a2 * k0 * (x - dc));
+                sum += value;
+            }
+            return Math.sign(delta) * sum;
+        }
+
+        // The ghost is rebuilt only when `key` (load / floor / axis / size)
+        // changes; every frame just blits it and draws the trail.
+        function makeHysteresisPanel({ rebuildGhost, drawTrail }) {
+            let key = null;
+            return {
+                invalidate() { key = null; },
+                frame(k, playIdx) {
+                    if (k !== key) { rebuildGhost(); key = k; }
+                    drawTrail(playIdx);
+                },
+            };
+        }
+        // ---8<--- HYSTERESIS-HELPERS-END
 
         function createBuilding(numFloors, storyHeights, frame, folderName) {
             for (const obj of sceneObjects) scene.remove(obj);
@@ -3650,6 +3740,120 @@
             ctx.fillText(`t = ${animTime.toFixed(2)} s`, plotX + plotW / 2, cssH - 4);
         }
 
+        // --- Spec 14 C6: Hysteresis tab (cost model: HYSTERESIS-HELPERS) ---
+        let hysteresisLoadSerial = 0;
+        let hystGhost = null; // {off, drift, shear, map, story, axis, peaksAll}
+        const hysteresisPanel = makeHysteresisPanel({
+            rebuildGhost: rebuildHysteresisGhost,
+            drawTrail: drawHysteresisTrail,
+        });
+
+        // The story BELOW the selected floor (floor f+1 is the top of story
+        // f+1), on the shared axis -- null when this load has no blocks.
+        function hysteresisSource() {
+            const B = damageData?.blocks;
+            const ax = damageData?.header.axes.indexOf(spectrumAxis) ?? -1;
+            if (!B?.story_drift || !B.story_shear || ax < 0 || spectrumFloorIndex == null) return null;
+            const [, N, n] = B.story_drift.shape, s = spectrumFloorIndex;
+            if (s >= N) return null;
+            return {
+                ax, s, n,
+                drift: B.story_drift.data.subarray((ax * N + s) * n, (ax * N + s + 1) * n),
+                shear: B.story_shear.data.subarray((ax * N + s) * n, (ax * N + s + 1) * n),
+                bb: damageData.header.backbones[spectrumAxis],
+            };
+        }
+
+        function drawHysteresis() {
+            const src = hysteresisSource();
+            hysteresisDisabledNote.style.display = src ? 'none' : 'block';
+            hysteresisCanvas.style.display = src ? 'block' : 'none';
+            if (!src) { hysteresisNote.textContent = ''; return; }
+            const wrap = hysteresisCanvas.parentElement;
+            hysteresisPanel.frame(`${hysteresisLoadSerial}|${spectrumFloorIndex}|${spectrumAxis}|${wrap.clientWidth}x${wrap.clientHeight}`,
+                currentIndex);
+        }
+
+        function rebuildHysteresisGhost() {
+            const src = hysteresisSource();
+            const wrap = hysteresisCanvas.parentElement;
+            const cssW = wrap.clientWidth || 300, cssH = wrap.clientHeight || 340;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            hysteresisCanvas.width = Math.round(cssW * dpr);
+            hysteresisCanvas.height = Math.round(cssH * dpr);
+            const peaksAll = hysteresisPeaks(src.drift, src.shear, 0);
+            const dSpan = (peaksAll.dMax || 1e-9) * 1.08, vSpan = (peaksAll.vMax || 1) * 1.12;
+            const pad = 10, top = 22, bottom = 18;
+            const map = {
+                x: d => pad + (d / dSpan + 1) / 2 * (cssW - 2 * pad),
+                y: v => top + (1 - (v / vSpan + 1) / 2) * (cssH - top - bottom),
+            };
+            const off = document.createElement('canvas');
+            off.width = hysteresisCanvas.width;
+            off.height = hysteresisCanvas.height;
+            const g = off.getContext('2d');
+            g.setTransform(dpr, 0, 0, dpr, 0, 0);
+            g.strokeStyle = 'rgba(255,255,255,0.14)';
+            g.lineWidth = 1;
+            g.beginPath();
+            g.moveTo(map.x(0), top); g.lineTo(map.x(0), cssH - bottom);
+            g.moveTo(pad, map.y(0)); g.lineTo(cssW - pad, map.y(0));
+            g.stroke();
+            // Backbone reference (dashed), then the whole loop as the ghost.
+            g.setLineDash([4, 4]);
+            g.strokeStyle = 'rgba(255,215,100,0.45)';
+            g.beginPath();
+            for (let i = 0; i <= 200; i++) {
+                const d = -dSpan + 2 * dSpan * i / 200, v = storyBackbone(d, src.bb, src.s);
+                if (i) g.lineTo(map.x(d), map.y(v)); else g.moveTo(map.x(d), map.y(v));
+            }
+            g.stroke();
+            g.setLineDash([]);
+            g.strokeStyle = 'rgba(127,212,255,0.16)';
+            g.beginPath();
+            for (let k = 0; k < src.n; k++) {
+                if (k) g.lineTo(map.x(src.drift[k]), map.y(src.shear[k])); else g.moveTo(map.x(src.drift[k]), map.y(src.shear[k]));
+            }
+            g.stroke();
+            hystGhost = { off, map, src, cssW, cssH, dpr, peaksAll };
+        }
+
+        function drawHysteresisTrail(playIdx) {
+            const { off, map, src, cssW, cssH, dpr, peaksAll } = hystGhost;
+            const ctx = hysteresisCanvas.getContext('2d');
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, hysteresisCanvas.width, hysteresisCanvas.height);
+            ctx.drawImage(off, 0, 0);
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            const trail = selectTrail(src.n, playIdx, 2000);
+            ctx.strokeStyle = '#7fd4ff';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            trail.forEach((k, i) => {
+                const x = map.x(src.drift[k]), y = map.y(src.shear[k]);
+                if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+            });
+            ctx.stroke();
+            const last = trail[trail.length - 1];
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(map.x(src.drift[last]), map.y(src.shear[last]), 3, 0, 2 * Math.PI);
+            ctx.fill();
+            const w = hysteresisPeaks(src.drift, src.shear, playIdx).work;
+            ctx.font = '10px ui-monospace, "SF Mono", "Cascadia Code", monospace';
+            ctx.fillStyle = 'rgba(255,255,255,0.72)';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Story ${src.s + 1} · ${spectrumAxis} · V_max ${peaksAll.vMax.toExponential(2)} N · δ_max ${peaksAll.dMax.toExponential(2)} m`, 8, 13);
+            ctx.fillStyle = 'rgba(255,224,178,0.45)';
+            ctx.font = '9px ui-monospace, "SF Mono", "Cascadia Code", monospace';
+            ctx.fillText('δ (story drift) →', 8, cssH - 5);
+            ctx.textAlign = 'right';
+            ctx.fillText(`t = ${animTime.toFixed(2)} s`, cssW - 8, cssH - 5);
+            hysteresisNote.textContent = `work ∫V dδ so far ${w.toExponential(2)} J · dashed: backbone`
+                + (floorRotData ? ' (≈ with torsion: column drift ≠ story drift)' : '')
+                + ` · trail ${trail.length} samples`;
+        }
+
         // --- Load data for a folder ---
         async function loadFolderData(folder) {
             if (!folder) return;
@@ -4012,6 +4216,7 @@
             damageData = extra.damage ?? null;     // spec 14 -- only a collapse run carries blocks
             collapseData = extra.collapse ?? null; // spec 14 -- header.collapse of that run
             damageView = prepareDamageView(damageData, drawnHeights);
+            hysteresisLoadSerial++; // spec 14 C6: new data -> the ghost key changes
             showDamageLegend(damageView);
             groundAccelData = extra.groundAccel ?? null; // spec 9 -- null-safe the same way; whichever path loaded it, the time panel reads only this
 
@@ -4704,6 +4909,7 @@
             // moving under prefers-reduced-motion: it is playback state, not
             // decoration.
             if (analysisDrawerOpen && analysisTab === 'time') drawTimePanels();
+            if (analysisDrawerOpen && analysisTab === 'hysteresis') drawHysteresis(); // spec 14 C6: blit ghost + trail
 
             controls.update();
             updateFogRange(); // resolved camera position for this frame, before the (reverted-after-render) shake offset below -- see updateFogRange()'s comment above animate()
@@ -4871,6 +5077,7 @@
                 });
                 timePane.classList.toggle('is-active', analysisTab === 'time');
                 frequencyPane.classList.toggle('is-active', analysisTab === 'frequency');
+                hysteresisPane.classList.toggle('is-active', analysisTab === 'hysteresis');
                 redrawAnalysisTab();
             });
         });
@@ -4882,6 +5089,8 @@
         function redrawAnalysisTab(animated = false) {
             if (analysisTab === 'frequency') {
                 if (animated) redrawSpectrumPanelsAnimated(); else redrawSpectrumPanels();
+            } else if (analysisTab === 'hysteresis') {
+                drawHysteresis(); // the ghost key sees any floor/axis/size change itself
             } else {
                 rebuildTimeEnvelopes();
                 drawTimePanels();

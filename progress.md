@@ -3014,3 +3014,29 @@ Ruling:
   - The crack envelope is monotone and in [0, 1].
   - Ramp stops are distinct, clamped beyond CP, continuous at IO, and the red channel is non-decreasing.
 - The other JS checks pass.
+
+### Task 5 — C6 Hysteresis tab (2026-09-22)
+
+- `index.html`:
+  - Third drawer tab "Hysteresis" (`#hysteresisPane`, `#hysteresisCanvas`). The canvas is added to BOTH the `width:100%; height:100%` sizing rule and the reduced-motion list.
+  - The tab routes through `redrawAnalysisTab()`. `animate()` draws it while the drawer is open on that tab.
+  - It reuses the shared Floor/Axis selectors: floor f+1 shows story f+1, the story below it.
+  - Placeholder until a collapse run's blocks exist.
+- New `HYSTERESIS-HELPERS` sentinel:
+  - `selectTrail` (exact indices strided back from the playhead, ≤ 2000, always the latest);
+  - `hysteresisPeaks` (whole-run V_max/δ_max plus work ∫V dδ so far);
+  - `storyBackbone` (JS mirror of `ColumnHysteresis.backbone`, virgin, summed over the 4 columns);
+  - `makeHysteresisPanel` (ghost rebuilt only on a key change: load serial | floor | axis | wrapper size).
+  - The cost-model comment says why this is a polyline and not an envelope.
+- The ghost (axes, dashed backbone, whole loop) is drawn once to an offscreen canvas. Each frame blits it and draws the trail, the current point and the label (V_max, δ_max). The note line gives the work so far and the torsion caveat.
+- `claude_scripts/make_hysteresis_fixture.py` builds the demo building directly. It dumps `build_backbones()` and `ColumnHysteresis.backbone` summed per story to `claude_scripts/fixtures/spec14_backbone.json`.
+- `claude_scripts/check_hysteresis_panel.mjs` (new, check 6): ALL CHECKS PASSED.
+  - Trail selection is exact and shrinks on scrub-back.
+  - 0 ghost rebuilds over 300 frames, and 1 per key change.
+  - Under a gain of 3, V_max/δ_max scale ×3 and work ×9.
+  - The header backbones equal the independent `build_backbones()` exactly.
+  - The JS backbone matches Python with worst relative error 0.0.
+  - The CSS rule is parsed from the stylesheet text.
+
+Ruling:
+- **R13 — the printed "E_h" is the work ∫V dδ so far, labelled as such.** It includes the elastic energy momentarily stored in the story. Separating out the dissipated part would need the unloading stiffness, which is inference the panel should not do. The label says "work ∫V dδ", not "dissipated energy".
