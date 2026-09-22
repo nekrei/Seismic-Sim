@@ -2883,3 +2883,22 @@ tolerance stopped both solves early. It now uses the production 1e-4:
 both converge at iteration 3 on the same trajectory, and the difference
 after removing the from-rest t=0 artifact is 1.5e-10. The reference's
 behaviour was confirmed identical at `ab06d2c`, at `main` and at HEAD.
+
+### Task 8 — documentation, Part E + C-8, check 12 (2026-09-22)
+
+- **README:** new "Spec 13" section with the Part B sentence verbatim and
+  the things-to-know. Covers: detachment vs onset (P-Delta off gives "≤ 0",
+  stricter), remove-and-re-assemble (not slice), frozen backbone, the
+  zero-input + zero-state restart (R11), both-axes restart, the cap of 4,
+  hold-not-NaN, the 1-based `story` vs 0-based `collapse_events`,
+  `surviving_columns = []` / `hinge_column`, cost, collapse disabled on
+  deploy, and that the UI cannot yet reach a detachment. Also fixed a stale
+  "Open Building Parameters" (the button is in Collapse Analysis).
+- **Math PDF Part I** (I1–I6) in `generate_math_pdf.py`, plus
+  `claude_scripts/math-pdf-sections-goal13.md`. Rebuilt to 39 pages.
+- **knowledge/:** `mdof_response`, `server`,
+  `data_flow_and_wire_formats` (the contract field by field, and the hold),
+  `index_html`, `spec_history`.
+- **specs/COURSE-CONCEPTS.md:** row 13 "Delivered".
+- **Check 12:** `verify_handoff.py 12` PASS. The Part B sentence is
+  verbatim in README and in the PDF text (whitespace-normalised search).

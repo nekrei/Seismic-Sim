@@ -687,7 +687,7 @@ variability and the hysteresis constants are assumptions, not calibrated
 component data; progressive load-path changes are not included, and torsion
 is opt-in (see Spec 12 below).
 
-Open **Building Parameters** and press **Run collapse analysis**. This sends
+Open **Collapse Analysis** and press **Run collapse analysis**. This sends
 one `/compute` request with `nonlinear: true`. Live sliders still run the
 elastic model; changing a parameter or record invalidates the nonlinear
 cache. The result adds a `collapse` JSON header, including convergence,
@@ -782,3 +782,93 @@ parameters* message also snaps the building sliders back to their last
 accepted values, so the panel matches the building still on screen. A new
 collapse result being cached shows a brief green "Successfully Cached" toast
 at the top right; the run button's label never changes.
+
+## Spec 13: what happens after a story breaks
+
+Spec 11 finds collapse *onset*. Spec 13 carries the computation one step
+further. When a story actually **detaches**, the building above it stops
+being part of the structure. The part below keeps shaking, and it is solved
+again as a shorter building from that instant on.
+
+> **Everything up to and including collapse onset — which story, at what
+> instant, in which direction, with how much residual drift, and which
+> individual columns failed — is *simulated* from the recorded ground motion.
+> Everything after detachment is *animated* using a post-failure rigid-body
+> model with assumed contact parameters, not a solution of the structural
+> equations of motion.**
+
+**Detachment is stronger than onset.** A story detaches only when **all four**
+of its columns have failed (drift past their ultimate `du`) **and** gravity has
+overcome what stiffness is left (summed tangent `≤ P/h`, spec 11's gravity
+test). With P-Delta off that second test becomes "tangent `≤ 0`", which is
+stricter, not equivalent. Onset is a performance statement; detachment is a
+kinematic one, and only detachment ends the structural solve for the floors
+above.
+
+**The survivor is rebuilt, not cut out.** The floors below keep their mass
+(the detached floors are *removed* from `M`, never zeroed), and their frame
+is condensed again from geometry. Slicing the old stiffness matrix would keep
+restraint from columns that no longer exist; at the default 7-story geometry
+the slice is 20–62 % wrong. Gravity loads drop because less weight is above,
+so the stump is more stable. Surviving columns keep their exact damage state
+and their original backbone. A reset would silently undamage the building.
+The strength gained from the lower axial load is deliberately not credited
+(conservative).
+
+**How the restart works (Signals and Systems).** The survivor's response is
+split into the classic LTI parts:
+
+- the **zero-input** response: the closed-form free vibration of each survivor
+  mode from the state (`u`, `u̇`) handed over at the detachment instant;
+- the **zero-state** response: the modal FFT solve of the forcing.
+
+The forced part is computed over the whole record, with the surviving columns'
+real pre-detachment pseudo-force as a fixed prefix. That way the input is
+never cut off at the detachment instant. A from-rest FFT solve started there
+would count the first sample only half (Gibbs ringing) and break velocity
+continuity. The free-vibration term then matches the handed-over state
+exactly, and continuity at the restart measures 0.0.
+
+**Both axes restart together.** A detachment belongs to the story, not to one
+axis. The earliest detachment across X and Y restarts both. Cascades repeat
+this on the new survivor, up to `MAX_DETACHMENT_EVENTS = 4` (a budget, not
+physics). When the cap binds, `cap_reached` says so. A story-1 detachment
+leaves nothing standing and ends the solve cleanly.
+
+**What the payload carries.**
+- **Hold, never NaN.** From `t_detach` on, floors above the failure plane
+  *hold* their last absolute position (and floor rotation) in `abs_x`,
+  `abs_y` and `theta_z`. They carry zero velocity and acceleration. NaN would
+  poison the renderer and every Signals envelope. A held value looks exactly
+  like a real one, so the event timestamps are the authoritative "no longer
+  structural" signal. On the Time tab, a held floor's relative trace is
+  therefore the negative of the ground motion.
+- **The hand-off contract.** `collapse.handoff_version` (= 1),
+  `detachment_events`, `cap_reached` and `surviving_stories` are added to the
+  collapse header. There is no new binary block. Each event gives:
+  - `story`: **1-based**. The existing `collapse_events[*].story` stays
+    0-based.
+  - `t_detach`, the tripped `axis`, `axes_tripped`, `direction` and
+    `criterion`.
+  - Every failed column with `t_fail_x/_y` and plan position.
+  - `surviving_columns`: always empty, because detachment means every column
+    failed. `hinge_column` instead names the column that held longest.
+  - Per-floor `floor_state` in **metres, absolute frame**, with
+    `ground_state` beside it.
+  - The detached block's mass, CM height (from the failure plane) and
+    inertia, plus the drop height, `P_cap_below` and `residual_drift_below`.
+  - Consumers must refuse an unknown version; `validate_handoff()` is the
+    reference.
+
+A run that never detaches is byte-identical to before, apart from those four
+header keys.
+
+**Limits you should know.**
+- A detaching run costs about 1.3–2.2× a normal collapse run. The deployed
+  backend keeps collapse analysis disabled, so run it locally.
+- The panel's own sliders cannot currently reach a converged detachment. The
+  collapse request has no intensity or weak-story control, and it uses 40
+  solver iterations. Reaching one needs a request such as a 4-story building
+  with story 3's columns at 0.7 m, intensity ×20, magnitude 8.0. Spec 14
+  adds those controls, and spec 15 draws the fall.
+- Nothing new is drawn yet: the floors above the break simply freeze.
