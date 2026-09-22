@@ -299,6 +299,17 @@
         }
         .collapse-readout:empty { display: none; }
         .collapse-readout .readout-honesty { color: rgba(255,255,255,0.45); font-style: italic; }
+        .damage-legend { margin-top: 10px; font-size: 11px; color: rgba(255,255,255,0.7); }
+        .damage-legend-title { margin-bottom: 4px; }
+        .damage-legend-bar { height: 8px; border-radius: 4px; }
+        .damage-legend-marks { position: relative; height: 16px; font-variant-numeric: tabular-nums; }
+        .damage-legend-marks span {
+            position: absolute; top: 0; transform: translateX(-100%);
+            padding-right: 3px; border-right: 1px solid rgba(255,255,255,0.6);
+            line-height: 14px; white-space: nowrap;
+        }
+        .damage-legend-now { font-variant-numeric: tabular-nums; margin: 2px 0 6px; color: rgba(255,255,255,0.85); }
+        .damage-legend-notes { margin: 0; padding-left: 14px; line-height: 1.45; color: rgba(255,255,255,0.55); }
 
         /* ---- mobile bottom-sheet reflow ---- */
         /* Collapsed strip: always visible, shows record name + play/pause.
@@ -1178,6 +1189,20 @@
                     <button id="runCollapseBtn" type="button" class="primary">Run collapse analysis</button>
                 </div>
                 <div id="collapseReadout" class="collapse-readout" aria-live="polite"></div>
+                <!-- Spec 14 Part C legend: every visual says whether it is
+                     computed or cosmetic. Shown only while a collapse run's
+                     damage data is loaded. -->
+                <div id="damageLegend" class="damage-legend" hidden>
+                    <div class="damage-legend-title">Story drift ratio — columns &amp; beams</div>
+                    <div class="damage-legend-bar" id="damageLegendBar"></div>
+                    <div class="damage-legend-marks" id="damageLegendMarks"></div>
+                    <div class="damage-legend-now" id="damageLegendNow"></div>
+                    <ul class="damage-legend-notes">
+                        <li><b>Column shade</b> — darker once yielded, darkest once failed (computed). Differences within one story are modelled material variability (assumed 10% CoV), not measured.</li>
+                        <li><b>Hinge glow</b> at column ends — computed column and instant; the glow itself is cosmetic.</li>
+                        <li><b>Crack bands</b> — cosmetic, sized by the computed stiffness loss 1 − k<sub>t</sub>/k<sub>0</sub>.</li>
+                    </ul>
+                </div>
             </div>
         </details>
 
@@ -1362,6 +1387,10 @@
         const weakDepthLabel = document.getElementById('weakDepthLabel');
         const loadDemoBtn = document.getElementById('loadDemoBtn');
         const collapseReadout = document.getElementById('collapseReadout');
+        const damageLegend = document.getElementById('damageLegend');
+        const damageLegendBar = document.getElementById('damageLegendBar');
+        const damageLegendMarks = document.getElementById('damageLegendMarks');
+        const damageLegendNow = document.getElementById('damageLegendNow');
         const recomputeText = document.getElementById('recomputeText');
         const recomputeElapsed = document.getElementById('recomputeElapsed');
         const sheetStrip = document.getElementById('sheetStrip');
@@ -1589,6 +1618,9 @@
         let buildingGroups = [];   // N floor groups (index f = floor f+1), NOT including a separate roof group -- the roof rides as a child of the topmost floor group.
         let columnDefs = [];       // flat list of {storyIndex, cornerIndex, cornerX, cornerZ, thicknessX/Z, bottomSource, topSource} -- columns live at scene top level, not inside a floor group, since each spans two differently-displaced levels (spec 5, Part C3).
         let columnInstances = null; // spec 14: ONE InstancedMesh, COLUMN_SEGMENTS instances per columnDefs entry
+        let hingeInstances = null, crackInstances = null; // spec 14 C3/C4: 2 per column (bottom, top end)
+        let beamMats = [];          // spec 14 C1: one beam material per floor (userData.base = its own colour)
+        let damageView = null;      // spec 14: per-load lookups derived from damageData (see prepareDamageView)
         let lightSphere = null;
         let foundationSlab = null;
         let timeData = [];
@@ -2136,6 +2168,7 @@
         const _twistQuat = new THREE.Quaternion();
         const _segPos = new THREE.Vector3(), _segScale = new THREE.Vector3();
         const _segQuat = new THREE.Quaternion(), _segMatrix = new THREE.Matrix4();
+        const _zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
 
         // --- Building creation (spec 5, Part A/C -- open-cutaway frame) ---
         // Structure: opaque thin floor SLABS (furniture needs something to
@@ -2342,11 +2375,67 @@
         }
         // ---8<--- COLUMN-HELPERS-END
 
+        // ---8<--- DAMAGE-HELPERS-BEGIN
+        // Spec 14 Part C: the lookups behind the damage visuals. Its own
+        // sentinel block, extracted by claude_scripts/check_damage_render.mjs.
+        //
+        // Column shade by accumulated damage code (header.damage.codes:
+        // 0 elastic, 1 yielded, 2 failed). Multiplies the drift colour.
+        const DAMAGE_SHADE = [1, 0.72, 0.38];
+
+        // The decimated blocks are every q-th full-rate sample (nearest
+        // neighbour, R3); q from the header's two rates.
+        function decimationFactor(fullRateHz, decimatedRateHz) {
+            return Math.round(fullRateHz / decimatedRateHz);
+        }
+
+        // Decimated sample for full-rate frame `idx`: the latest one at or
+        // before it, so a decimated event shows up to one period LATE and
+        // never early -- nothing is drawn before its computed time.
+        function decimatedIndex(idx, q, n) {
+            return Math.min(n - 1, Math.floor(idx / q));
+        }
+
+        // C3: a hinge marks a column end once that column has left its
+        // elastic branch (code >= 1 -- accumulated, so it never switches off).
+        function hingeOn(code) {
+            return code >= 1;
+        }
+
+        // C4: crack level = running max of the lost tangent stiffness
+        // 1 - k_t/k0, clamped to [0, 1] (k_t/k0 can be negative on the
+        // softening branch and above 1 on a steep reload, R9). A running max,
+        // because cracks do not close when the tangent recovers on reload.
+        function crackEnvelope(ratio) {
+            const out = new Float32Array(ratio.length);
+            let m = 0;
+            for (let j = 0; j < ratio.length; j++) {
+                m = Math.max(m, Math.min(1, Math.max(0, 1 - ratio[j])));
+                out[j] = m;
+            }
+            return out;
+        }
+
+        // C1: continuous colour ramp over |drift ratio|, with its stops AT
+        // the performance levels (IO / LS / CP from header.damage.drift_limits),
+        // so the legend's marks are where the colour visibly turns.
+        const DRIFT_RAMP_STOPS = [[0.30, 0.62, 0.72], [0.45, 0.78, 0.35], [1.0, 0.72, 0.10], [1.0, 0.16, 0.14]];
+        function driftRampColor(ratio, limits) {
+            const at = [0, limits.IO, limits.LS, limits.CP];
+            const r = Math.min(Math.abs(ratio), limits.CP);
+            let k = 0;
+            while (k < 2 && r > at[k + 1]) k++;
+            const f = (r - at[k]) / (at[k + 1] - at[k]);
+            return DRIFT_RAMP_STOPS[k].map((v, i) => v + (DRIFT_RAMP_STOPS[k + 1][i] - v) * f);
+        }
+        // ---8<--- DAMAGE-HELPERS-END
+
         function createBuilding(numFloors, storyHeights, frame, folderName) {
             for (const obj of sceneObjects) scene.remove(obj);
             sceneObjects = [];
             buildingGroups = [];
             columnDefs = [];
+            beamMats = [];
             furnitureItems = [];
 
             const groups = [];
@@ -2436,6 +2525,9 @@
                 // dense" than columns, less flat than slabs.
                 const beamMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(1.05), roughness: 0.65, metalness: 0.15 });
                 const beamY = -slabThickness / 2 - beamHeight / 2 - 0.01;
+                // Spec 14 C1: these beams top story f, so they take its drift colour.
+                beamMat.userData.base = beamMat.color.clone();
+                beamMats.push(beamMat);
 
                 const beamFront = new THREE.Mesh(beamGeo, beamMat);
                 beamFront.scale.set(width, beamHeight, beamThick);
@@ -2485,6 +2577,9 @@
                     columnDefs.push({
                         storyIndex: f,
                         cornerIndex,
+                        // C4 crack band tilt: cosmetic, seeded through the
+                        // one PRNG per (record, story, column).
+                        crackTilt: (mulberry32(hashSeed(`${folderName || 'unknown'}#crack#${f}#${cornerIndex}`))() - 0.5) * 0.5,
                         baseColor: colBaseColor.clone().multiplyScalar(tintFactor),
                         cornerX: cx,
                         cornerZ: cz,
@@ -2514,6 +2609,22 @@
             columnInstances.instanceColor.needsUpdate = true;
             scene.add(columnInstances);
             sceneObjects.push(columnInstances);
+
+            // Spec 14 C3/C4: two hinge markers and two crack bands per column
+            // (bottom end, top end), hidden (zero scale) until a collapse run's
+            // data turns them on. Emissive materials, never lights: spec 4
+            // fixed the light rig at 3 so cost stays flat to 20 stories.
+            const ends = columnDefs.length * 2;
+            hingeInstances = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 12, 8),
+                new THREE.MeshStandardMaterial({ color: 0xffb347, emissive: 0xff7a1a, emissiveIntensity: 1.6, roughness: 0.4 }), ends);
+            crackInstances = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+                new THREE.MeshStandardMaterial({ color: 0x14100e, emissive: 0x000000, roughness: 1, metalness: 0 }), ends);
+            for (const m of [hingeInstances, crackInstances]) {
+                m.frustumCulled = false;
+                for (let i = 0; i < ends; i++) m.setMatrixAt(i, _zeroMatrix);
+                scene.add(m);
+                sceneObjects.push(m);
+            }
 
             // Roof cap (decorative -- antenna + blinking light) rides as a
             // child of the topmost floor group, so it needs no separate
@@ -2588,6 +2699,7 @@
                 // slab corners. Skipped at zero so the untwisted path is the
                 // pre-spec-12 one exactly.
                 const twist = (lb.yaw + lt.yaw) / 2;
+                c.b = b; c.t = t; // this frame's end points, reused by the hinge/crack markers
                 for (let k = 0; k < COLUMN_SEGMENTS; k++, i++) {
                     const s = segmentTransform(b, t, k, COLUMN_SEGMENTS);
                     _segPos.set(s.px, s.py, s.pz);
@@ -2599,6 +2711,100 @@
                 }
             }
             columnInstances.instanceMatrix.needsUpdate = true;
+        }
+
+        // --- Spec 14 Part C: damage visuals, driven only by the payload ---
+        // Built once per load. Every lookup is by the frame's own sample
+        // index, so the visuals move in lockstep with the drawn displacement
+        // and a detached story's held (frozen) data freezes them too.
+        function prepareDamageView(damage, storyHeightsM) {
+            const B = damage?.blocks;
+            if (!B?.story_drift || !B.column_damage || !B.stiffness_ratio) return null;
+            const nAx = B.story_drift.shape[0], N = B.story_drift.shape[1];
+            const full = B.story_drift.npts, n = B.column_damage.npts;
+            const cracks = [];
+            for (let s = 0; s < N; s++) {
+                const env = new Float32Array(n);
+                for (let ax = 0; ax < nAx; ax++) {
+                    const e = crackEnvelope(B.stiffness_ratio.data.subarray((ax * N + s) * n, (ax * N + s + 1) * n));
+                    for (let j = 0; j < n; j++) env[j] = Math.max(env[j], e[j]);
+                }
+                cracks.push(env);
+            }
+            return {
+                nAx, N, full, n, cracks,
+                q: decimationFactor(B.story_drift.rateHz, B.column_damage.rateHz),
+                drift: B.story_drift.data, codes: B.column_damage.data,
+                heights: normalizeStoryHeights(N, storyHeightsM),
+                limits: damage.header.drift_limits,
+            };
+        }
+
+        const _dmgColor = new THREE.Color(), _endPos = new THREE.Vector3(), _endScale = new THREE.Vector3();
+        const _endQuat = new THREE.Quaternion(), _endMatrix = new THREE.Matrix4(), _tiltAxis = new THREE.Vector3(1, 0, 0);
+        let damageLegendKey = '';
+        function updateDamageVisuals(idx) {
+            const v = damageView;
+            if (!v || !columnInstances) return;
+            const j = decimatedIndex(idx, v.q, v.n);
+            let maxRatio = 0, maxStory = 0;
+            const storyColor = [];
+            for (let s = 0; s < v.N; s++) {
+                let d = 0;
+                for (let ax = 0; ax < v.nAx; ax++) d = Math.max(d, Math.abs(v.drift[(ax * v.N + s) * v.full + idx]));
+                const ratio = d / v.heights[s];
+                if (ratio > maxRatio) { maxRatio = ratio; maxStory = s; }
+                storyColor.push(driftRampColor(ratio, v.limits));
+                beamMats[s]?.color.setRGB(...storyColor[s]);
+            }
+            columnDefs.forEach((c, ci) => {
+                const s = c.storyIndex;
+                let code = 0;
+                for (let ax = 0; ax < v.nAx; ax++) code = Math.max(code, v.codes[((ax * v.N + s) * 4 + c.cornerIndex) * v.n + j]);
+                const [r, g, b] = storyColor[s], shade = DAMAGE_SHADE[code];
+                _dmgColor.setRGB(r * shade, g * shade, b * shade);
+                for (let k = 0; k < COLUMN_SEGMENTS; k++) columnInstances.setColorAt(ci * COLUMN_SEGMENTS + k, _dmgColor);
+                const crack = v.cracks[s][j];
+                const thick = Math.max(c.thicknessX, c.thicknessZ);
+                for (let e = 0; e < 2; e++) {
+                    // Both markers sit just inside the column end, on the bent shape.
+                    const p = columnPoint(c.b, c.t, e ? 0.94 : 0.06);
+                    if (hingeOn(code)) {
+                        _endScale.setScalar(thick * 0.75);
+                        hingeInstances.setMatrixAt(ci * 2 + e, _endMatrix.compose(_endPos.set(p.x, p.y, p.z), _endQuat.identity(), _endScale));
+                    } else hingeInstances.setMatrixAt(ci * 2 + e, _zeroMatrix);
+                    if (crack > 0) {
+                        _endScale.set(c.thicknessX * 1.06, 0.02 + 0.10 * crack, c.thicknessZ * 1.06);
+                        _endQuat.setFromAxisAngle(_tiltAxis, c.crackTilt * (e ? -1 : 1));
+                        crackInstances.setMatrixAt(ci * 2 + e, _endMatrix.compose(_endPos.set(p.x, p.y, p.z), _endQuat, _endScale));
+                    } else crackInstances.setMatrixAt(ci * 2 + e, _zeroMatrix);
+                }
+            });
+            columnInstances.instanceColor.needsUpdate = true;
+            hingeInstances.instanceMatrix.needsUpdate = true;
+            crackInstances.instanceMatrix.needsUpdate = true;
+            // The printed drift the legend's IO/LS/CP marks are read against.
+            const key = `${(maxRatio * 100).toFixed(2)}|${maxStory}`;
+            if (key !== damageLegendKey) {
+                damageLegendKey = key;
+                damageLegendNow.textContent = `Max story drift now: ${(maxRatio * 100).toFixed(2)} % (story ${maxStory + 1})`;
+            }
+        }
+
+        // Legend marks at IO/LS/CP along a bar whose right end is CP.
+        function showDamageLegend(v) {
+            damageLegend.hidden = !v;
+            damageLegendKey = '';
+            if (!v) return;
+            const stops = DRIFT_RAMP_STOPS.map(c => `rgb(${c.map(x => Math.round(x * 255)).join(',')})`);
+            const at = [0, v.limits.IO, v.limits.LS, v.limits.CP].map(r => (r / v.limits.CP * 100).toFixed(1) + '%');
+            damageLegendBar.style.background = `linear-gradient(to right, ${stops.map((c, i) => `${c} ${at[i]}`).join(', ')})`;
+            damageLegendMarks.replaceChildren(...['IO', 'LS', 'CP'].map((name, i) => {
+                const m = document.createElement('span');
+                m.textContent = `${name} ${(v.limits[name] * 100).toFixed(0)}%`;
+                m.style.left = at[i + 1];
+                return m;
+            }));
         }
 
         // --- Render-time sway gain (see swayDisplayGain()) -------------------
@@ -3805,6 +4011,8 @@
             floorRotData = extra.floorRot ?? null; // spec 12 -- absent on every path that has no rotation block
             damageData = extra.damage ?? null;     // spec 14 -- only a collapse run carries blocks
             collapseData = extra.collapse ?? null; // spec 14 -- header.collapse of that run
+            damageView = prepareDamageView(damageData, drawnHeights);
+            showDamageLegend(damageView);
             groundAccelData = extra.groundAccel ?? null; // spec 9 -- null-safe the same way; whichever path loaded it, the time panel reads only this
 
             periodReadout.textContent = (periodX != null && periodY != null)
@@ -4469,6 +4677,7 @@
             // (and the foundation slab's) positions just set above -- see
             // updateColumnTransforms()'s docstring.
             updateColumnTransforms();
+            updateDamageVisuals(idx); // spec 14 Part C -- no-op without a collapse run's blocks
 
             // Furniture's OWN relative-sway offset (spec B), on top of
             // whatever rigid motion it already inherits from its parent

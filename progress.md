@@ -2995,3 +2995,22 @@ Rulings:
 
 Ruling:
 - **R12 — check 4's "segment midpoints on u(y)" is read as segment JOINTS on u(y).** Each rendered segment is a straight chord between two points of the curve. A chord's midpoint lies on the chord, not on the curve (off by O(1/S²)), so the joints are what the renderer places on the shape. The check recovers each joint from the instance's own position, direction (quaternion) and length.
+
+### Task 4 — damage visuals C1–C5 + legend (2026-09-22)
+
+- New `DAMAGE-HELPERS` sentinel: `DAMAGE_SHADE` [1, 0.72, 0.38], `decimationFactor`, `decimatedIndex` (latest decimated sample at or before the frame), `hingeOn` (code ≥ 1), `crackEnvelope` (running max of clamp(1 − k_t/k₀, 0, 1)) and `driftRampColor` (continuous, with stops exactly at 0/IO/LS/CP).
+- `prepareDamageView()` is built once per load. `updateDamageVisuals(idx)` runs every frame from `animate()`, and is a no-op without blocks.
+  - C1: story drift (max over axes, /h) colours that story's columns and the beams topping it (`beamMats`, one per floor).
+  - C2: the column shade multiplies the column colour by its accumulated code.
+  - C3: two emissive hinge spheres per column (`hingeInstances`) at ξ = 0.06/0.94 on the bent shape. Zero scale until code ≥ 1.
+  - C4: two dark crack bands per column (`crackInstances`). Height ∝ the story's crack envelope; the tilt is seeded per (record, story, column) through `hashSeed`/`mulberry32`.
+  - C5 (floor yaw): unchanged from spec 12.
+  - Held stories freeze automatically, because their data is held.
+- Legend `#damageLegend` in Collapse Analysis: the ramp bar with IO/LS/CP marks placed from `header.damage.drift_limits`, a live "Max story drift now" line, and the computed-vs-cosmetic notes, including "modelled material variability (assumed 10% CoV), not measured".
+- `claude_scripts/check_damage_render.mjs` (new, check 5 renderer half): ALL CHECKS PASSED on the demo fixture.
+  - `decimatedIndex` is never early and at most one period late.
+  - For all 8 yielding columns, the hinge is off one frame before and on at the first yielded sample.
+  - The failed shade never appears before `t_fail` (4 failing columns).
+  - The crack envelope is monotone and in [0, 1].
+  - Ramp stops are distinct, clamped beyond CP, continuous at IO, and the red channel is non-decreasing.
+- The other JS checks pass.
