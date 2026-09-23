@@ -3437,3 +3437,45 @@ Ruling:
 - `check_cinematic.mjs` now covers 5,000 camera frames with no drift, 50 rate points, 1,000 independently integrated clock steps, toggle/reduced-motion wiring, and seeking past/back before onset. Its 50,000-call Node microbench measured 0.001944–0.002128 ms per helper call; this excludes rendering. All 14 Node scripts passed (the 13 pre-existing scripts plus `check_cinematic.mjs`); `check_index_syntax.mjs` parsed the final module, `git diff main...HEAD --check` passed, and only `index.html` changed in the branch. `graphify update .` ran after commit.
 - **Open performance checks:** no real N=20 full-cascade FPS, mobile coarsening or extreme zoom/fog measurement was possible here. Spec 15 already recorded NumPy allocation failure on N=20 KOCAELI_AYD and nonconvergence on the shorter L-AQUILA record on this machine; this run confirmed a 20-story elastic scene renders with cinematic controls enabled and no console errors, but did not re-run those known unsuccessful full-cascade attempts. The ≤1 ms browser-profiler and ≥30 fps desktop/mobile targets remain unmeasured. Do not call verification 16 complete on the Node microbench alone.
 - During browser review, seeking backward could have left a stale falling-body follow state. Fixed it: scrubbing before the 1.5 s lead re-arms a new playthrough; scrubbing past it skips the automatic shot until Replay. The latest code was reloaded in Chrome with no console errors after this fix.
+
+
+### Task 6: documentation and whole-branch verification (2026-09-23)
+
+- Updated README, local AGENTS handoff/status, `knowledge/index_html.md`, and
+  the spec-16 row in `specs/README.md`. `COURSE-CONCEPTS.md` already had the
+  accurate row: the shake is a real 8 Hz filtering application; other cinematic
+  behavior is not claimed as course content. Added exactly one sentence to the
+  existing filtering note in `generate_math_pdf.py`; regenerated the PDF to 43
+  pages. `pypdf` found the new sentence on page 6, and the rendered page was
+  inspected with no clipping. Poppler emitted its existing font warnings.
+- Fixed verification wording from four Signals tabs to three. Check-docs-drift
+  checklist: README covered; PDF covered without inventing a derivation; AGENTS
+  handoff covered; helper check present; knowledge note covers new helpers,
+  clock, override rule and all three slow-motion hazards. The course-concepts
+  row needed no correction. `requirements.txt` unchanged.
+- Whole-branch Node checks: all 14 `.mjs` checks passed (including cinematic
+  helper numeric checks, spec-15 keyframe checks, and final inline-module
+  syntax). All 31 applicable Python check/verify/FFT scripts passed.
+  `verify_hftd.py` completed its aggregate checks including the 400-solve IDA
+  sweep. `verify_torsion.py` checks 1–8 passed. Full `verify_handoff.py` passed;
+  it retained the known theta-z/Newmark dt/4 subcase FAIL line under aggregate
+  check 5 PASS, as previously documented. `verify_spectrum.py` overall PASS.
+- The broad filename scan also selected the legacy
+  `checkpoint_constitutive.py` scratch helper. Under UTF-8 its constitutive
+  assertions passed, but the helper writes a duplicate block into the tracked
+  solver via `git update-index` and commits it. This was not an applicable
+  check; I restored the file in commit `3bdb0dd` immediately after its helper
+  commit `e063602`. Net `mdof_response.py` diff is zero. The worktree's `.git`
+  object database needed escalation to run it, which is when the side effect
+  occurred. This pair of commits is recorded so the branch history is clear.
+- `graphify update .` passed (431 nodes, 621 edges, 35 communities).
+  `git diff --check` passed. No net backend or physics-file changes and no
+  dependency changes.
+- Open browser/performance limits preserved: live reduced-motion emulation
+  remains unavailable; no real N=20 full-cascade profiler result, mobile FPS /
+  coarsening measurement, or dust-active extreme-zoom fog check is claimed.
+  Node helper microbenchmark excludes rendering.
+- Whole-branch diff review against `main`: implementation diff is confined to
+  `index.html`; no payload, physics, or backend changes. Documentation is the
+  README/PDF update plus local ignored handoff, knowledge, specs and
+  verification files. No unrelated changes found.

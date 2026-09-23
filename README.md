@@ -994,3 +994,17 @@ panel does not infer), overlaid on the story's real backbone from
 value the solver already computed at or before the frame being shown — check
 5 in the verification doc exists specifically to catch a hinge or crack
 rendered even one frame early. The fall itself is still spec 15's job.
+
+
+## Spec 16: cinematic playback controls
+
+The View section can add a restrained camera shake driven by the same scaled
+ground acceleration used by the simulation. An 8 Hz low-pass filter removes
+content too fast to display cleanly, and one capped gain preserves the signal's
+shape. On a computed collapse, the camera can frame the first failing story,
+follow the existing collapse animation buffer, and replay from just before the
+onset. Slow motion changes playback time around onset while the seek slider
+continues to represent record time. Manual camera input takes control for the
+rest of that playthrough; reduced-motion preferences disable shake and slow
+motion. These are display and playback features: they add no structural
+physics or payload data.
