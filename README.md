@@ -411,15 +411,6 @@ results. It:
 **This is the file to open when you want to see whether the simulation
 "looks right."**
 
-### `demo3js.html` — a look-alike demo with no real physics
-
-This file looks similar to `index.html` — a 3D building that sways — but
-it is **not connected to any earthquake data at all**. Its sway is just a
-mathematical wave pattern (a sine wave) picked to look plausible. It exists
-only to test/showcase the building's 3D appearance (shape, lighting,
-camera) in isolation. If you're checking whether the *physics* is correct,
-this is the wrong file — use `index.html`.
-
 ### `server.py` — the live backend for the parameter sliders
 
 A small Flask app with two jobs: (1) serve the project's static files
