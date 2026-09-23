@@ -1,7 +1,7 @@
 data/
 .vscode/
 .conda/
-
+.playwright-mcp/
 CLAUDE.md
 AGENTS.md
 .claude/
