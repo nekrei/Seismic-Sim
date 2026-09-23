@@ -64,6 +64,8 @@ _ground_cache = {}
 
 
 def _load_ground(record):
+    if not isinstance(record, str) or os.path.basename(record) != record:
+        raise FileNotFoundError(f"No cached ground motion for record {record!r}")
     if record in _ground_cache:
         return _ground_cache[record]
     path = os.path.join(OUT_DIR, record, "ground_accel.json")
@@ -139,9 +141,17 @@ class ParamError(ValueError):
     completely plausibly on screen (spec 10, C2/E)."""
 
 
+# The same bounds _validate_params clamps the scalar values to. A profile
+# entry outside them is rejected rather than clamped (see ParamError).
+PROFILE_BOUNDS = {"story_height_profile": (1.5, 10.0),
+                  "column_depth_x_profile": (0.15, 2.0),
+                  "column_depth_y_profile": (0.15, 2.0),
+                  "beam_depth_profile": (0.10, 3.0)}
+
+
 def _validate_profile(body, key, num_stories):
-    """A per-floor profile: absent/null, or exactly `num_stories` finite,
-    strictly positive floats. Never truncated, never padded."""
+    """A per-floor profile: absent/null, or exactly `num_stories` finite
+    floats inside PROFILE_BOUNDS. Never truncated, never padded."""
     raw = body.get(key)
     if raw is None:
         return None
@@ -157,9 +167,10 @@ def _validate_profile(body, key, num_stories):
             f = float(v)
         except (TypeError, ValueError):
             raise ParamError(f"{key}[{i}] is not a number: {v!r}") from None
-        if not np.isfinite(f) or f <= 0.0:
-            raise ParamError(f"{key}[{i}] must be finite and strictly "
-                             f"positive, got {v!r}")
+        low, high = PROFILE_BOUNDS[key]
+        if not np.isfinite(f) or not low <= f <= high:
+            raise ParamError(f"{key}[{i}] must be finite and within "
+                             f"[{low}, {high}], got {v!r}")
         out.append(f)
     return out
 
@@ -270,16 +281,23 @@ def _validate_params(body, reference_magnitude=6.0):
     area_sqft (spec 8) is clamped to 200-2000, the same "sane bounds"
     reasoning as the column/beam depths -- it drives plan_span_x/y via
     plan_dims_from_area(), which in turn is the beam span L fed into K."""
+    def number(key, default):
+        # min()/max() pass NaN through to a bound instead of rejecting it.
+        value = float(body.get(key, default))
+        if not np.isfinite(value):
+            raise ParamError(f"{key} must be finite")
+        return value
+
     num_stories = max(1, min(30, int(body.get("num_stories", 7))))
-    mass_per_floor = max(1e3, min(1e8, float(body.get("mass_per_floor", 1000e3))))
-    zeta = max(0.005, min(0.5, float(body.get("zeta", 0.05))))
-    column_depth_x = max(0.15, min(2.0, float(body.get("column_depth_x", DEFAULT_COLUMN_DEPTH_X))))
-    column_depth_y = max(0.15, min(2.0, float(body.get("column_depth_y", DEFAULT_COLUMN_DEPTH_Y))))
-    beam_depth = max(0.10, min(3.0, float(body.get("beam_depth", DEFAULT_BEAM_DEPTH))))
-    epicenter_distance_km = max(1.0, min(200.0, float(body.get("epicenter_distance_km", DEFAULT_EPICENTER_DISTANCE_KM))))
-    epicenter_depth_km = max(1.0, min(100.0, float(body.get("epicenter_depth_km", DEFAULT_EPICENTER_DEPTH_KM))))
-    richter_magnitude = max(3.0, min(9.0, float(body.get("richter_magnitude", reference_magnitude))))
-    area_sqft = max(200.0, min(2000.0, float(body.get("area_sqft", DEFAULT_AREA_SQFT))))
+    mass_per_floor = max(1e3, min(1e8, number("mass_per_floor", 1000e3)))
+    zeta = max(0.005, min(0.5, number("zeta", 0.05)))
+    column_depth_x = max(0.15, min(2.0, number("column_depth_x", DEFAULT_COLUMN_DEPTH_X)))
+    column_depth_y = max(0.15, min(2.0, number("column_depth_y", DEFAULT_COLUMN_DEPTH_Y)))
+    beam_depth = max(0.10, min(3.0, number("beam_depth", DEFAULT_BEAM_DEPTH)))
+    epicenter_distance_km = max(1.0, min(200.0, number("epicenter_distance_km", DEFAULT_EPICENTER_DISTANCE_KM)))
+    epicenter_depth_km = max(1.0, min(100.0, number("epicenter_depth_km", DEFAULT_EPICENTER_DEPTH_KM)))
+    richter_magnitude = max(3.0, min(9.0, number("richter_magnitude", reference_magnitude)))
+    area_sqft = max(200.0, min(2000.0, number("area_sqft", DEFAULT_AREA_SQFT)))
     rho_longitudinal = float(body.get("rho_longitudinal", RHO_LONGITUDINAL))
     if not np.isfinite(rho_longitudinal) or not .01 <= rho_longitudinal <= .06:
         raise ParamError("rho_longitudinal must be between 0.01 and 0.06")
@@ -304,7 +322,7 @@ def _validate_params(body, reference_magnitude=6.0):
     # story_height_profile wins -- it is the more specific request.
     story_height = profiles["story_height_profile"]
     if story_height is None:
-        h0 = max(1.5, min(10.0, float(body.get("story_height", 3.5))))
+        h0 = max(1.5, min(10.0, number("story_height", 3.5)))
         if soft_ground_story:
             story_height = [SOFT_STORY_HEIGHT_RATIO * h0] + [h0] * (num_stories - 1)
         else:
