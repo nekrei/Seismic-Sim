@@ -19,6 +19,8 @@ import struct
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+from code_design import DesignError, DesignInput, generate_design
+
 from mdof_response import (
     MDOF_ShearBuilding, FURNITURE_CLASSES, BEAM_WIDTH,
     plan_dims_from_area, DEFAULT_AREA_SQFT, SQM_PER_SQFT,
@@ -31,7 +33,7 @@ from mdof_response import (
     finite_or_none, furniture_decimation, accumulated_damage,
     subsample_nearest, DAMAGE_CODES, DAMAGE_CODE_OF_BRANCH,
     DRIFT_LIMIT_IO, DRIFT_LIMIT_LS,
-    _HFTDConvolution,
+    _HFTDConvolution, RHO_LONGITUDINAL,
 )
 
 # Spec 14 A1: optional per-story damage blocks, in WIRE order -- every
@@ -278,6 +280,9 @@ def _validate_params(body, reference_magnitude=6.0):
     epicenter_depth_km = max(1.0, min(100.0, float(body.get("epicenter_depth_km", DEFAULT_EPICENTER_DEPTH_KM))))
     richter_magnitude = max(3.0, min(9.0, float(body.get("richter_magnitude", reference_magnitude))))
     area_sqft = max(200.0, min(2000.0, float(body.get("area_sqft", DEFAULT_AREA_SQFT))))
+    rho_longitudinal = float(body.get("rho_longitudinal", RHO_LONGITUDINAL))
+    if not np.isfinite(rho_longitudinal) or not .01 <= rho_longitudinal <= .06:
+        raise ParamError("rho_longitudinal must be between 0.01 and 0.06")
 
     # --- spec 10 ------------------------------------------------------
     # An unknown section_stiffness_mode falls back to the default rather
@@ -317,6 +322,7 @@ def _validate_params(body, reference_magnitude=6.0):
         "epicenter_depth_km": epicenter_depth_km,
         "richter_magnitude": richter_magnitude,
         "area_sqft": area_sqft,
+        "rho_longitudinal": rho_longitudinal,
         "section_stiffness_mode": mode,
         "p_delta": p_delta,
         "soft_ground_story": soft_ground_story,
@@ -326,6 +332,17 @@ def _validate_params(body, reference_magnitude=6.0):
         "column_depth_y_scalar": column_depth_y,
         "beam_depth_scalar": beam_depth,
     }
+
+
+@app.route("/design", methods=["POST"])
+def design():
+    """Generate an illustrative member profile without changing the building."""
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        inp = DesignInput(**body)
+        return jsonify(generate_design(inp))
+    except (DesignError, TypeError, ValueError, OverflowError) as exc:
+        return jsonify({"error": "invalid_design", "detail": str(exc)}), 400
 
 
 @app.route("/compute", methods=["POST"])
@@ -379,6 +396,7 @@ def compute():
         plan_span_x=plan_span_x, plan_span_y=plan_span_y,
         section_stiffness_mode=p["section_stiffness_mode"],
         p_delta=p["p_delta"],
+        rho_longitudinal=p["rho_longitudinal"],
     )
     torsion = nonlinear_params.pop('torsion')
     has_y = ground.get("Y") is not None
@@ -557,6 +575,7 @@ def compute():
         # the header length it reads back).
         "story_heights": building_x.h.tolist(),
         "section_stiffness_mode": p["section_stiffness_mode"],
+        "rho_longitudinal": p["rho_longitudinal"],
         "cracked_factor_column": building_x.cracked_factor_column,
         "cracked_factor_beam": building_x.cracked_factor_beam,
         "p_delta_enabled": p["p_delta"],
