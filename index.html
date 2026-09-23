@@ -275,6 +275,21 @@
         }
 
         .view-buttons { display: flex; gap: 8px; }
+        #designModePanel .details-body { gap: 10px; }
+        #codeDesignControls { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; }
+        #codeDesignControls > * { min-width: 0; max-width: 100%; }
+        #codeDesignControls[hidden], #designComparison[hidden] { display: none; }
+        #designModePanel select { min-width: 0; flex: 1; background: #171728; color: #fff; border: 1px solid rgba(255,255,255,.15); border-radius: 6px; padding: 7px; }
+        #designModePanel output { min-width: 62px; text-align: right; color: #ffd764; font-size: 11px; }
+        .design-scope, .design-preview { font-size: 11px; line-height: 1.55; color: rgba(255,255,255,.72); }
+        .design-scope { border-left: 2px solid #ffd764; padding-left: 9px; margin: 3px 0 6px; }
+        .design-preview { padding: 9px; border-radius: 8px; background: rgba(255,255,255,.045); overflow-wrap: anywhere; }
+        #designDriftChart, #designIdaChart { width: 100%; height: 170px; }
+        #designDriftChart { height: 190px; }
+        #designMemberOutput[hidden] { display: none; }
+        #designModePanel button:disabled { opacity: .5; cursor: default; }
+        #controls[data-design-mode="code"] #buildingParamsPanel input[type="range"] { display: none; }
+        #controls[data-design-mode="code"] #buildingParamsPanel .panel-value { flex: 1; text-align: right; }
         .view-buttons button {
             flex: 1;
             background: rgba(255,255,255,0.06);
@@ -1090,13 +1105,44 @@
             </div>
         </details>
 
+        <details id="designModePanel">
+            <summary><span class="panel-header">Design Mode</span><span class="chevron">▶</span></summary>
+            <div class="details-body">
+                <div class="ctrl-row"><label class="panel-label" for="designModeSelect">Mode</label>
+                    <select id="designModeSelect"><option value="manual">Manual</option><option value="code">Code design</option></select></div>
+                <div id="codeDesignControls" hidden>
+                    <p class="design-scope">This implements the <em>skeleton</em> of code design — seismic demand → vertical distribution → drift check → member sizing → a capacity-design ratio — not an ACI 318 or BNBC design. There is no rebar detailing, no foundation, no soil-structure interaction, no irregularity penalty, no redundancy factor, no construction-quality factor. “Strength” comes from an assumed reinforcement ratio. A shear model cannot represent the beam-versus-column hinge distinction directly, only its <em>effect</em> — which story is relatively weakest — so strong-column-weak-beam is implemented as a <strong>story-strength-profile rule</strong>, not as joint-level capacity design. All code constants are TO VERIFY.</p>
+                    <div class="ctrl-row"><label class="panel-label" for="designStories">Stories</label><input id="designStories" type="range" min="1" max="20" value="7"><output id="designStoriesOut">7</output></div>
+                    <div class="ctrl-row"><label class="panel-label" for="designHeight">Story height</label><input id="designHeight" type="range" min="2.5" max="5" step="0.1" value="3.5"><output id="designHeightOut">3.5 m</output></div>
+                    <div class="ctrl-row"><label class="panel-label" for="designArea">Area</label><input id="designArea" type="range" min="200" max="2000" step="1" value="543"><output id="designAreaOut">543 sq ft</output></div>
+                    <div class="ctrl-row"><label class="panel-label" for="designOccupancy">Occupancy</label><select id="designOccupancy"><option>I/II</option><option>III</option><option>IV</option></select></div>
+                    <div class="ctrl-row"><label class="panel-label" for="designZone">Zone</label><select id="designZone"><option value="1">1</option><option value="2" selected>2 · Dhaka</option><option value="3">3</option><option value="4">4</option></select></div>
+                    <div class="ctrl-row"><label class="panel-label" for="designSite">Site</label><select id="designSite"><option>SA</option><option>SB</option><option selected>SC</option><option>SD</option><option>SE</option></select></div>
+                    <div class="ctrl-row"><label class="panel-label" for="designDuctility">Frame</label><select id="designDuctility"><option>OMRF</option><option>IMRF</option><option selected>SMRF</option></select></div>
+                    <div id="designPreview" class="design-preview" role="status" aria-live="polite">Choose Code design to generate member sizes.</div>
+                    <div class="view-buttons"><button id="designApplyBtn" class="primary" type="button" disabled>Apply generated building</button></div>
+                    <div class="view-buttons"><button id="designCompareBtn" type="button" disabled>Compare with soft ground story</button></div>
+                    <div id="designComparison" class="design-preview" hidden>
+                        <div class="view-buttons"><button id="designShowCode" type="button">Code designed</button><button id="designShowArbitrary" type="button">Arbitrary soft story</button></div>
+                        <div id="designCompareStatus" role="status"></div>
+                        <canvas id="designDriftChart" aria-label="Drift and ductility by story"></canvas>
+                        <div class="view-buttons"><button id="designIdaBtn" type="button">Run both intensity sweeps</button><button id="designIdaCancelBtn" type="button" disabled>Cancel</button></div>
+                        <canvas id="designIdaChart" aria-label="Peak drift against intensity for both buildings"></canvas>
+                        <p id="designIdaStatus">Run sweeps to compare measured collapse intensity.</p>
+                        <p id="designElasticCaveat">The elastic result may look less impressive; the nonlinear response shows whether damage concentrates.</p>
+                    </div>
+                </div>
+            </div>
+        </details>
+
         <!-- Building Parameters: collapsed by default -->
-        <details>
+        <details id="buildingParamsPanel">
             <summary>
                 <span class="panel-header">Building Parameters</span>
                 <span class="chevron">▶</span>
             </summary>
             <div class="details-body">
+                <div id="designMemberOutput" class="design-preview" hidden></div>
                 <div class="ctrl-row">
                     <span class="panel-label">Stories</span>
                     <input type="range" id="storiesSlider" min="1" max="20" step="1" value="7" />
@@ -5429,6 +5475,9 @@
         let collapseCache = null;
         function invalidateCollapseCache() {
             collapseCache = null;
+            comparisonBuffers.clear();
+            comparisonModels = null;
+            document.getElementById('designComparison').hidden = true;
             identityData = null;
             convergenceRun = null;
             invalidateSignalExperiments();
@@ -5444,13 +5493,14 @@
             liveRecompute(folderSelect.value, false, true);
         });
 
-        async function liveRecompute(folder, autoScaleAmplify = false, nonlinear = false) {
+        const comparisonBuffers = new Map();
+        async function liveRecompute(folder, autoScaleAmplify = false, nonlinear = false, overrideParams = null) {
             if (!folder) return;
             if (liveAbortController) liveAbortController.abort();
             liveAbortController = new AbortController();
             const { signal } = liveAbortController;
 
-            const params = requestParams(folder);
+            const params = overrideParams ? { ...overrideParams } : requestParams(folder);
             const buildingKey = elasticBuildingKey(params);
 
             // Loading overlay (spec 4, Part H) -- shown for the duration of
@@ -5484,8 +5534,10 @@
             if (nonlinear && collapseCache?.key !== cacheKey) startElapsed('Running collapse analysis');
             recomputeOverlay.classList.add('is-active');
             try {
-                const res = nonlinear && collapseCache?.key === cacheKey
-                    ? new Response(collapseCache.buffer)
+                const storedBuffer = overrideParams ? comparisonBuffers.get(cacheKey) :
+                    (nonlinear && collapseCache?.key === cacheKey ? collapseCache.buffer : null);
+                const res = storedBuffer
+                    ? new Response(storedBuffer)
                     : await fetch(COMPUTE_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -5541,6 +5593,7 @@
                     }
                     if (collapseCache?.key !== cacheKey) showToast('Successfully Cached');
                     collapseCache = {key: cacheKey, buffer: buf};
+                    if (overrideParams) comparisonBuffers.set(cacheKey, buf);
                 }
 
                 // Matches the padding server.py adds so Float32Array's
@@ -5650,6 +5703,7 @@
                 recomputeOverlay.classList.remove('is-active');
                 snapshotBuildingParams();
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
+                return { buffer: buf, header, params };
             } catch (err) {
                 // A superseded (aborted) request leaves the overlay exactly
                 // as it found it -- either already hidden, or still active
@@ -5671,6 +5725,10 @@
         // The building + earthquake part of a /compute request (everything
         // but the collapse-only fields). Shared by liveRecompute and the
         // elastic-ghost key (spec 14 C8).
+        let appliedDesign = null;
+        let appliedDesignInput = null;
+        let designPreviewData = null;
+        let designInputSnapshot = null;
         function requestParams(folder) {
             const params = {
                 record: folder,
@@ -5704,6 +5762,21 @@
             // which is exactly the identity transform we want.
             if (currentReferenceMagnitude != null) {
                 params.richter_magnitude = parseFloat(richterSlider.value);
+            }
+            if (appliedDesign) {
+                Object.assign(params, {
+                    num_stories: appliedDesignInput.num_stories,
+                    mass_per_floor: appliedDesign.mass_per_floor,
+                    area_sqft: appliedDesignInput.area_sqft,
+                    story_height_profile: appliedDesign.story_height_profile,
+                    column_depth_x_profile: appliedDesign.column_depth_x_profile,
+                    column_depth_y_profile: appliedDesign.column_depth_y_profile,
+                    beam_depth_profile: appliedDesign.beam_depth_profile,
+                    rho_longitudinal: appliedDesign.rho_longitudinal,
+                    backbone_mu_cap: appliedDesign.backbone_mu_cap,
+                    backbone_mu_ult: appliedDesign.backbone_mu_ult,
+                    soft_ground_story: false,
+                });
             }
             return params;
         }
@@ -6304,6 +6377,265 @@
             [beamSlider, beamLabel, v => parseFloat(v).toFixed(2) + 'm'],
             [areaSlider, areaLabel, v => Math.round(parseFloat(v)) + ' sq ft'],
         ];
+        const designModeSelect = document.getElementById('designModeSelect');
+        const codeDesignControls = document.getElementById('codeDesignControls');
+        const designPreviewEl = document.getElementById('designPreview');
+        const designMemberOutput = document.getElementById('designMemberOutput');
+        const designApplyBtn = document.getElementById('designApplyBtn');
+        const designCompareBtn = document.getElementById('designCompareBtn');
+        const designComparison = document.getElementById('designComparison');
+        const designCompareStatus = document.getElementById('designCompareStatus');
+        const designInputs = ['designStories','designHeight','designArea','designOccupancy',
+            'designZone','designSite','designDuctility'].map(id => document.getElementById(id));
+        let designGeneration = 0;
+        let manualValues = null;
+        let comparisonModels = null;
+        const DESIGN_URL = IS_LOCAL_DEV ? '/design' : `${COMPUTE_BACKEND_URL}/design`;
+        function designInput() {
+            return {
+                num_stories: Number(designInputs[0].value), story_height: Number(designInputs[1].value),
+                area_sqft: Number(designInputs[2].value), occupancy: designInputs[3].value,
+                zone: Number(designInputs[4].value), site_class: designInputs[5].value,
+                ductility: designInputs[6].value,
+            };
+        }
+        function showDesignValues(design) {
+            const x = design.column_depth_x_profile, y = design.column_depth_y_profile;
+            const size = v => `${v[0].toFixed(3)} → ${v.at(-1).toFixed(3)} m`;
+            storiesLabel.textContent = String(x.length);
+            massLabel.textContent = `${(design.mass_per_floor / 1000).toFixed(1)} t`;
+            columnXLabel.textContent = size(x);
+            columnYLabel.textContent = size(y);
+            beamLabel.textContent = size(design.beam_depth_profile);
+            areaLabel.textContent = `${Math.round(designInputSnapshot.area_sqft)} sq ft`;
+            designMemberOutput.hidden = false;
+            designMemberOutput.textContent = `Generated member sizes, bottom → top (m)\n` +
+                x.map((v, i) => `Story ${i + 1}: X ${v.toFixed(3)} · Y ${y[i].toFixed(3)} · beam ${design.beam_depth_profile[i].toFixed(3)}`).join('\n') +
+                `\nReinforcement ratio ${design.rho_longitudinal.toFixed(4)} · mass/floor ${(design.mass_per_floor / 1000).toFixed(1)} t`;
+        }
+        async function previewCodeDesign() {
+            const generation = ++designGeneration;
+            comparisonModels = null;
+            designComparison.hidden = true;
+            designApplyBtn.disabled = true; designCompareBtn.disabled = true;
+            designInputSnapshot = designInput();
+            document.getElementById('designStoriesOut').textContent = designInputSnapshot.num_stories;
+            document.getElementById('designHeightOut').textContent = `${designInputSnapshot.story_height.toFixed(1)} m`;
+            document.getElementById('designAreaOut').textContent = `${Math.round(designInputSnapshot.area_sqft)} sq ft`;
+            designPreviewEl.textContent = 'Calculating member sizes…';
+            try {
+                const response = await fetch(DESIGN_URL, { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(designInputSnapshot) });
+                const result = await response.json();
+                if (generation !== designGeneration || designModeSelect.value !== 'code') return;
+                if (!response.ok) throw new Error(result.detail || `Design request ${response.status}`);
+                designPreviewData = result;
+                designPreviewEl.textContent = `Preview only · base shear ${(result.base_shear_N / 1000).toFixed(1)} kN · ` +
+                    `${result.iterations} sizing iterations · Tₐ ${result.period_empirical_s.toFixed(2)} s / model ${result.period_actual_s.toFixed(2)} s. ` +
+                    (result.period_over_draft_2s_limit ? 'Model period exceeds the draft 2 s equivalent-static limit; applicability is unverified. ' : '') +
+                    `Apply to run this building.`;
+                showDesignValues(result);
+                designApplyBtn.disabled = false;
+            } catch (error) {
+                if (generation === designGeneration) designPreviewEl.textContent = `Design unavailable: ${error.message}`;
+            }
+        }
+        designModeSelect.addEventListener('change', () => {
+            ++designGeneration;
+            const code = designModeSelect.value === 'code';
+            controlsPanel.dataset.designMode = code ? 'code' : 'manual';
+            codeDesignControls.hidden = !code;
+            BUILDING_SLIDERS.forEach(([el]) => { el.disabled = code; });
+            softGroundStoryToggle.disabled = code;
+            weakStorySelect.disabled = code; weakDepthSlider.disabled = code;
+            if (code) {
+                manualValues = BUILDING_SLIDERS.map(([el]) => el.value);
+                previewCodeDesign();
+            } else {
+                const hadApplied = !!appliedDesign;
+                appliedDesign = null; appliedDesignInput = null;
+                designPreviewData = null; comparisonModels = null;
+                designMemberOutput.hidden = true; designComparison.hidden = true;
+                BUILDING_SLIDERS.forEach(([el, label, fmt], i) => {
+                    el.value = manualValues[i]; label.textContent = fmt(el.value);
+                });
+                if (hadApplied) scheduleLiveRecompute();
+            }
+        });
+        designInputs.forEach(el => el.addEventListener('input', () => {
+            if (designModeSelect.value === 'code') previewCodeDesign();
+        }));
+        designApplyBtn.addEventListener('click', async () => {
+            if (!designPreviewData) return;
+            appliedDesign = designPreviewData;
+            appliedDesignInput = { ...designInputSnapshot };
+            designApplyBtn.disabled = true;
+            invalidateCollapseCache();
+            const result = await liveRecompute(folderSelect.value);
+            designApplyBtn.disabled = false;
+            designCompareBtn.disabled = !result;
+            if (result) designPreviewEl.textContent = 'Applied · the generated building is now in the viewer.';
+        });
+        function comparisonParams(kind) {
+            const code = requestParams(folderSelect.value);
+            if (kind === 'code') return code;
+            const arbitrary = { ...code };
+            const uniform = appliedDesign.column_depth_x_profile.reduce((a, b) => a + b, 0) /
+                appliedDesign.column_depth_x_profile.length;
+            delete arbitrary.story_height_profile;
+            delete arbitrary.column_depth_x_profile;
+            delete arbitrary.column_depth_y_profile;
+            delete arbitrary.beam_depth_profile;
+            delete arbitrary.backbone_mu_cap;
+            delete arbitrary.backbone_mu_ult;
+            arbitrary.story_height = appliedDesignInput.story_height;
+            arbitrary.column_depth_x = uniform;
+            arbitrary.column_depth_y = uniform;
+            arbitrary.beam_depth = appliedDesign.beam_depth_profile[0];
+            arbitrary.soft_ground_story = true;
+            return arbitrary;
+        }
+        function comparisonHeader(result) { return result?.header ?? null; }
+        function drawDesignComparison() {
+            if (!comparisonModels?.code || !comparisonModels?.arbitrary) return;
+            const code = comparisonHeader(comparisonModels.code);
+            const arbitrary = comparisonHeader(comparisonModels.arbitrary);
+            const canvas = document.getElementById('designDriftChart');
+            const { ctx, w, h } = signalCanvas(canvas, 190);
+            const N = code.num_stories;
+            const driftA = arbitrary.collapse.axes.X.peak_drift_ratio;
+            const driftC = code.collapse.axes.X.peak_drift_ratio;
+            const muA = arbitrary.collapse.axes.X.peak_mu.map(row => Math.max(...row));
+            const muC = code.collapse.axes.X.peak_mu.map(row => Math.max(...row));
+            for (const [valuesA, valuesC, top, title] of [
+                [driftA, driftC, 7, 'Peak story drift ratio'], [muA, muC, 100, 'Peak column ductility μ']]) {
+                const peak = Math.max(1e-9, ...valuesA, ...valuesC);
+                ctx.fillStyle = '#fff'; ctx.font = '10px ui-monospace, monospace'; ctx.fillText(title, 8, top + 9);
+                const rowH = 68 / N;
+                for (let i = 0; i < N; i++) {
+                    const y = top + 16 + (N - 1 - i) * rowH;
+                    ctx.fillStyle = '#ffb46b'; ctx.fillRect(23, y, (w - 32) * valuesA[i] / peak, Math.max(1, rowH * .38));
+                    ctx.fillStyle = '#7fd4ff'; ctx.fillRect(23, y + rowH * .4, (w - 32) * valuesC[i] / peak, Math.max(1, rowH * .38));
+                }
+            }
+            ctx.fillStyle = '#ffb46b'; ctx.fillText('Arbitrary', 8, h - 4);
+            ctx.fillStyle = '#7fd4ff'; ctx.fillText('Code', 90, h - 4);
+            const collapsed = h => h.collapse.collapse_events?.length > 0;
+            const concentration = values => values[0] /
+                Math.max(1e-9, values.reduce((sum, value) => sum + value, 0) / values.length);
+            designCompareStatus.textContent = `Same record ${folderSelect.value}, same intensity ${INTENSITY_STEPS[Number(intensitySlider.value)]}×. ` +
+                `Arbitrary: ${collapsed(arbitrary) ? 'collapse' : 'no collapse'}; code: ${collapsed(code) ? 'collapse' : 'no collapse'}. ` +
+                `Story 1 drift ${(driftA[0] * 100).toFixed(2)}% vs ${(driftC[0] * 100).toFixed(2)}%; ` +
+                `concentration ${concentration(driftA).toFixed(2)} vs ${concentration(driftC).toFixed(2)}; ` +
+                `story 1 μ ${muA[0].toFixed(2)} vs ${muC[0].toFixed(2)} (arbitrary vs code).`;
+        }
+        async function showComparison(kind) {
+            if (!comparisonModels?.[kind]) return;
+            await liveRecompute(folderSelect.value, false, true, comparisonModels[kind].baseParams);
+        }
+        document.getElementById('designShowCode').addEventListener('click', () => showComparison('code'));
+        document.getElementById('designShowArbitrary').addEventListener('click', () => showComparison('arbitrary'));
+        designCompareBtn.addEventListener('click', async () => {
+            if (!appliedDesign) return;
+            designComparison.hidden = false;
+            designCompareBtn.disabled = true;
+            designCompareStatus.textContent = 'Running both nonlinear buildings on the same record…';
+            const baseCode = comparisonParams('code');
+            const baseArbitrary = comparisonParams('arbitrary');
+            try {
+                const code = await liveRecompute(folderSelect.value, false, true, baseCode);
+                const arbitrary = await liveRecompute(folderSelect.value, false, true, baseArbitrary);
+                if (!code || !arbitrary) {
+                    designCompareStatus.textContent = 'One building did not converge. Adjust intensity and rerun; no collapse ranking is inferred.';
+                    return;
+                }
+                comparisonModels = { code: { ...code, baseParams: baseCode },
+                                     arbitrary: { ...arbitrary, baseParams: baseArbitrary } };
+                drawDesignComparison();
+                const controller = new AbortController();
+                const intensity = INTENSITY_STEPS[Number(intensitySlider.value)];
+                const elastic = await Promise.all([baseCode, baseArbitrary].map(async p => {
+                    const buf = await experimentResponse({ ...p, nonlinear: false, intensity_scale: intensity }, controller.signal, true);
+                    return decodeSignalResponse(buf, 'X', p.num_stories - 1).header;
+                }));
+                document.getElementById('designElasticCaveat').textContent =
+                    `Elastic control: T₁ ${elastic[0].fundamental_period_s_X.toFixed(2)} s (code) vs ` +
+                    `${elastic[1].fundamental_period_s_X.toFixed(2)} s (arbitrary). ` +
+                    `Peak drift ${(Math.max(...elastic[0].peak_drift_ratio_X) * 100).toFixed(2)}% vs ` +
+                    `${(Math.max(...elastic[1].peak_drift_ratio_X) * 100).toFixed(2)}%. ` +
+                    `The nonlinear drift and ductility comparison above determines where damage concentrates.`;
+            } catch (error) {
+                designCompareStatus.textContent = `Comparison incomplete: ${error.message}`;
+            } finally { designCompareBtn.disabled = false; }
+        });
+        let designIdaAbort = null;
+        const designIdaBtn = document.getElementById('designIdaBtn');
+        const designIdaCancelBtn = document.getElementById('designIdaCancelBtn');
+        const designIdaStatus = document.getElementById('designIdaStatus');
+        function drawDesignIda(points) {
+            const {ctx,w,h} = signalCanvas(document.getElementById('designIdaChart'), 170);
+            const all = [...points.code, ...points.arbitrary].filter(p => Number.isFinite(p.peak));
+            const max = Math.max(.001, ...all.map(p => p.peak));
+            const x = intensity => 28 + Math.log(intensity / .05) / Math.log(20 / .05) * (w - 38);
+            const y = peak => h - 25 - peak / max * (h - 42);
+            for (const [kind,color] of [['code','#7fd4ff'],['arbitrary','#ffb46b']]) {
+                ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+                let active = false;
+                for (const p of points[kind]) {
+                    if (!Number.isFinite(p.peak)) { active = false; continue; }
+                    if (active) ctx.lineTo(x(p.intensity), y(p.peak)); else ctx.moveTo(x(p.intensity), y(p.peak));
+                    active = true;
+                }
+                ctx.stroke();
+                const collapse = points[kind].find(p => p.collapse);
+                if (collapse) {
+                    ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(x(collapse.intensity), 8);
+                    ctx.lineTo(x(collapse.intensity), h - 25); ctx.stroke(); ctx.setLineDash([]);
+                }
+            }
+            ctx.font = '10px ui-monospace, monospace'; ctx.fillStyle = '#ffb46b'; ctx.fillText('arbitrary', 28, 14);
+            ctx.fillStyle = '#7fd4ff'; ctx.fillText('code', 100, 14);
+            ctx.fillStyle = '#fff'; ctx.fillText('peak drift ratio · intensity →', 28, h - 5);
+        }
+        designIdaCancelBtn.addEventListener('click', () => designIdaAbort?.abort());
+        designIdaBtn.addEventListener('click', async () => {
+            if (!comparisonModels) return;
+            designIdaAbort?.abort();
+            const controller = designIdaAbort = new AbortController();
+            const points = {code: [], arbitrary: []};
+            designIdaBtn.disabled = true; designIdaCancelBtn.disabled = false;
+            try {
+                for (const kind of ['arbitrary','code']) {
+                    const base = comparisonModels[kind].baseParams;
+                    for (const intensity of SWEEP_LEVELS) {
+                        if (controller.signal.aborted) return;
+                        designIdaStatus.textContent = `${kind} sweep ${points[kind].length + 1}/20…`;
+                        const params = {...base, nonlinear:true, torsion:false,
+                            hftd_max_iterations:200, intensity_scale:intensity};
+                        try {
+                            const buffer = await experimentResponse(params, controller.signal, true);
+                            const length = new DataView(buffer).getUint32(0,true);
+                            const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer,4,length)));
+                            const converged = header.collapse?.converged;
+                            points[kind].push({intensity, peak:converged ? Math.max(...header.collapse.axes.X.peak_drift_ratio) : null,
+                                collapse:converged && !!header.collapse.collapse_events?.length});
+                        } catch (error) {
+                            if (error.name === 'AbortError') return;
+                            points[kind].push({intensity, peak:null, collapse:false});
+                        }
+                        drawDesignIda(points);
+                    }
+                }
+                const band = kind => points[kind].find(p => p.collapse)?.intensity;
+                designIdaStatus.textContent = `First sampled collapse: arbitrary ${band('arbitrary') ?? 'none'}×, ` +
+                    `code ${band('code') ?? 'none'}×. Gaps mean nonconvergence; one record is not a fragility curve.`;
+            } finally {
+                if (designIdaAbort === controller) {
+                    designIdaAbort = null; designIdaBtn.disabled = false; designIdaCancelBtn.disabled = true;
+                    if (controller.signal.aborted) designIdaStatus.textContent = 'Sweep cancelled; partial measured points remain.';
+                }
+            }
+        });
         let lastValidBuilding = null;
         function snapshotBuildingParams() {
             lastValidBuilding = {
@@ -6607,7 +6939,8 @@
         }
 
         function buildingParamsAtDefault() {
-            return storiesSlider.value === '7'
+            return designModeSelect.value === 'manual' && !appliedDesign
+                && storiesSlider.value === '7'
                 && massSlider.value === '1000000'
                 && parseFloat(zetaSlider.value) === 0.05
                 && parseFloat(columnXSlider.value) === DEFAULT_COLUMN_DEPTH_X

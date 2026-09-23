@@ -1027,3 +1027,51 @@ a common display grid: the elastic base and nonlinear correction use separate
 solver FFT padding. Sweep outcomes depend on the ground-motion record; yield,
 collapse, and nonconvergence are shown only when returned by that run. Both
 Frequency output traces remain measured from relative floor displacement.
+
+## Spec 18: educational Code design mode
+
+Design Mode generates four per-story geometry profiles, one reinforcement
+ratio, and a consistent floor mass from area, illustrative dead/live loads,
+zone, site, occupancy and frame ductility class. It previews the sizes before
+Apply. Building Parameters shows the generated bottom-to-top member sizes as
+read-only values; switching to Manual restores the previous manual settings.
+The generator checks the assembled frame's static drift, first-mode stiffness,
+story strength and P-Delta coefficient in both axes. It never replaces the
+FFT or nonlinear response solver. The A/B control computes and caches a code
+designed profile and a uniform-column soft-ground-story profile under the same
+record and intensity, displays measured drift/ductility, and can run both
+intensity sweeps. The viewer uses one 3D scene with A/B switching.
+
+**API.** `POST /design` (in `code_design.py`, served by `server.py`) takes
+`num_stories`, `story_height`, `area_sqft`, `occupancy` (`I/II`, `III`,
+`IV`), `zone`, `site_class` (`SA`–`SE`) and `ductility` (`OMRF`/`IMRF`/
+`SMRF`). It returns the four solver profiles (`story_height_profile`,
+`column_depth_x_profile`, `column_depth_y_profile`, `beam_depth_profile`),
+the scalar `rho_longitudinal`, `mass_per_floor`, and an audit trail:
+base shear, floor forces, story shears, required vs assembled `k0` per
+axis, the `12EI/h³`-style shortcut for comparison, static drifts,
+empirical vs assembled period, and iteration count. Invalid input, or a
+design that cannot converge within 10 iterations or 2 m column depth,
+returns HTTP 400 `invalid_design`; it is never silently clipped.
+`POST /compute` now accepts an optional scalar `rho_longitudinal`
+(0.01–0.06, default 0.02; HTTP 400 outside that range) and echoes it in
+the JSON header. It is a capacity input only: the binary block order and
+the FFT/nonlinear solver are unchanged.
+
+This implements the *skeleton* of code design — seismic demand → vertical
+distribution → drift check → member sizing → a capacity-design ratio —
+not an ACI 318 or BNBC design. There is no rebar detailing, no
+foundation, no soil-structure interaction, no irregularity penalty, no
+redundancy factor, no construction-quality factor. "Strength" comes from
+an assumed reinforcement ratio. A shear model cannot represent the
+beam-versus-column hinge distinction directly, only its *effect* — which
+story is relatively weakest — so strong-column-weak-beam is implemented
+as a **story-strength-profile rule**, not as joint-level capacity design.
+
+**Source status:** all candidate BNBC 2020 constants are marked `TO VERIFY`.
+The publicly accessible chapter checked for this work has 2017 draft page
+labels; final BNBC 2020 Part 6 could not be accessed. The surface loads,
+reinforcement bounds, capacity ratio and ductility-to-backbone mapping are
+project assumptions. The current interface is an educational demonstration,
+not a design tool for a real building. Math PDF Part M and
+`verification/18-code-design-mode.md` list every candidate value and status.
