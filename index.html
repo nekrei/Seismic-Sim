@@ -295,6 +295,8 @@
             color: #ffd764;
         }
         .view-buttons button.primary:hover { background: rgba(255,215,100,0.25); }
+        .cinematic-reenable { margin-top: 8px; width: 100%; padding: 8px 10px; border: 1px solid rgba(255,215,100,0.35); border-radius: 8px; background: rgba(255,215,100,0.08); color: #ffd764; cursor: pointer; font: inherit; }
+        .cinematic-reenable[hidden] { display: none; }
 
         #runCollapseBtn { white-space: normal; }
         #runCollapseBtn:active { transform: scale(0.97); }
@@ -1277,6 +1279,7 @@
                 <div class="view-buttons">
                     <button class="primary" id="backToFullViewBtn">⤢ Back to full view</button>
                 </div>
+                <button class="cinematic-reenable" id="cinematicReenableBtn" type="button" hidden>Cinematic camera off · turn back on</button>
             </div>
         </details>
     </div>
@@ -1434,6 +1437,7 @@
         // spec 4, Part B (per-floor viewing) / Part E (redesigned panel) / Part H (recompute overlay)
         const floorSelect = document.getElementById('floorSelect');
         const backToFullViewBtn = document.getElementById('backToFullViewBtn');
+        const cinematicReenableBtn = document.getElementById('cinematicReenableBtn');
         const recomputeOverlay = document.getElementById('recomputeOverlay');
         const recomputeError = document.getElementById('recomputeError');
         const toastEl = document.getElementById('toast');
@@ -1814,6 +1818,10 @@
         // this by differentiating ground displacement in the browser.
         let groundAccelData = null;
         let shakeTrace = null;
+        let cinematicOnset = null;
+        let cinematicTriggered = false;
+        let cinematicOverride = false;
+        let cinematicFollow = null;
         // Static-path fetch cache only (parameter-independent, like
         // groundSpectrum): the raw JSON for one record, reused across every
         // same-record live recompute rather than refetched on a drag.
@@ -4755,7 +4763,7 @@
         // fights limits that were sized for a single floor. Reuses the same
         // FOV-derived fit-distance math as frameCameraToBuilding(), applied
         // to a tight box around one floor instead of the whole height. ---
-        function frameCameraToFloor(floorIndex) {
+        function frameCameraToFloor(floorIndex, targetCentre = null, cinematic = false) {
             if (!buildingGroups[floorIndex]) return;
             activeFloorIndex = floorIndex;
 
@@ -4775,14 +4783,13 @@
 
             const floorY = buildingGroups[floorIndex].position.y; // floors only move in X/Z, so Y is safe/static to read here
             const dir = new THREE.Vector3(1.2, 0.5, 1.5).normalize().multiplyScalar(dist);
-            const toPos = dir.clone();
-            toPos.y += floorY;
-            const toTarget = new THREE.Vector3(0, floorY, 0);
+            const toTarget = targetCentre?.clone() ?? new THREE.Vector3(0, floorY, 0);
+            const toPos = dir.clone().add(toTarget);
 
             // activeFloorIndex is already set above, so tweenCameraTo()'s own
             // scheduleAutoOrbit() call (Part D) picks up the per-floor guard
             // immediately -- no separate call needed here.
-            tweenCameraTo(toPos, toTarget);
+            tweenCameraTo(toPos, toTarget, cinematic && matchMedia('(prefers-reduced-motion: reduce)').matches ? 1 : 550);
         }
 
         function frameCameraToFullBuilding() {
@@ -4859,6 +4866,27 @@
             return [(trace.x[i] * (1-f) + trace.x[j] * f) * trace.gain,
                     (trace.z[i] * (1-f) + trace.z[j] * f) * trace.gain];
         }
+        const CINEMATIC_LEAD_SECONDS = 1.5;
+        function firstCinematicOnset(collapse) {
+            if (!collapse?.converged) return null;
+            let best = null;
+            for (const axis of ['X', 'Y']) {
+                (collapse.axes?.[axis]?.t_collapse || []).forEach((time, floorIndex) => {
+                    if (Number.isFinite(time) && (!best || time < best.time)) {
+                        best = { time, story: floorIndex + 1, floorIndex,
+                            leadTime: Math.max(0, time - CINEMATIC_LEAD_SECONDS) };
+                    }
+                });
+            }
+            return best;
+        }
+        function criticallyDampedFollow(position, velocity, target, dt, tau = 0.4) {
+            const omega = 2 / tau, change = position - target;
+            const temp = (velocity + omega * change) * dt;
+            const decay = Math.exp(-omega * dt);
+            return { position: target + (change + temp) * decay,
+                     velocity: (velocity - omega * temp) * decay };
+        }
         // ---8<--- CINEMATIC-HELPERS-END
 
         function tweenCameraTo(toPos, toTarget, duration = 550) {
@@ -4897,7 +4925,15 @@
             // the `if (activeFloorIndex === null) { autoOrbitTimer = setTimeout(...) }` body.
         }
 
-        controls.addEventListener('start', () => { cameraTween = null; scheduleAutoOrbit(); });
+        controls.addEventListener('start', () => {
+            cameraTween = null;
+            if (cinematicTriggered && !cinematicOverride) {
+                cinematicOverride = true;
+                cinematicFollow = null;
+                cinematicReenableBtn.hidden = false;
+            }
+            scheduleAutoOrbit();
+        });
         controls.addEventListener('end', () => { scheduleAutoOrbit(); });
         scheduleAutoOrbit(); // arm on load
 
@@ -4963,6 +4999,11 @@
             floorRotData = extra.floorRot ?? null; // spec 12 -- absent on every path that has no rotation block
             damageData = extra.damage ?? null;     // spec 14 -- only a collapse run carries blocks
             collapseData = extra.collapse ?? null; // spec 14 -- header.collapse of that run
+            cinematicOnset = firstCinematicOnset(collapseData);
+            cinematicTriggered = false;
+            cinematicOverride = false;
+            cinematicFollow = null;
+            cinematicReenableBtn.hidden = true;
             damageView = prepareDamageView(damageData, drawnHeights);
             hysteresisLoadSerial++; // spec 14 C6: new data -> the ghost key changes
             showDamageLegend(damageView);
@@ -5921,6 +5962,14 @@
                 timeDisplay.textContent = `${animTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`;
             }
 
+            if (isPlaying && !isSeeking && cinematicOnset && !cinematicTriggered && !cinematicOverride &&
+                animTime >= cinematicOnset.leadTime) {
+                cinematicTriggered = true;
+                const g = buildingGroups[cinematicOnset.floorIndex];
+                const centre = g ? new THREE.Vector3(g.position.x, g.position.y, g.position.z) : null;
+                frameCameraToFloor(cinematicOnset.floorIndex, centre, true);
+            }
+
             const idx = currentIndex;
             // One compressed gain per frame for the whole scene (see
             // swayDisplayGain()) -- never a per-sample clamp, which would
@@ -5959,6 +6008,26 @@
             }
 
             applyCollapseFloors(scale); // spec 15: detached floors from the keyframe buffer (no-op otherwise)
+
+            if (cinematicTriggered && !cinematicOverride && !cameraTween && collapseAnim && cinematicOnset) {
+                const rec = collapseAnim.sim.bodies.find(r => r.source.kind === 'computed' && r.source.story === cinematicOnset.story);
+                const sample = rec && sampleBody(collapseAnim.sim, rec, animTime);
+                if (sample) {
+                    const target = new THREE.Vector3(
+                        rec.pivot[0] + SCENE_UNITS_PER_METRE * (sample.p[0] - rec.p0[0]),
+                        rec.pivot[1] + sample.p[1] - rec.p0[1],
+                        rec.pivot[2] + SCENE_UNITS_PER_METRE * (sample.p[2] - rec.p0[2]));
+                    if (!cinematicFollow) cinematicFollow = { position: controls.target.clone(), velocity: new THREE.Vector3() };
+                    const next = [0, 1, 2].map(i => criticallyDampedFollow(
+                        cinematicFollow.position.getComponent(i), cinematicFollow.velocity.getComponent(i),
+                        target.getComponent(i), delta));
+                    const previous = cinematicFollow.position.clone();
+                    next.forEach((v, i) => { cinematicFollow.position.setComponent(i, v.position); cinematicFollow.velocity.setComponent(i, v.velocity); });
+                    const shift = cinematicFollow.position.clone().sub(previous);
+                    controls.target.add(shift);
+                    camera.position.add(shift);
+                }
+            }
 
             // Columns span two differently-displaced levels, so their
             // transforms are re-derived every frame from the floor groups'
@@ -6109,6 +6178,9 @@
 
         // Per-floor view controls (spec 4, Part B).
         floorSelect.addEventListener('change', (e) => {
+            if (cinematicTriggered) {
+                cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
+            }
             const val = e.target.value;
             if (val === 'full') {
                 frameCameraToFullBuilding();
@@ -6117,8 +6189,19 @@
             }
         });
         backToFullViewBtn.addEventListener('click', () => {
+            if (cinematicTriggered) {
+                cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
+            }
             floorSelect.value = 'full';
             frameCameraToFullBuilding();
+        });
+        cinematicReenableBtn.addEventListener('click', () => {
+            // Past the lead point, re-arm the next playthrough only. Do not
+            // pull the current user-owned camera back toward falling debris.
+            cinematicOverride = !!cinematicOnset && animTime >= cinematicOnset.leadTime;
+            cinematicTriggered = cinematicOverride;
+            cinematicFollow = null;
+            cinematicReenableBtn.hidden = true;
         });
 
         // --- Frequency-domain drawer wiring (spec 6, Part B4/B5/B6) ---
