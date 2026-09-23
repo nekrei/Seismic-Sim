@@ -1813,6 +1813,7 @@
         // static file no longer describes the motion on screen. Never derive
         // this by differentiating ground displacement in the browser.
         let groundAccelData = null;
+        let shakeTrace = null;
         // Static-path fetch cache only (parameter-independent, like
         // groundSpectrum): the raw JSON for one record, reused across every
         // same-record live recompute rather than refetched on a drag.
@@ -4821,6 +4822,45 @@
             return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
         }
 
+        // ---8<--- CINEMATIC-HELPERS-BEGIN
+        const SHAKE_CUTOFF_HZ = 8;
+        const SHAKE_MAX_OFFSET = 0.06;
+        function shakePole(dt, cutoffHz = SHAKE_CUTOFF_HZ) {
+            if (!(dt > 0) || !(cutoffHz > 0) || cutoffHz * dt >= 0.5) return 0;
+            const q = 2 - Math.cos(2 * Math.PI * cutoffHz * dt);
+            return q - Math.sqrt(q * q - 1);
+        }
+        function lowPassShake(samples, dt, cutoffHz = SHAKE_CUTOFF_HZ) {
+            const pole = shakePole(dt, cutoffHz), output = new Float64Array(samples.length);
+            let previous = 0;
+            for (let i = 0; i < samples.length; i++) {
+                previous = (1 - pole) * samples[i] + pole * previous;
+                output[i] = previous;
+            }
+            return output;
+        }
+        function makeShakeTrace(accel, dt) {
+            if (!accel?.X?.length || !(dt > 0)) return null;
+            const x = lowPassShake(accel.X, dt);
+            const z = lowPassShake(accel.Y?.length === accel.X.length ? accel.Y : new Float64Array(x.length), dt);
+            const mean = arr => arr.reduce((sum, v) => sum + v, 0) / arr.length;
+            const mx = mean(x), mz = mean(z);
+            let peak = 0;
+            for (let i = 0; i < x.length; i++) {
+                x[i] -= mx; z[i] -= mz;
+                peak = Math.max(peak, Math.hypot(x[i], z[i]));
+            }
+            return { x, z, dt, gain: peak > 0 ? SHAKE_MAX_OFFSET / peak : 0 };
+        }
+        function shakeAtTime(trace, t, enabled, reducedMotion) {
+            if (!trace || !enabled || reducedMotion) return [0, 0];
+            const u = Math.max(0, Math.min(trace.x.length - 1, t / trace.dt));
+            const i = Math.floor(u), j = Math.min(i + 1, trace.x.length - 1), f = u - i;
+            return [(trace.x[i] * (1-f) + trace.x[j] * f) * trace.gain,
+                    (trace.z[i] * (1-f) + trace.z[j] * f) * trace.gain];
+        }
+        // ---8<--- CINEMATIC-HELPERS-END
+
         function tweenCameraTo(toPos, toTarget, duration = 550) {
             cameraTween = {
                 fromPos: camera.position.clone(),
@@ -4927,6 +4967,7 @@
             hysteresisLoadSerial++; // spec 14 C6: new data -> the ghost key changes
             showDamageLegend(damageView);
             groundAccelData = extra.groundAccel ?? null; // spec 9 -- null-safe the same way; whichever path loaded it, the time panel reads only this
+            shakeTrace = makeShakeTrace(groundAccelData, (time[1] - time[0]) || 0);
 
             periodReadout.textContent = (periodX != null && periodY != null)
                 ? `${periodX.toFixed(2)}s / ${periodY.toFixed(2)}s`
@@ -5957,33 +5998,18 @@
             controls.update();
             updateFogRange(); // resolved camera position for this frame, before the (reverted-after-render) shake offset below -- see updateFogRange()'s comment above animate()
 
-            // Subtle camera shake driven by the same intensity, for a bit of
-            // visceral "you are here" feedback during the strongest moments.
-            // Quadratic ramp keeps it near-invisible except at genuinely high
-            // intensity. Applied only to the rendered frame and reverted
-            // immediately after -- OrbitControls treats camera.position as
-            // ground truth on the next update(), so leaving the offset in
-            // place would get baked in and drift the "official" orbit
-            // position/distance frame over frame (same class of bug as the
-            // damping-drift issue frameCameraToBuilding had to guard against).
-            const shakeAmt = 0.06 * intensity * intensity;
-            let shakeX = 0, shakeY = 0, shakeZ = 0;
-            if (shakeAmt > 0.0001) {
-                shakeX = Math.sin(now * 0.013) * shakeAmt;
-                shakeY = Math.sin(now * 0.017 + 1.3) * shakeAmt * 0.6;
-                shakeZ = Math.cos(now * 0.011 + 0.7) * shakeAmt;
-                camera.position.x += shakeX;
-                camera.position.y += shakeY;
-                camera.position.z += shakeZ;
-            }
+            // The real acceleration signal is filtered once per load, then
+            // sampled at record time. Revert after render so OrbitControls
+            // never incorporates this decorative offset into its pose.
+            const [shakeX, shakeZ] = shakeAtTime(shakeTrace, animTime, true,
+                matchMedia('(prefers-reduced-motion: reduce)').matches);
+            camera.position.x += shakeX;
+            camera.position.z += shakeZ;
 
             composer.render();
 
-            if (shakeAmt > 0.0001) {
-                camera.position.x -= shakeX;
-                camera.position.y -= shakeY;
-                camera.position.z -= shakeZ;
-            }
+            camera.position.x -= shakeX;
+            camera.position.z -= shakeZ;
         }
 
         // --- Event bindings ---
