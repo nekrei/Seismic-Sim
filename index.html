@@ -871,7 +871,7 @@
             flex: 1;
             min-height: 340px;
         }
-        #spectrumCanvas, #timeCanvas, #hysteresisCanvas {
+        #spectrumCanvas, #timeCanvas, #hysteresisCanvas, #convergenceCanvas, #identityCanvas, #linearityCanvas, #sweepCanvas {
             width: 100%;
             height: 100%;
             display: block;
@@ -879,6 +879,17 @@
             transition: opacity 140ms ease-out, filter 140ms ease-out;
         }
         #spectrumCanvas.is-updating { opacity: 0.5; filter: blur(1.5px); }
+        .signals-loop-diagram { margin: 0; color: rgba(255,224,178,0.72); flex-shrink: 0; }
+        .signals-loop-diagram svg { display: block; width: 100%; max-height: 110px; }
+        .signals-loop-diagram .feedback { stroke: #ffb46b; stroke-width: 2; }
+        .signals-loop-diagram figcaption { font-size: 10px; line-height: 1.4; }
+        .signals-action { flex-shrink: 0; border: 1px solid rgba(255,255,255,0.1); border-radius: 9px; padding: 10px; }
+        .signals-action header { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #ffd764; font-size: 12px; }
+        .signals-action button { background: rgba(255,215,100,0.15); border: 1px solid rgba(255,215,100,0.3); color: #ffd764; border-radius: 7px; padding: 6px 9px; cursor: pointer; }
+        .signals-action button:disabled { opacity: 0.5; cursor: wait; }
+        .signals-action canvas { width: 100%; height: 150px; display: block; margin-top: 8px; }
+        #identityCanvas, #linearityCanvas, #sweepCanvas { height: 150px; }
+        .signals-action p { margin: 5px 0 0; color: rgba(255,255,255,0.7); font-size: 10px; line-height: 1.4; }
 
         /* Per-record sampling annotation (spec 6 Part B4). The greyed
            over-Nyquist band is zero-width for every record in this dataset
@@ -997,7 +1008,7 @@
         }
 
         @media (prefers-reduced-motion: reduce) {
-            #analysisDrawer, #analysisToggleBtn, #spectrumCanvas, #timeCanvas, #hysteresisCanvas,
+            #analysisDrawer, #analysisToggleBtn, #spectrumCanvas, #timeCanvas, #hysteresisCanvas, #convergenceCanvas, #identityCanvas, #linearityCanvas, #sweepCanvas,
             .tab-pane, .tab-strip button { transition-duration: 1ms; }
             .tab-pane { transform: none; }
         }
@@ -1337,6 +1348,7 @@
                 <button type="button" role="tab" data-tab="time" class="active" aria-selected="true">Time</button>
                 <button type="button" role="tab" data-tab="frequency" aria-selected="false">Frequency</button>
                 <button type="button" role="tab" data-tab="hysteresis" aria-selected="false">Hysteresis</button>
+                <button type="button" role="tab" data-tab="convergence" aria-selected="false">Convergence</button>
             </div>
             <div class="ctrl-row">
                 <span class="panel-label">Floor</span>
@@ -1349,6 +1361,21 @@
                     <button type="button" data-axis="Y">Y</button>
                 </div>
             </div>
+            <figure class="signals-loop-diagram">
+                <svg viewBox="0 0 380 110" role="img" aria-label="Ground acceleration enters an FFT, a modal transfer function and an inverse FFT; a path-dependent pseudo-force feeds back from displacement">
+                    <defs><marker id="signalArrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7" fill="currentColor"/></marker></defs>
+                    <g fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#signalArrow)">
+                        <path d="M8 30 H75 M105 30 H153 M175 30 H231 M279 30 H360"/>
+                        <path class="feedback" d="M355 38 V82 H147 V39"/>
+                    </g>
+                    <g fill="currentColor" font-size="10" font-family="ui-monospace, monospace">
+                        <text x="8" y="23">a_g(t)</text><text x="77" y="33">FFT</text><text x="155" y="33">+</text>
+                        <text x="184" y="23">H(jω)</text><text x="234" y="33">IFFT</text><text x="328" y="23">u(t)</text>
+                        <text x="174" y="72">FFT ← p_NL(t)</text><text x="245" y="98">k₀δ − V(δ, history)</text>
+                    </g>
+                </svg>
+                <figcaption>A nonlinear system solved as a linear system driven by a self-consistent feedback force, found by fixed-point iteration between time and frequency domains.</figcaption>
+            </figure>
             <div class="tab-panes">
                 <div class="tab-pane is-active" id="timePane" role="tabpanel">
                     <div class="spectrum-canvas-wrap">
@@ -1364,6 +1391,7 @@
                         <canvas id="spectrumCanvas"></canvas>
                     </div>
                     <div class="spectrum-sampling-note" id="spectrumSamplingNote"></div>
+                    <div class="spectrum-sampling-note" id="spectrumComparisonNote"></div>
                     <div class="spectrum-disabled-note" id="spectrumDisabledNote">
                         Frequency-domain data isn't available for this record/axis yet.
                     </div>
@@ -1379,7 +1407,27 @@
                         Run a collapse analysis to see the story's hysteresis loop.
                     </div>
                 </div>
+                <div class="tab-pane" id="convergencePane" role="tabpanel">
+                    <div class="spectrum-canvas-wrap"><canvas id="convergenceCanvas"></canvas></div>
+                    <div class="spectrum-sampling-note" id="convergenceNote"></div>
+                    <div class="spectrum-disabled-note" id="convergenceDisabledNote">Run a nonlinear analysis to see fixed-point convergence.</div>
+                </div>
             </div>
+            <section class="signals-action" id="identitySection" hidden>
+                <header><strong>Elastic identity and pseudo-force correction</strong></header>
+                <canvas id="identityCanvas" aria-label="Measured output, elastic prediction and corrected prediction"></canvas>
+                <p id="identityNote">Run a nonlinear analysis to compare the modal identity.</p>
+            </section>
+            <section class="signals-action">
+                <header><strong>Superposition at a and 2a</strong><span><select id="linearityMode" aria-label="Superposition mode"><option value="elastic">Elastic</option><option value="nonlinear">Nonlinear</option></select> <button id="linearityRunBtn" type="button">Run test</button></span></header>
+                <canvas id="linearityCanvas" aria-label="Superposition comparison"></canvas>
+                <p id="linearityNote">Run at the current intensity, then twice that intensity.</p>
+            </section>
+            <section class="signals-action">
+                <header><strong>Intensity sweep</strong><span><button id="sweepRunBtn" type="button">Run sweep</button> <button id="sweepCancelBtn" type="button" disabled>Cancel</button></span></header>
+                <canvas id="sweepCanvas" aria-label="Peak story drift ratio against intensity"></canvas>
+                <p id="sweepNote">20 log-spaced levels; elastic control then nonlinear samples.</p>
+            </section>
         </div>
     </div>
 
@@ -1503,6 +1551,21 @@
         const timePane = document.getElementById('timePane');
         const frequencyPane = document.getElementById('frequencyPane');
         const hysteresisPane = document.getElementById('hysteresisPane');
+        const convergencePane = document.getElementById('convergencePane');
+        const convergenceCanvas = document.getElementById('convergenceCanvas');
+        const convergenceNote = document.getElementById('convergenceNote');
+        const convergenceDisabledNote = document.getElementById('convergenceDisabledNote');
+        const identitySection = document.getElementById('identitySection');
+        const identityCanvas = document.getElementById('identityCanvas');
+        const identityNote = document.getElementById('identityNote');
+        const linearityRunBtn = document.getElementById('linearityRunBtn');
+        const linearityMode = document.getElementById('linearityMode');
+        const linearityCanvas = document.getElementById('linearityCanvas');
+        const linearityNote = document.getElementById('linearityNote');
+        const sweepRunBtn = document.getElementById('sweepRunBtn');
+        const sweepCancelBtn = document.getElementById('sweepCancelBtn');
+        const sweepCanvas = document.getElementById('sweepCanvas');
+        const sweepNote = document.getElementById('sweepNote');
         const hysteresisCanvas = document.getElementById('hysteresisCanvas');
         const hysteresisNote = document.getElementById('hysteresisNote');
         const hysteresisDisabledNote = document.getElementById('hysteresisDisabledNote');
@@ -1511,6 +1574,7 @@
         const timeDisabledNote = document.getElementById('timeDisabledNote');
         const spectrumDisabledNote = document.getElementById('spectrumDisabledNote');
         const spectrumSamplingNote = document.getElementById('spectrumSamplingNote');
+        const spectrumComparisonNote = document.getElementById('spectrumComparisonNote');
 
         // Frame-geometry defaults -- MUST match mdof_response.py's __main__
         // COLUMN_DEPTH_X/Y/BEAM_DEPTH and server.py's DEFAULT_COLUMN_DEPTH_X/Y/
@@ -1733,6 +1797,9 @@
         let floorRotData = null;
         let damageData = null;   // spec 14: {header, blocks{name: {data, shape, rateHz, npts}}} or null
         let collapseData = null; // spec 14: header.collapse of the loaded collapse run, or null
+        let convergenceRun = null;
+        let convergenceTolerance = 1e-4; // HFTD_DEFAULTS; overwritten if the request specifies it
+        let identityData = null;
         // Furniture (spec 5, Part B): furnitureData[axis]['table'|'chair'|'fan'][floorIndex] is a
         // decimated Float32Array of that class's relative-sway response for that floor, on that axis.
         // furnitureRate/furnitureNpts describe the decimated sample grid; furnitureItems holds the
@@ -4034,6 +4101,27 @@
             return logBinSpectrum(rel, dt);
         }
 
+        // The comparison control is measured from the held elastic run's
+        // floor and ground histories, then scaled by the requested intensity.
+        // Scaling both before the FFT preserves the relative-displacement
+        // definition and avoids constructing an output from Input × Transfer.
+        function computeHeldElasticOutputSpectrum(axis, floorIndex) {
+            if (!ghostSource) return null;
+            const floors = axis === 'Y' ? ghostSource.floorY : ghostSource.floorX;
+            const ground = axis === 'Y' ? ghostSource.groundY : ghostSource.groundX;
+            const floor = floors?.[floorIndex];
+            if (!floor || !ground || floor.length !== ground.length) return null;
+            const rel = new Float64Array(floor.length);
+            for (let i = 0; i < rel.length; i++) rel[i] = (floor[i] - ground[i]) * ghostSource.scale;
+            return logBinSpectrum(rel, ghostSource.dt);
+        }
+
+        function spectrumPeak(spec) {
+            let at = 0;
+            for (let i = 1; i < spec.mag.length; i++) if (spec.mag[i] > spec.mag[at]) at = i;
+            return `${toDb(spec.mag[at]).toFixed(1)} dB at ${spec.fHz[at].toFixed(2)} Hz`;
+        }
+
         // Live Input trace under non-default Earthquake Parameters (spec 7,
         // Part B4). groundXData/groundYData hold ground *displacement*
         // (AGENTS.md), but the transfer function's convention is ground
@@ -4235,10 +4323,14 @@
             const gMag = gSpec ? gSpec.mag : null;
             const tf = disabledBase || !gMag ? null : transferFunctionForFloor(modalData, axis, spectrumFloorIndex, gSpec.fHz);
             const outSpec = disabledBase || !gMag || !tf ? null : computeOutputSpectrum(axis, spectrumFloorIndex);
+            const elasticSpec = outSpec ? computeHeldElasticOutputSpectrum(axis, spectrumFloorIndex) : null;
 
             const disabled = disabledBase || !gMag || !tf || !outSpec;
             spectrumSamplingNote.textContent = (disabled || !gSpec) ? ''
                 : `fs = ${(1 / gSpec.dt).toFixed(0)} Hz · Nyquist ${gSpec.nyquist_Hz.toFixed(0)} Hz`;
+            spectrumComparisonNote.textContent = disabled ? '' : elasticSpec
+                ? `Elastic: ${spectrumPeak(elasticSpec)} · Nonlinear: ${spectrumPeak(outSpec)}`
+                : `Measured output: ${spectrumPeak(outSpec)}`;
             spectrumDisabledNote.style.display = disabled ? 'block' : 'none';
             spectrumCanvas.style.display = disabled ? 'none' : 'block';
             if (disabled) {
@@ -4274,7 +4366,10 @@
 
             drawSpectrumSubplot(ctx, plotX, topM + 2 * (panelH + gap), plotW, panelH,
                 `Output |U_rel(f)| · ${floorLabel}`,
-                [{ f: outSpec.fHz, mag: outSpec.mag, color: '#7fffb0' }],
+                [
+                    ...(elasticSpec ? [{ f: elasticSpec.fHz, mag: elasticSpec.mag, color: '#7fd4ff' }] : []),
+                    { f: outSpec.fHz, mag: outSpec.mag, color: '#7fffb0' },
+                ],
                 gSpec.nyquist_Hz);
         }
 
@@ -4486,7 +4581,7 @@
             if (hasPseudo) {
                 const pseudoY = topM + 2 * (panelH + gap);
                 drawTimeSubplot(ctx, plotX, pseudoY, plotW, panelH,
-                    `Pseudo-force p_NL(t) · story ${env.floorIndex + 1} · peak ${env.pseudoPeak.toExponential(2)} N`
+                    `p_NL · S${env.floorIndex + 1} · peak ${env.pseudoPeak.toExponential(2)} N`
                         + (env.firstYield < 0 ? ' · identically zero' : ''),
                     env.pseudo, env.pseudoPeak, '#ffb46b', playCol);
                 if (env.firstYield >= 0) {
@@ -4629,6 +4724,87 @@
                 + ` · trail ${trail.length} samples`;
         }
 
+        function drawIdentity() {
+            const data = identityData;
+            const axis = data?.axes?.[spectrumAxis];
+            const floor = axis && spectrumFloorIndex != null ? spectrumFloorIndex : -1;
+            const { ctx, w, h } = signalCanvas(identityCanvas);
+            if (!data?.available || !axis || !axis.measured[floor]) {
+                identityNote.textContent = data?.reason || 'Run a nonlinear analysis for this building to compare the modal identity.';
+                return;
+            }
+            const x0 = 30, y0 = 8, pw = w - 40, ph = h - 30;
+            const traces = [
+                [axis.elastic[floor], '#7fd4ff', 'elastic H·input'],
+                [axis.corrected[floor], '#ffb46b', 'corrected'],
+                [axis.measured[floor], '#7fffb0', 'measured'],
+            ];
+            let maxDb = -Infinity;
+            for (const [values] of traces) for (const v of values) maxDb = Math.max(maxDb, toDb(v));
+            const minDb = maxDb - 70;
+            const left = Math.log10(data.f_Hz[0]), span = Math.log10(data.f_Hz.at(-1)) - left;
+            for (const [values, color] of traces) {
+                ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+                for (let i = 0; i < values.length; i++) {
+                    const x = x0 + (Math.log10(data.f_Hz[i]) - left) / span * pw;
+                    const y = y0 + ph - Math.max(0, Math.min(1, (toDb(values[i]) - minDb) / 70)) * ph;
+                    if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+                }
+                ctx.stroke();
+            }
+            ctx.font = '9px ui-monospace, monospace';
+            for (const [i, color, label] of traces.map(([_, color, label], i) => [i, color, label])) {
+                ctx.fillStyle = color; ctx.fillText(label, 34 + i * 91, 19);
+            }
+            identityNote.textContent = `Complex closure ${data.complex_residual.toExponential(2)} · elastic discrepancy ${data.elastic_discrepancy.toExponential(2)} · elastic base and feedback use their solver padding grids`;
+        }
+
+        // Residuals are the solver's exact iteration history; only the
+        // vertical placement uses logarithms. A non-converged header remains
+        // drawable even though its displacement is correctly not installed.
+        function drawConvergence() {
+            const run = convergenceRun;
+            const series = run?.axes?.[spectrumAxis]?.residual_history;
+            const available = Array.isArray(series) && series.length > 0;
+            convergenceDisabledNote.style.display = available ? 'none' : 'block';
+            convergenceCanvas.style.display = available ? 'block' : 'none';
+            if (!available) { convergenceNote.textContent = ''; return; }
+            const wrap = convergenceCanvas.parentElement;
+            const w = wrap.clientWidth || 300, h = wrap.clientHeight || 340;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            convergenceCanvas.width = Math.round(w * dpr);
+            convergenceCanvas.height = Math.round(h * dpr);
+            const ctx = convergenceCanvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, w, h);
+            const left = 36, right = w - 12, top = 28, bottom = h - 28;
+            const positive = series.filter(v => v > 0);
+            const floor = Math.min(convergenceTolerance, ...(positive.length ? positive : [convergenceTolerance])) / 3;
+            const ceil = Math.max(convergenceTolerance, ...series) * 3;
+            const lo = Math.log10(Math.max(floor, 1e-16)), hi = Math.log10(Math.max(ceil, 1e-15));
+            const x = i => left + (right - left) * i / Math.max(1, series.length - 1);
+            const y = v => Math.max(top, Math.min(bottom,
+                bottom - (Math.log10(Math.max(v, 1e-16)) - lo) / (hi - lo) * (bottom - top)));
+            ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+            ctx.strokeRect(left, top, right - left, bottom - top);
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = '#ffd764';
+            ctx.beginPath(); ctx.moveTo(left, y(convergenceTolerance)); ctx.lineTo(right, y(convergenceTolerance)); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.strokeStyle = run.converged ? '#7fffb0' : '#ff927f';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            series.forEach((v, i) => { if (i) ctx.lineTo(x(i), y(v)); else ctx.moveTo(x(i), y(v)); });
+            ctx.stroke();
+            ctx.fillStyle = run.converged ? '#7fffb0' : '#ff927f';
+            series.forEach((v, i) => { ctx.beginPath(); ctx.arc(x(i), y(v), 2, 0, 2 * Math.PI); ctx.fill(); });
+            ctx.fillStyle = '#fff'; ctx.font = '10px ui-monospace, monospace';
+            ctx.fillText(`Fixed-point iteration · ${spectrumAxis}`, left, 14);
+            ctx.fillText(`tolerance ${convergenceTolerance.toExponential(1)}`, left + 4, y(convergenceTolerance) - 5);
+            const count = run.axes[spectrumAxis].iterations;
+            convergenceNote.textContent = `${run.converged ? 'Converged' : 'Did not converge'} · ${count} iteration${count === 1 ? '' : 's'} · final residual ${series.at(-1).toExponential(3)} · contraction mapping`;
+        }
+
         // --- Load data for a folder ---
         async function loadFolderData(folder) {
             if (!folder) return;
@@ -4745,7 +4921,7 @@
                     referenceMagnitude: meta.reference_magnitude,
                     groundAccel: groundAccelFile,
                 });
-                holdElastic(folder, floorX, floorY, time); // spec 14 C8
+                holdElastic(folder, floorX, floorY, groundX, groundY, time); // spec 14 C8
                 progressEl.style.display = 'none';
                 console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
             } catch (err) {
@@ -5074,6 +5250,7 @@
             floorRotData = extra.floorRot ?? null; // spec 12 -- absent on every path that has no rotation block
             damageData = extra.damage ?? null;     // spec 14 -- only a collapse run carries blocks
             collapseData = extra.collapse ?? null; // spec 14 -- header.collapse of that run
+            identityData = extra.identity ?? null;
             cinematicOnset = firstCinematicOnset(collapseData);
             cinematicTriggered = false;
             cinematicOverride = false;
@@ -5252,6 +5429,10 @@
         let collapseCache = null;
         function invalidateCollapseCache() {
             collapseCache = null;
+            identityData = null;
+            convergenceRun = null;
+            invalidateSignalExperiments();
+            if (analysisDrawerOpen && (analysisTab === 'frequency' || analysisTab === 'convergence')) redrawAnalysisTab();
             discardCollapseAnimation();
             renderCollapseReadout(null);
             if (liveAbortController) liveAbortController.abort();
@@ -5291,6 +5472,7 @@
                 // requesting more later would re-run a minute-long solve.
                 params.intensity_scale = INTENSITY_STEPS[parseInt(intensitySlider.value, 10)];
                 params.hftd_max_iterations = 200;
+                params.analysis_identity = true;
                 params.damage_blocks = ['story_drift', 'story_shear', 'p_nl', 'damage_state',
                                         'stiffness_ratio', 'column_damage'];
             }
@@ -5346,11 +5528,14 @@
                 if (nonlinear) {
                     console.info('Collapse analysis', header.collapse);
                     renderCollapseReadout(header.collapse, header.num_stories);
+                    convergenceRun = header.collapse || null;
+                    convergenceTolerance = params.hftd_tolerance ?? 1e-4;
                     if (!header.collapse) {
                         showRecomputeError('This backend does not support collapse analysis yet.');
                         return;
                     }
                     if (!header.collapse.converged) {
+                        if (analysisDrawerOpen && analysisTab === 'convergence') redrawAnalysisTab();
                         showRecomputeError(header.collapse.reason || 'Collapse analysis did not converge. The previous response is retained.');
                         return;
                     }
@@ -5455,9 +5640,13 @@
                     damage,
                     collapse: nonlinear ? header.collapse : null,
                     collapseHeader: nonlinear ? header : null,
+                    identity: nonlinear ? header.identity : null,
                 }, autoScaleAmplify);
-                if (nonlinear) attachGhost(buildingKey, params.intensity_scale);
-                else holdElastic(folder, floorX, floorY, time);
+                if (nonlinear) {
+                    attachGhost(buildingKey, params.intensity_scale);
+                    redrawAnalysisTab();
+                }
+                else holdElastic(folder, floorX, floorY, groundX, groundY, time);
                 recomputeOverlay.classList.remove('is-active');
                 snapshotBuildingParams();
                 console.log(`✅ Live recompute (${folder}, N=${header.num_stories})`);
@@ -5519,6 +5708,234 @@
             return params;
         }
 
+        // ---8<--- SIGNALS-EXPERIMENTS-BEGIN
+        // Read only the common prefix of /compute's binary payload. The
+        // experiment plots need one relative floor trace and the header's
+        // measured peak drift; furniture and optional damage blocks follow.
+        function decodeSignalResponse(buffer, axis, floorIndex) {
+            const view = new DataView(buffer);
+            const headerLen = view.getUint32(0, true);
+            const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, headerLen)));
+            const n = header.npts, N = header.num_stories;
+            let offset = 4 + headerLen;
+            offset += (4 - offset % 4) % 4;
+            const take = () => { const a = new Float32Array(buffer, offset, n); offset += 4 * n; return a; };
+            take(); // time
+            let ground = take();
+            let floor = null;
+            for (let f = 0; f < N; f++) { const a = take(); if (axis === 'X' && f === floorIndex) floor = a; }
+            if (header.has_y) {
+                const gy = take();
+                if (axis === 'Y') ground = gy;
+                for (let f = 0; f < N; f++) { const a = take(); if (axis === 'Y' && f === floorIndex) floor = a; }
+            }
+            if (!floor) throw new Error(`No ${axis} floor ${floorIndex + 1} in response`);
+            const exact = header.analysis_trace?.axis === axis
+                && header.analysis_trace?.floor === floorIndex;
+            const relative = exact ? new Float64Array(buffer, buffer.byteLength - n * 8, n)
+                : new Float64Array(n);
+            if (!exact) for (let i = 0; i < n; i++) relative[i] = floor[i] - ground[i];
+            const drift = header[`peak_drift_ratio_${axis}`];
+            return { header, relative, peakDrift: drift ? Math.max(...drift) : null };
+        }
+
+        function superpositionError(a, twice) {
+            if (a.length !== twice.length) throw new Error('Superposition traces differ in length');
+            let peak = 0, difference = 0;
+            for (let i = 0; i < a.length; i++) {
+                peak = Math.max(peak, Math.abs(twice[i]));
+                difference = Math.max(difference, Math.abs(twice[i] - 2 * a[i]));
+            }
+            return peak ? difference / peak : 0;
+        }
+
+        function signalCanvas(canvas, height = 150) {
+            const w = canvas.clientWidth || 300, h = canvas.clientHeight || height;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+            const ctx = canvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+            ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.strokeRect(30, 8, w - 40, h - 30);
+            return { ctx, w, h };
+        }
+
+        function drawLinearity(a, twice) {
+            const { ctx, w, h } = signalCanvas(linearityCanvas);
+            const x0 = 30, y0 = 8, pw = w - 40, ph = h - 30;
+            const cols = Math.min(Math.round(pw), a.length);
+            const twoA = Float64Array.from(a, v => 2 * v);
+            const curves = [[buildEnvelope(twoA, cols), '#7fd4ff'], [buildEnvelope(twice, cols), '#ffb46b']];
+            const peak = Math.max(...curves.flatMap(([e]) => [Math.max(...e.max), -Math.min(...e.min)]), 1e-30);
+            for (const [env, color] of curves) {
+                ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
+                for (let c = 0; c < env.nCols; c++) {
+                    const x = x0 + (c + .5) / env.nCols * pw;
+                    const yMax = y0 + ph / 2 - env.max[c] / peak * (ph / 2 - 2);
+                    const yMin = y0 + ph / 2 - env.min[c] / peak * (ph / 2 - 2);
+                    ctx.moveTo(x, yMax); ctx.lineTo(x, yMin);
+                }
+                ctx.stroke();
+            }
+            ctx.font = '10px ui-monospace, monospace'; ctx.fillStyle = '#7fd4ff'; ctx.fillText('2·uₐ', 36, 21);
+            ctx.fillStyle = '#ffb46b'; ctx.fillText('u₂ₐ', 85, 21);
+        }
+
+        const signalBuffers = new Map();
+        let experimentAbort = null;
+        let sweepState = null;
+        function invalidateSignalExperiments() {
+            experimentAbort?.abort();
+            experimentAbort = null;
+            recomputeOverlay.classList.remove('is-active');
+            recomputeText.textContent = 'Recomputing';
+            signalBuffers.clear();
+            sweepState = null;
+            linearityNote.textContent = 'Parameters changed; run the test again.';
+            sweepNote.textContent = 'Parameters changed; run a new intensity sweep.';
+            signalCanvas(linearityCanvas); signalCanvas(sweepCanvas);
+            linearityRunBtn.disabled = false; sweepRunBtn.disabled = false; sweepCancelBtn.disabled = true;
+        }
+
+        async function experimentResponse(params, signal, cacheBuffer = false) {
+            const key = JSON.stringify(params);
+            if (cacheBuffer && signalBuffers.has(key)) return signalBuffers.get(key);
+            const response = await fetch(COMPUTE_URL, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(params), signal,
+            });
+            if (!response.ok) throw new Error(`/compute returned ${response.status}`);
+            const buffer = await response.arrayBuffer();
+            if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+            if (cacheBuffer) signalBuffers.set(key, buffer);
+            return buffer;
+        }
+
+        linearityRunBtn.addEventListener('click', async () => {
+            if (experimentAbort) experimentAbort.abort();
+            const controller = experimentAbort = new AbortController();
+            const mode = linearityMode.value, axis = spectrumAxis, floor = spectrumFloorIndex;
+            const a = Math.min(10, INTENSITY_STEPS[parseInt(intensitySlider.value, 10)]);
+            const base = { ...requestParams(folderSelect.value), nonlinear: mode === 'nonlinear',
+                torsion: mode === 'nonlinear' && torsionToggle.checked,
+                hftd_max_iterations: 200, analysis_trace: { axis, floor } };
+            linearityRunBtn.disabled = true;
+            recomputeText.textContent = 'Testing superposition'; recomputeOverlay.classList.add('is-active');
+            try {
+                const first = decodeSignalResponse(await experimentResponse({ ...base, intensity_scale: a }, controller.signal, true), axis, floor);
+                const second = decodeSignalResponse(await experimentResponse({ ...base, intensity_scale: 2 * a }, controller.signal, true), axis, floor);
+                if (mode === 'nonlinear' && (!first.header.collapse?.converged || !second.header.collapse?.converged)) {
+                    linearityNote.textContent = 'Did not converge at one intensity; no superposition verdict.';
+                } else {
+                    const error = superpositionError(first.relative, second.relative);
+                    drawLinearity(first.relative, second.relative);
+                    linearityNote.textContent = `a=${a.toPrecision(3)}× · max|u₂ₐ − 2uₐ| / max|u₂ₐ| = ${error.toExponential(8)}`;
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') linearityNote.textContent = error.message;
+            } finally {
+                if (experimentAbort === controller) {
+                    experimentAbort = null; linearityRunBtn.disabled = false;
+                    recomputeOverlay.classList.remove('is-active'); recomputeText.textContent = 'Recomputing';
+                }
+            }
+        });
+
+        const SWEEP_LEVELS = Array.from({ length: 20 }, (_, i) => .05 * Math.pow(20 / .05, i / 19));
+        function elasticSweepResidual(points) {
+            if (!points.length) return null;
+            const slope = points[0].peak / points[0].intensity;
+            const scale = Math.max(1e-30, ...points.map(p => p.peak));
+            return Math.max(...points.map(p => Math.abs(p.peak - slope * p.intensity))) / scale;
+        }
+        function drawSweep() {
+            const { ctx, w, h } = signalCanvas(sweepCanvas, 150);
+            if (!sweepState) return;
+            const x0 = 30, y0 = 8, pw = w - 40, ph = h - 30;
+            const all = [...sweepState.elastic, ...sweepState.nonlinear].filter(p => Number.isFinite(p.peak));
+            const maxPeak = Math.max(1e-12, ...all.map(p => p.peak));
+            const x = v => x0 + Math.log(v / .05) / Math.log(20 / .05) * pw;
+            const y = v => y0 + ph - v / maxPeak * ph;
+            for (const [points, color] of [[sweepState.elastic, '#7fd4ff'], [sweepState.nonlinear, '#ffb46b']]) {
+                ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+                let begun = false;
+                for (const p of points) {
+                    if (!Number.isFinite(p.peak)) { begun = false; continue; }
+                    if (begun) ctx.lineTo(x(p.intensity), y(p.peak)); else ctx.moveTo(x(p.intensity), y(p.peak));
+                    begun = true;
+                }
+                ctx.stroke();
+                for (const p of points) if (Number.isFinite(p.peak)) {
+                    ctx.beginPath(); ctx.arc(x(p.intensity), y(p.peak), 2, 0, Math.PI * 2); ctx.fill();
+                }
+            }
+            const collapsed = sweepState.nonlinear.find(p => p.collapse);
+            const yielded = sweepState.nonlinear.find(p => p.yielded);
+            if (yielded) {
+                ctx.strokeStyle = '#ffd764'; ctx.setLineDash([2, 3]); ctx.beginPath();
+                ctx.moveTo(x(yielded.intensity), y0); ctx.lineTo(x(yielded.intensity), y0 + ph); ctx.stroke(); ctx.setLineDash([]);
+            }
+            if (collapsed) {
+                ctx.strokeStyle = '#ff6d6d'; ctx.setLineDash([3, 3]); ctx.beginPath();
+                ctx.moveTo(x(collapsed.intensity), y0); ctx.lineTo(x(collapsed.intensity), y0 + ph); ctx.stroke(); ctx.setLineDash([]);
+            }
+            ctx.font = '9px ui-monospace, monospace'; ctx.fillStyle = '#fff';
+            ctx.fillText('peak drift ratio', 32, 19); ctx.fillText('intensity →', w - 88, h - 4);
+        }
+
+        sweepCancelBtn.addEventListener('click', () => {
+            if (sweepState) sweepState.cancelled = true;
+            experimentAbort?.abort();
+        });
+        sweepRunBtn.addEventListener('click', async () => {
+            if (experimentAbort) experimentAbort.abort();
+            const controller = experimentAbort = new AbortController();
+            const base = { ...requestParams(folderSelect.value), torsion: torsionToggle.checked,
+                hftd_max_iterations: 200 };
+            const axis = spectrumAxis, floor = spectrumFloorIndex;
+            const key = JSON.stringify({ base, axis, floor });
+            if (!sweepState || sweepState.key !== key) sweepState = { key, elastic: [], nonlinear: [], cancelled: false };
+            sweepState.cancelled = false;
+            sweepRunBtn.disabled = true; sweepCancelBtn.disabled = false;
+            recomputeOverlay.classList.add('is-active');
+            try {
+                for (const nonlinear of [false, true]) {
+                    const points = nonlinear ? sweepState.nonlinear : sweepState.elastic;
+                    for (let i = points.length; i < SWEEP_LEVELS.length; i++) {
+                        if (sweepState.cancelled || controller.signal.aborted) return;
+                        const intensity = SWEEP_LEVELS[i];
+                        const kind = nonlinear ? 'Nonlinear' : 'Elastic';
+                        recomputeText.textContent = `${kind} sweep ${i + 1}/20`;
+                        const buffer = await experimentResponse({ ...base, nonlinear, intensity_scale: intensity }, controller.signal);
+                        const result = decodeSignalResponse(buffer, axis, floor);
+                        const converged = !nonlinear || result.header.collapse?.converged;
+                        points.push({ intensity, peak: converged ? result.peakDrift : null,
+                            yielded: !!(converged && result.header.collapse?.axes?.[axis]?.peak_mu?.some(row => row.some(v => v > 1))),
+                            collapse: !!(converged && result.header.collapse?.collapse_events?.length) });
+                        drawSweep();
+                        sweepNote.textContent = `${kind} ${i + 1}/20 at ${intensity.toPrecision(3)}×`
+                            + (converged ? '' : ' · did not converge');
+                    }
+                }
+                const collapsed = sweepState.nonlinear.find(p => p.collapse);
+                const yielded = sweepState.nonlinear.find(p => p.yielded);
+                const residual = elasticSweepResidual(sweepState.elastic);
+                sweepNote.textContent = `20 elastic + 20 nonlinear samples · elastic linearity residual ${residual.toExponential(2)}`
+                    + ` · ${yielded ? `first sampled yield ${yielded.intensity.toPrecision(3)}×` : 'no sampled yield'}`
+                    + ` · ${collapsed
+                    ? `collapse capacity ${collapsed.intensity.toPrecision(3)}×`
+                    : 'no collapse event in this record'}`;
+            } catch (error) {
+                if (error.name !== 'AbortError') sweepNote.textContent = error.message;
+            } finally {
+                if (experimentAbort === controller) {
+                    experimentAbort = null; sweepRunBtn.disabled = false; sweepCancelBtn.disabled = true;
+                    recomputeOverlay.classList.remove('is-active'); recomputeText.textContent = 'Recomputing';
+                    if (sweepState?.cancelled) sweepNote.textContent = `Cancelled · ${sweepState.elastic.length + sweepState.nonlinear.length} samples retained`;
+                }
+            }
+        });
+        // ---8<--- SIGNALS-EXPERIMENTS-END
+
         // --- Spec 14 C8: elastic-vs-nonlinear ghost ---
         // The elastic response the viewer already holds, re-used (no second
         // request). An elastic system is LINEAR, so the elastic response to
@@ -5530,8 +5947,9 @@
         }
         let elasticHeld = null;  // {key, floorX, floorY, dt} of the last elastic load
         let ghostSource = null;  // elasticHeld + {scale} while a matching collapse run is shown
-        function holdElastic(folder, floorX, floorY, time) {
-            elasticHeld = { key: elasticBuildingKey(requestParams(folder)), floorX, floorY, dt: (time[1] - time[0]) || 0.01 };
+        function holdElastic(folder, floorX, floorY, groundX, groundY, time) {
+            elasticHeld = { key: elasticBuildingKey(requestParams(folder)), floorX, floorY,
+                groundX, groundY, dt: (time[1] - time[0]) || 0.01 };
             ghostSource = null;
             updateGhostLabel(false);
         }
@@ -6346,6 +6764,8 @@
                 timePane.classList.toggle('is-active', analysisTab === 'time');
                 frequencyPane.classList.toggle('is-active', analysisTab === 'frequency');
                 hysteresisPane.classList.toggle('is-active', analysisTab === 'hysteresis');
+                convergencePane.classList.toggle('is-active', analysisTab === 'convergence');
+                identitySection.hidden = analysisTab !== 'frequency';
                 redrawAnalysisTab();
             });
         });
@@ -6357,8 +6777,11 @@
         function redrawAnalysisTab(animated = false) {
             if (analysisTab === 'frequency') {
                 if (animated) redrawSpectrumPanelsAnimated(); else redrawSpectrumPanels();
+                drawIdentity();
             } else if (analysisTab === 'hysteresis') {
                 drawHysteresis(); // the ghost key sees any floor/axis/size change itself
+            } else if (analysisTab === 'convergence') {
+                drawConvergence();
             } else {
                 rebuildTimeEnvelopes();
                 drawTimePanels();
@@ -6367,12 +6790,14 @@
 
         spectrumFloorSelect.addEventListener('change', (e) => {
             spectrumFloorIndex = parseInt(e.target.value, 10);
+            invalidateSignalExperiments();
             redrawAnalysisTab(true);
         });
         spectrumAxisToggle.querySelectorAll('button').forEach(btn => {
             btn.addEventListener('click', () => {
                 if (btn.classList.contains('active')) return;
                 spectrumAxis = btn.dataset.axis;
+                invalidateSignalExperiments();
                 spectrumAxisToggle.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
                 redrawAnalysisTab(true);
             });
