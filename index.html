@@ -1448,6 +1448,15 @@
         const slowMotionToggle = document.getElementById('slowMotionToggle');
         const slowMotionRow = document.getElementById('slowMotionRow');
         const replayCollapseBtn = document.getElementById('replayCollapseBtn');
+        const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+        function syncCinematicMotionPreference() {
+            cameraShakeToggle.disabled = reducedMotion.matches;
+            slowMotionToggle.disabled = reducedMotion.matches;
+            cameraShakeToggle.title = reducedMotion.matches ? 'Camera shake is off under reduced motion' : '';
+            slowMotionToggle.title = reducedMotion.matches ? 'Slow motion is off under reduced motion' : '';
+        }
+        reducedMotion.addEventListener('change', syncCinematicMotionPreference);
+        syncCinematicMotionPreference();
         const recomputeOverlay = document.getElementById('recomputeOverlay');
         const recomputeError = document.getElementById('recomputeError');
         const toastEl = document.getElementById('toast');
@@ -4799,7 +4808,7 @@
             // activeFloorIndex is already set above, so tweenCameraTo()'s own
             // scheduleAutoOrbit() call (Part D) picks up the per-floor guard
             // immediately -- no separate call needed here.
-            tweenCameraTo(toPos, toTarget, cinematic && matchMedia('(prefers-reduced-motion: reduce)').matches ? 1 : 550);
+            tweenCameraTo(toPos, toTarget, cinematic && reducedMotion.matches ? 1 : 550);
         }
 
         function frameCameraToFullBuilding() {
@@ -5980,7 +5989,7 @@
 
             if (isPlaying && !isSeeking) {
                 animTime += delta * speed * slowMotionRate(animTime, cinematicOnset?.time,
-                    slowMotionToggle.checked, matchMedia('(prefers-reduced-motion: reduce)').matches);
+                    slowMotionToggle.checked, reducedMotion.matches);
                 if (totalDuration > 0) {
                     if (animTime > totalDuration) {
                         animTime = animTime % totalDuration;
@@ -6003,6 +6012,7 @@
                 const g = buildingGroups[cinematicOnset.floorIndex];
                 const centre = g ? new THREE.Vector3(g.position.x, g.position.y, g.position.z) : null;
                 frameCameraToFloor(cinematicOnset.floorIndex, centre, true);
+                floorSelect.value = String(cinematicOnset.floorIndex);
             }
 
             const idx = currentIndex;
@@ -6106,7 +6116,7 @@
             // sampled at record time. Revert after render so OrbitControls
             // never incorporates this decorative offset into its pose.
             const [shakeX, shakeZ] = shakeAtTime(shakeTrace, animTime, cameraShakeToggle.checked,
-                matchMedia('(prefers-reduced-motion: reduce)').matches);
+                reducedMotion.matches);
             camera.position.x += shakeX;
             camera.position.z += shakeZ;
 
@@ -6478,6 +6488,15 @@
             isSeeking = true;
             const val = parseFloat(seekSlider.value);
             animTime = Math.min(val, totalDuration);
+            if (cinematicOnset) {
+                cameraTween = null;
+                cinematicFollow = null;
+                // A scrub before the lead starts a new playthrough. A scrub
+                // past it skips the automatic shot; Replay explicitly re-arms it.
+                cinematicTriggered = animTime >= cinematicOnset.leadTime;
+                cinematicOverride = cinematicTriggered;
+                cinematicReenableBtn.hidden = true;
+            }
             if (totalDuration > 0) {
                 const dt = (timeData[1] - timeData[0]) || 0.01;
                 const idx = Math.floor(animTime / dt);
