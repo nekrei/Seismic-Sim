@@ -297,6 +297,7 @@
         .view-buttons button.primary:hover { background: rgba(255,215,100,0.25); }
         .cinematic-reenable { margin-top: 8px; width: 100%; padding: 8px 10px; border: 1px solid rgba(255,215,100,0.35); border-radius: 8px; background: rgba(255,215,100,0.08); color: #ffd764; cursor: pointer; font: inherit; }
         .cinematic-reenable[hidden] { display: none; }
+        #slowMotionRow[hidden], #replayCollapseBtn[hidden] { display: none; }
 
         #runCollapseBtn { white-space: normal; }
         #runCollapseBtn:active { transform: scale(0.97); }
@@ -1280,6 +1281,10 @@
                     <button class="primary" id="backToFullViewBtn">⤢ Back to full view</button>
                 </div>
                 <button class="cinematic-reenable" id="cinematicReenableBtn" type="button" hidden>Cinematic camera off · turn back on</button>
+                <div class="ctrl-row"><label class="panel-label" for="cameraShakeToggle">Camera shake</label><input type="checkbox" id="cameraShakeToggle" checked /></div>
+                <div class="ctrl-row"><label class="panel-label" for="cinematicCameraToggle">Cinematic camera</label><input type="checkbox" id="cinematicCameraToggle" checked /></div>
+                <div class="ctrl-row" id="slowMotionRow" hidden><label class="panel-label" for="slowMotionToggle">Slow motion</label><input type="checkbox" id="slowMotionToggle" checked /></div>
+                <div class="view-buttons"><button id="replayCollapseBtn" type="button" hidden>↺ Replay collapse</button></div>
             </div>
         </details>
     </div>
@@ -1438,6 +1443,11 @@
         const floorSelect = document.getElementById('floorSelect');
         const backToFullViewBtn = document.getElementById('backToFullViewBtn');
         const cinematicReenableBtn = document.getElementById('cinematicReenableBtn');
+        const cameraShakeToggle = document.getElementById('cameraShakeToggle');
+        const cinematicCameraToggle = document.getElementById('cinematicCameraToggle');
+        const slowMotionToggle = document.getElementById('slowMotionToggle');
+        const slowMotionRow = document.getElementById('slowMotionRow');
+        const replayCollapseBtn = document.getElementById('replayCollapseBtn');
         const recomputeOverlay = document.getElementById('recomputeOverlay');
         const recomputeError = document.getElementById('recomputeError');
         const toastEl = document.getElementById('toast');
@@ -4887,6 +4897,22 @@
             return { position: target + (change + temp) * decay,
                      velocity: (velocity - omega * temp) * decay };
         }
+        const SLOWMO_MIN_RATE = 0.15;
+        const SLOWMO_RAMP_IN = 0.8;
+        const SLOWMO_RAMP_OUT = 1.2;
+        function slowMotionRate(t, onsetTime, enabled, reducedMotion) {
+            if (!enabled || reducedMotion || !Number.isFinite(onsetTime)) return 1;
+            const begin = Math.max(0, onsetTime - 1);
+            const full = begin + SLOWMO_RAMP_IN;
+            const end = onsetTime + 3;
+            if (t < begin || t >= end + SLOWMO_RAMP_OUT) return 1;
+            if (t < full) return 1 - (1 - SLOWMO_MIN_RATE) * easeInOutCubic((t - begin) / SLOWMO_RAMP_IN);
+            if (t < end) return SLOWMO_MIN_RATE;
+            return SLOWMO_MIN_RATE + (1 - SLOWMO_MIN_RATE) * easeInOutCubic((t - end) / SLOWMO_RAMP_OUT);
+        }
+        function replayStartTime(onset) {
+            return onset ? Math.max(0, onset.time - CINEMATIC_LEAD_SECONDS) : 0;
+        }
         // ---8<--- CINEMATIC-HELPERS-END
 
         function tweenCameraTo(toPos, toTarget, duration = 550) {
@@ -5004,6 +5030,8 @@
             cinematicOverride = false;
             cinematicFollow = null;
             cinematicReenableBtn.hidden = true;
+            slowMotionRow.hidden = !cinematicOnset;
+            replayCollapseBtn.hidden = !cinematicOnset;
             damageView = prepareDamageView(damageData, drawnHeights);
             hysteresisLoadSerial++; // spec 14 C6: new data -> the ghost key changes
             showDamageLegend(damageView);
@@ -5951,9 +5979,16 @@
             lastTime = now;
 
             if (isPlaying && !isSeeking) {
-                animTime += delta * speed;
+                animTime += delta * speed * slowMotionRate(animTime, cinematicOnset?.time,
+                    slowMotionToggle.checked, matchMedia('(prefers-reduced-motion: reduce)').matches);
                 if (totalDuration > 0) {
-                    if (animTime > totalDuration) animTime = animTime % totalDuration;
+                    if (animTime > totalDuration) {
+                        animTime = animTime % totalDuration;
+                        cinematicTriggered = false;
+                        cinematicOverride = false;
+                        cinematicFollow = null;
+                        cinematicReenableBtn.hidden = true;
+                    }
                     const dt = (timeData[1] - timeData[0]) || 0.01;
                     const idx = Math.floor(animTime / dt);
                     currentIndex = Math.min(idx, totalFrames - 1);
@@ -5962,7 +5997,7 @@
                 timeDisplay.textContent = `${animTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`;
             }
 
-            if (isPlaying && !isSeeking && cinematicOnset && !cinematicTriggered && !cinematicOverride &&
+            if (isPlaying && !isSeeking && cinematicCameraToggle.checked && cinematicOnset && !cinematicTriggered && !cinematicOverride &&
                 animTime >= cinematicOnset.leadTime) {
                 cinematicTriggered = true;
                 const g = buildingGroups[cinematicOnset.floorIndex];
@@ -6009,7 +6044,7 @@
 
             applyCollapseFloors(scale); // spec 15: detached floors from the keyframe buffer (no-op otherwise)
 
-            if (cinematicTriggered && !cinematicOverride && !cameraTween && collapseAnim && cinematicOnset) {
+            if (cinematicCameraToggle.checked && cinematicTriggered && !cinematicOverride && !cameraTween && collapseAnim && cinematicOnset) {
                 const rec = collapseAnim.sim.bodies.find(r => r.source.kind === 'computed' && r.source.story === cinematicOnset.story);
                 const sample = rec && sampleBody(collapseAnim.sim, rec, animTime);
                 if (sample) {
@@ -6070,7 +6105,7 @@
             // The real acceleration signal is filtered once per load, then
             // sampled at record time. Revert after render so OrbitControls
             // never incorporates this decorative offset into its pose.
-            const [shakeX, shakeZ] = shakeAtTime(shakeTrace, animTime, true,
+            const [shakeX, shakeZ] = shakeAtTime(shakeTrace, animTime, cameraShakeToggle.checked,
                 matchMedia('(prefers-reduced-motion: reduce)').matches);
             camera.position.x += shakeX;
             camera.position.z += shakeZ;
@@ -6175,6 +6210,37 @@
         }
         playBtn.addEventListener('click', togglePlayback);
         stripPlayBtn.addEventListener('click', togglePlayback);
+
+        cinematicCameraToggle.addEventListener('change', () => {
+            if (!cinematicCameraToggle.checked) {
+                if (cinematicTriggered) cameraTween = null;
+                cinematicFollow = null;
+                cinematicReenableBtn.hidden = true;
+            } else if (cinematicOnset && animTime >= cinematicOnset.leadTime) {
+                // A late toggle arms the next playthrough; it never yanks
+                // the camera back during the current one.
+                cinematicOverride = true;
+                cinematicTriggered = true;
+            } else {
+                cinematicOverride = false;
+                cinematicTriggered = false;
+            }
+        });
+        replayCollapseBtn.addEventListener('click', () => {
+            if (!cinematicOnset) return;
+            animTime = replayStartTime(cinematicOnset);
+            isSeeking = false;
+            const dt = (timeData[1] - timeData[0]) || 0.01;
+            currentIndex = Math.min(Math.floor(animTime / dt), totalFrames - 1);
+            seekSlider.value = animTime;
+            timeDisplay.textContent = `${animTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`;
+            cameraTween = null;
+            cinematicFollow = null;
+            cinematicTriggered = false;
+            cinematicOverride = false;
+            cinematicReenableBtn.hidden = true;
+            if (!isPlaying) togglePlayback();
+        });
 
         // Per-floor view controls (spec 4, Part B).
         floorSelect.addEventListener('change', (e) => {
