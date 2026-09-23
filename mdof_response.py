@@ -1877,6 +1877,7 @@ def _solve_grid(result, factor, dt, traces):
     """References (not copies) to a result's solve-grid histories."""
     views = (result.x, result.y) if isinstance(result, HFTD3NResult) else (result,)
     return dict(factor=factor, dt=dt, traces=traces, u=result.u_rel,
+                base=result.elastic_base, force=result.p_nl,
                 velocity=result.velocity,
                 column_drift=[v.column_drift for v in views],
                 column_force=[v.column_force for v in views])
@@ -1949,6 +1950,7 @@ def _solve_hftd_grid(building, accel, disp, dt, params=None):
         column_drift=aux.column_drift,
         segments=convolution.segments, padding_capped=convolution.padding_capped,
         reason='' if converged else 'Pseudo-force iteration did not converge; no collapse is inferred.')
+    result.elastic_base = base
     evaluate_collapse_criteria(result,building)
     if causality_error > p['hftd_tolerance']:
         result.reason = 'FFT tail dynamic range contaminated the causal prefix; no collapse is inferred.'
@@ -2118,6 +2120,7 @@ def _solve_hftd_grid_3N(building, ax, dx, ay, dy, dt, params=None):
         u, force, velocity, acceleration, rx, ry, converged, iteration, history,
         energy, dt, positions, segments=convolution.segments,
         padding_capped=convolution.padding_capped, reason=reason)
+    result.elastic_base = base
     evaluate_collapse_criteria(rx, building.bx)
     evaluate_collapse_criteria(ry, building.by)
     result.collapse_events = rx.collapse_events + ry.collapse_events

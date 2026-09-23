@@ -31,6 +31,7 @@ from mdof_response import (
     finite_or_none, furniture_decimation, accumulated_damage,
     subsample_nearest, DAMAGE_CODES, DAMAGE_CODE_OF_BRANCH,
     DRIFT_LIMIT_IO, DRIFT_LIMIT_LS,
+    _HFTDConvolution,
 )
 
 # Spec 14 A1: optional per-story damage blocks, in WIRE order -- every
@@ -84,6 +85,44 @@ def _y_or_none(has_y, building_y, attr):
     if not has_y:
         return None
     return getattr(building_y, attr).tolist()
+
+
+def _identity_spectra(building, result, axes, segment_seconds=None):
+    """Independently rebuild the pseudo-force correction on its solve grid.
+
+    The elastic base and nonlinear correction deliberately use different FFT
+    padding in the solver. Their *trimmed* histories share physical sample
+    times; transforming those onto a common display grid makes the two-term
+    identity testable as complex values without pretending the operators had
+    one original padded grid.
+    """
+    grid = result.solve_grid
+    force, base, actual = grid["force"], grid["base"], grid["u"]
+    n = actual.shape[1]
+    convolution = _HFTDConvolution(building, n, grid["dt"], segment_seconds)
+    correction, _, _ = convolution.apply(force)
+    nfft = 1 << (n - 1).bit_length()
+    U = np.fft.rfft(actual, n=nfft, axis=1)
+    E = np.fft.rfft(base, n=nfft, axis=1)
+    C = np.fft.rfft(correction, n=nfft, axis=1)
+    scale = max(float(np.max(abs(U))), 1e-30)
+    closure = float(np.max(abs(U - E - C)) / scale)
+    elastic_error = float(np.max(abs(U - E)) / scale)
+    raw_f = np.fft.rfftfreq(nfft, grid["dt"])
+    f_hz = np.geomspace(.1, min(50., raw_f[-1]), 200)
+    nearest = np.searchsorted(raw_f, f_hz)
+    nearest = np.clip(nearest, 1, len(raw_f)-1)
+    nearest -= abs(raw_f[nearest-1]-f_hz) < abs(raw_f[nearest]-f_hz)
+    curves = {}
+    for axis, row in axes.items():
+        block = slice(row, row + building.N)
+        curves[axis] = dict(
+            measured=(abs(U[block][:, nearest])*grid["dt"]).tolist(),
+            elastic=(abs(E[block][:, nearest])*grid["dt"]).tolist(),
+            corrected=(abs((E+C)[block][:, nearest])*grid["dt"]).tolist(),
+        )
+    return dict(f_Hz=f_hz.tolist(), axes=curves, complex_residual=closure,
+                elastic_discrepancy=elastic_error, sampling_factor=grid["factor"])
 
 
 from mdof_response import HFTD_DEFAULTS, build_backbones
@@ -311,6 +350,14 @@ def compute():
         return jsonify({"error": "invalid_parameter", "detail": str(e)}), 400
 
     num_stories = p["num_stories"]
+    analysis_trace = body.get("analysis_trace")
+    if analysis_trace is not None:
+        if (not isinstance(analysis_trace, dict)
+                or analysis_trace.get("axis") not in ("X", "Y")
+                or type(analysis_trace.get("floor")) is not int
+                or not 0 <= analysis_trace["floor"] < num_stories):
+            return jsonify({"error": "invalid_parameter",
+                            "detail": "analysis_trace requires axis X/Y and a zero-based floor"}), 400
     mass_per_floor = p["mass_per_floor"]
     zeta = p["zeta"]
     epicenter_distance_km = p["epicenter_distance_km"]
@@ -335,6 +382,8 @@ def compute():
     )
     torsion = nonlinear_params.pop('torsion')
     has_y = ground.get("Y") is not None
+    if analysis_trace is not None and analysis_trace["axis"] == "Y" and not has_y:
+        return jsonify({"error": "invalid_parameter", "detail": "record has no Y component"}), 400
     b3 = None
     torsion_fallback = None
     try:
@@ -593,6 +642,10 @@ def compute():
         header['collapse'].update(handoff_header(
             b3 if b3 is not None else building_x,
             None if b3 is not None or not has_y else building_y))
+    if analysis_trace is not None:
+        header["analysis_trace"] = dict(axis=analysis_trace["axis"],
+                                        floor=analysis_trace["floor"],
+                                        dtype="float64", npts=len(time_arr))
     # Spec 14 R5: the per-story column depths actually built, echoed only
     # when a profile was sent, so a no-profile payload stays byte-identical.
     for axis in ("x", "y"):
@@ -674,6 +727,28 @@ def compute():
             header[f"mode_shapes_{axis}"] = b3.phi[k*N:(k+1)*N][:, sel].tolist()
             header[f"fundamental_period_s_{axis}"] = float(1 / freqs[sel][0])
             header[f"participation_factors_{axis}"] = gamma[sel].tolist()
+    if nonlinear and body.get("analysis_identity") is True:
+        if header['collapse'].get('detachment_events'):
+            header['identity'] = dict(available=False,
+                reason='The modal operator changes at detachment; no single-run identity is plotted.')
+        elif not header['collapse']['converged']:
+            header['identity'] = dict(available=False,
+                reason='The fixed-point solve did not converge.')
+        elif b3 is not None:
+            header['identity'] = dict(available=True, **_identity_spectra(
+                b3, b3.hftd_result, {'X': 0, 'Y': num_stories},
+                nonlinear_params['hftd_segment_seconds']))
+        else:
+            spectra = [_identity_spectra(building_x, building_x.hftd_result, {'X': 0},
+                                         nonlinear_params['hftd_segment_seconds'])]
+            if has_y:
+                spectra.append(_identity_spectra(building_y, building_y.hftd_result, {'Y': 0},
+                                                 nonlinear_params['hftd_segment_seconds']))
+            header['identity'] = dict(available=True, f_Hz=spectra[0]['f_Hz'],
+                axes={axis: curves for item in spectra for axis, curves in item['axes'].items()},
+                complex_residual=max(item['complex_residual'] for item in spectra),
+                elastic_discrepancy=max(item['elastic_discrepancy'] for item in spectra),
+                sampling_factor=max(item['sampling_factor'] for item in spectra))
     header_bytes = json.dumps(header, allow_nan=False).encode("utf-8")
     # Float32Array requires its byte offset to be a multiple of 4, but the
     # JSON header's length isn't guaranteed to be -- pad with zero bytes so
@@ -710,6 +785,16 @@ def compute():
     for a in damage_arrays.values():
         parts.append(a.tobytes())
         parts.append(b"\x00" * ((-a.nbytes) % 4))
+
+    # Optional exact relative-floor trace for the on-demand superposition
+    # experiment. The normal animation stays float32; this appendix is only
+    # requested when the numerical comparison needs the solver's precision.
+    if analysis_trace is not None:
+        used = sum(len(part) for part in parts)
+        parts.append(b"\x00" * ((-used) % 8))
+        b = building_x if analysis_trace["axis"] == "X" else building_y
+        parts.append(np.asarray(b.floor_disp_rel[analysis_trace["floor"]],
+                                dtype="<f8").tobytes())
 
     return Response(b"".join(parts), mimetype="application/octet-stream")
 
