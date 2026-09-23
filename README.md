@@ -1042,6 +1042,22 @@ designed profile and a uniform-column soft-ground-story profile under the same
 record and intensity, displays measured drift/ductility, and can run both
 intensity sweeps. The viewer uses one 3D scene with A/B switching.
 
+**API.** `POST /design` (in `code_design.py`, served by `server.py`) takes
+`num_stories`, `story_height`, `area_sqft`, `occupancy` (`I/II`, `III`,
+`IV`), `zone`, `site_class` (`SA`–`SE`) and `ductility` (`OMRF`/`IMRF`/
+`SMRF`). It returns the four solver profiles (`story_height_profile`,
+`column_depth_x_profile`, `column_depth_y_profile`, `beam_depth_profile`),
+the scalar `rho_longitudinal`, `mass_per_floor`, and an audit trail:
+base shear, floor forces, story shears, required vs assembled `k0` per
+axis, the `12EI/h³`-style shortcut for comparison, static drifts,
+empirical vs assembled period, and iteration count. Invalid input, or a
+design that cannot converge within 10 iterations or 2 m column depth,
+returns HTTP 400 `invalid_design`; it is never silently clipped.
+`POST /compute` now accepts an optional scalar `rho_longitudinal`
+(0.01–0.06, default 0.02; HTTP 400 outside that range) and echoes it in
+the JSON header. It is a capacity input only: the binary block order and
+the FFT/nonlinear solver are unchanged.
+
 This implements the *skeleton* of code design — seismic demand → vertical
 distribution → drift check → member sizing → a capacity-design ratio —
 not an ACI 318 or BNBC design. There is no rebar detailing, no
