@@ -485,6 +485,17 @@ above) without the raw recordings that produced them.
 
 ## Running it yourself
 
+### Browser dependencies
+
+| Dependency | Version / source | Used for |
+|---|---|---|
+| three.js | 0.160.0, loaded from unpkg | The 3D viewer. |
+| Rapier deterministic compat | 0.20.0, loaded from unpkg | The local post-failure rigid-body animation. It is imported only when a computed detachment exists; playback reads a precomputed keyframe buffer. |
+
+Both browser libraries need an internet connection. Collapse animation is
+available only when running the local `server.py`; the deployed backend keeps
+collapse analysis disabled.
+
 1. **To regenerate results from `data/`:** run `mdof_response.py`, then
    optionally `plot_response.py` for static pictures.
 2. **To view the animation (including the live parameter sliders):** run
@@ -494,6 +505,16 @@ above) without the raw recordings that produced them.
    page and the sliders' live recompute requests — a plain static server
    (like `python -m http.server`) will load the page fine but the sliders
    will fail, since there's no `/compute` to POST to.
+
+To watch a collapse locally, open **Collapse Analysis**, choose **Load
+collapse demo**, press **Run collapse analysis**, then play the timeline.
+The structural solver computes when stories fail; Rapier animates the block
+after that instant from the computed hand-off state. Its assumed contact
+parameters are shown with the animation. The deployed backend keeps collapse
+analysis disabled.
+
+> Post-failure rigid-body model with assumed contact parameters — not a
+> solution of the structural equations of motion.
 
 ## The live version, hosted
 

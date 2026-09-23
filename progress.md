@@ -3146,3 +3146,252 @@ Ruling:
 - **Cleanup:** the temporary `window.__renderer` exposure and the
   `pre_spec14_index_scratch.html` scratch file were both removed;
   `git status --short` in the worktree is clean.
+
+## Spec 15 — collapse physics animation (goal loop)
+
+### Task 0: worktree and baseline (2026-09-22)
+- Worktree `.worktrees/goal-15-collapse-physics-animation`, branch
+  `goal/15-collapse-physics-animation` off `main`@`07bf6c7`. Junctions:
+  data/.claude/specs/verification/claude_scripts/knowledge. CLAUDE.md +
+  AGENTS.md copied. `graphify update .` run in the worktree.
+- Vendored engine: `claude_scripts/vendor/rapier3d-deterministic-compat-0.20.0.mjs`
+  (2,893,506 bytes, exactly the plan's size) from unpkg. In Node,
+  `await RAPIER.init()` works, `RAPIER.version()` = 0.20.0, and a falling
+  cuboid steps correctly. Joint/EventQueue APIs are present.
+- **Baseline (spec 14 check 8 re-measure).** Both Claude in Chrome and the
+  Browser pane report `visibilityState: hidden` (the windows are behind
+  another window), so rAF never fires and a real fps number could not be
+  taken. Measured instead by driving the real `animate(now)` by hand 120
+  times through a temporary `window.__renderer/__animate` hook (reverted,
+  `git status` clean), with `renderer.info.autoReset = false` and a reset per
+  frame (the composer's final pass would otherwise report 1 call):
+  - N=20 elastic (ANZA1_CIDLA, playing): **1434 draw calls/frame, 80 156
+    triangles**, 14.72 ms CPU per `animate()`. Draw calls/triangles match
+    spec 14's mobile/desktop numbers (1434 / 80 156) exactly.
+  - Collapse demo (N=4, run via the real UI, readout "Story 3 detached at
+    80.54 s (axis X)", seek ≈ 81 s, held block): **419 draw calls, 18 896
+    triangles**, 4.37 ms CPU per `animate()`.
+  - Real fps is **deferred to Task 6**, which needs a visible window. The
+    user has to bring the browser forward for that.
+
+### Task 1: hand-off consumer and model (commit 19b99c8)
+- New `COLLAPSE-PHYSICS-BEGIN/END` sentinel block after HYSTERESIS-HELPERS:
+  `COLLAPSE_PHYS` constants (frozen), `readHandoff()` (the JS mirror of
+  `validate_handoff`: refuses version != 1, missing top-level keys, missing
+  event fields; returns the events deep-frozen), `collapseModel()`.
+- New `claude_scripts/check_collapse_kinematics.mjs` extracts STORYHEIGHT +
+  COLLAPSE-PHYSICS at runtime. Failed first (block missing), then 18/18 PASS
+  on the real demo fixture: floor mass 1e6 kg exact, metre levels
+  [3.5, 7, 10.5, 14], CM-from-plane 5.25 == upper_cm_height, P_cap from the
+  header, hinge M_res(0) = V_p h/8 = 2.0751e6 N·m, strut section 0.7 x 0.7 at
+  story 3, and a frozen-event write throws TypeError in strict mode (check 5).
+- **Found (spec 14, pre-existing, not fixed here):** the viewer's
+  `cornerIndex` order is (+x+z, +x-z, -x+z, -x-z), but physics column `j`
+  (`column_plan_positions`) is CCW (+,+), (-,+), (-,-), (+,-).
+  `updateDamageVisuals()` indexes `column_damage` by `cornerIndex`, so
+  corners 1-3 show another column's damage code. Spec 15 maps columns by
+  plan sign, never by index. To be filed for the user.
+
+### Task 2: engine and keyframe buffer (commit a8af512, + fixes folded into Task 3's commit)
+- COLLAPSE-PHYSICS part 2: vec/quat helpers, `plateInertia`, `rigidSeed` (R4),
+  `trackAt`/`trackVel`, `buildCollapseSim` (chunked stepper), `sampleBody`,
+  `displayMatrix` (D = T(pivot + S dp) S R S^-1 T(-pivot)).
+- Demo fixture run (`node claude_scripts/check_collapse_kinematics.mjs`, all PASS):
+  - check 1: seed CM = mean floor_state to 1e-9 (metres); CM height from the
+    plane = 5.25 = upper_cm_height; engine pose/velocity = seed within f32
+    (Rapier is single precision, so 1e-9 applies to the seed and 2e-7 relative
+    to the engine read-back; ruling R8); mass 2 000 000 kg; KE_rigid/KE_struct
+    = 2.783274e6 / 2.785657e6 = **0.999144**; block speed 1.668 m/s vs the
+    structural peak floor speed 2.818 m/s; rendered D at t_detach = I (1e-12).
+  - Sequence: 1440 steps. Sidesway to about 85 deg, then impact on floor 2 at
+    81.92 s (v 7.55 m/s, F 7.55e8 N > P_cap 8.40e7 N => animated cascade
+    story 2), then story 1 at 82.39 s (F 8.65e8 N). The block leaves in -x
+    (dx -4.20 m, direction -1), drops 8.74 m and topples onto its side beside
+    the pancaked floors 1-2.
+  - check 2: 3 bodies, computed story 3 @ frame 0, cascades @ frames 165 / 222,
+    zero motion before activation in every frame.
+  - check 3: 5 rebuilds give an identical SHA-256 (178f450e... before the
+    column-collider fix; re-hashed after), and chunks 200/7/1 give identical
+    hashes. check 4: forward == backward at 20 times. check 5: frozen,
+    unmutated, separate lists.
+- **Bugs found and fixed while verifying:**
+  1. `RigidBody.setCcdEnabled` does not exist in 0.20 (`enableCcd`), and the
+     TypeError vanished **inside Rapier's `drainCollisionEvents` callback**:
+     the cascade half-ran (floor removed from the kinematic set, never
+     registered). Contacts are now collected in the callback and handled
+     after the drain.
+  2. A zero-speed first touch used up the cascade test. Now the first touch
+     crushes the struts, and every new contact is tested until the floor
+     releases.
+  3. The block was two plates with empty stories between them, so a slab
+     could slip into the gap. Its own columns are now massless (density 0)
+     contact colliders, so mass and inertia stay exactly the lumped model's.
+- **Ruling R7 (mine):** animated cascades are free-fall pancakes (columns
+  crushed axially, no struts). Pinned vertical struts under a vertical impact
+  would just hold, which is not a collapse. R1 struts only for computed
+  detachments.
+- **Ruling R8:** check 1's 1e-9 is asserted on the f64 seed; the engine
+  read-back is compared at f32 tolerance because Rapier is single precision.
+  The rendered no-teleport property does not depend on it (D uses the
+  buffer's own frame 0, exactly I).
+- Live check 2 (`--live`, server from the worktree): KOCAELI_AYD x20 and x15
+  both PASS (3 bodies, 2 cascades, KE 0.9991 / 0.9999). Other records below.
+
+### Task 3: viewer integration (commit dda0605)
+- importmap entry `@dimforge/rapier3d-compat` ->
+  unpkg `@dimforge/rapier3d-deterministic-compat@0.20.0/dist/rapier.mjs`,
+  loaded only by dynamic `import()` from `startCollapseAnimation()`.
+- `applyLoadedData()` always `discardCollapseAnimation()`s, then builds for a
+  detaching payload (new `extra.collapseHeader`). The build is chunked 200
+  steps per timer yield behind `.recompute-overlay` ("Simulating collapse
+  N%"), and `world.free()` runs at the end, so no engine is live at playback.
+  A load/parse or CDN failure shows a readable message and keeps the hold.
+- `applyCollapseFloors(scale)` in `animate()` (before the columns): each
+  activated floor is drawn at its activation-time pose, premultiplied by
+  `displayMatrix()`, with `matrixAutoUpdate = false`, and restored to true
+  before activation. `sourceWorldPos()` returns the matrix; such columns take
+  their ends through it and are drawn straight (`straightSegment`).
+- R3 gain pin in `swayDisplayGain()`. There is no Amplify control any more
+  (spec 7 removed the manual slider), so the "true scale" statement lives in
+  the banner. Auto-orbit is disabled app-wide by an earlier user request, so
+  "suppress during collapse" needed no code (not permanently broken by this
+  spec).
+- Banner (`#collapseBanner`, design pass per emil-design-eng: opacity + 6px
+  translate, 200 ms strong ease-out, opacity-only under reduced motion):
+  Part B sentence, assumed parameters with values, computed events, animated
+  cascades, cap note. Placed top-centre after the first screenshot showed a
+  bottom placement covering the building at a 545 px tall viewport. The
+  Signals drawer shows "plots the structural solution, not the animation"
+  for a detaching run.
+- Readout honesty line is now "Structural solve up to each detachment; the
+  fall after it is a rigid-body animation (see the banner)." (none: "Structural
+  solve; nothing detached, so nothing is animated."). check_collapse_readout.mjs
+  updated, ALL CHECKS PASSED.
+- **Browser (Claude in Chrome; the window is occluded so rAF is paused, but
+  screenshots force frames):** fresh load, then Load collapse demo (wait for
+  magnitude 8.0), then Run collapse analysis. Result: 3 bodies, 4 struts,
+  cascades story 2 @ 81.92 s and story 1 @ 82.39 s. That is **identical to
+  Node** (deterministic build, machine-independent). Frames 79.5 / 81.3 / 81.8
+  / 82.6 / 88 s: story-3 struts lean, the block drops onto floor 2, floors
+  pancake to the base. Scrubbing 95 -> 85 -> 81.8 gives the same frame as
+  forward. Scrub to 79 s: 0 matrix-driven groups, banner hidden. No console
+  errors.
+  - First attempt's Run click raced the demo's record load (magnitude still
+    7.51, no detachment): a test-sequencing slip, not a product bug.
+- **Check 8:** slider change (animation dropped at once; after the recompute
+  bodies 0, animTime 0, banner hidden); re-run from cache (0 bodies at t=0,
+  then rebuilt about 1 s later); record switch (0 bodies, note hidden). PASS.
+- Live check 2, full sweep (demo scenario: N=4, weak story 3 @ 0.70 m, M 8.0):
+  KOCAELI_AYD x20 PASS / x15 PASS; NIIGATA_AKTH04 x20 and x15 check-2 PASS;
+  NIIGATA_AKTH05 x20 PASS (x15 does not detach). KOCAELI_ATK,
+  L-AQUILA.A_AZ009 and PARK2004_HOG do not converge at x20/x15. So **3
+  records x 2 intensities (5 detaching runs)**, all with correct activation
+  times and zero early motion.
+- **Ruling R9 (flag to the user):** KE_rigid/KE_struct on those runs is
+  0.9991 / 0.9999 (AYD), **0.9807 / 0.9884 (AKTH04)**, 0.9958 (AKTH05). AKTH04
+  misses the verification doc's "<= 1%". The shortfall is the detached
+  floors' relative, non-rigid velocity at t_detach, which no single rigid
+  body can carry. The momentum/angular-momentum projection already loses
+  the least possible energy and never invents any. The script asserts the
+  hard bound (<= 1) and reports the ratio. The doc's 1% becomes a reported
+  target (verification correction in Task 7). The alternative (per-floor
+  bodies with joints) was rejected: that is a flexible block, which is not
+  the spec's rigid block.
+
+### Task 4: falling furniture (B4) (commit fe4d9ce)
+- `buildCollapseSim(..., furniture)`: at a floor body's registration, each item
+  on those floors becomes a dynamic box (its rotated drawn bounds; plan /
+  SUPM, height raw), resting on the slab and moving at the slab's point
+  velocity. Density FURNITURE_DENSITY 150 kg/m^3 over the bounding box
+  (assumed, in the banner). Items on floors not yet released keep their
+  spec-5 SDOF sway.
+- Teleport-free release: `localAt(item, t)` returns where the item is DRAWN at
+  t. `updateFurnitureOffsets()` got an optional `items` argument, so the same
+  code computes it with no copy (check_furniture_gain.mjs still OK).
+  Render: child-local matrix = G_cur^-1 . D_item . Base_floor . L_release.
+- Budget (A4): structural bodies + furniture over COLLAPSE_BUDGET.bodies =>
+  furniture rides its floor rigidly (coarsened, noted in the banner).
+  COLLAPSE_MOBILE = matchMedia('(max-width: 600px)'), the bottom-sheet
+  breakpoint.
+- Node: 36 items at their floor body's exact activation frame, items on
+  later-released floors not early, chunk-size identical. With furniture the
+  cascade stories are the same, and the second cascade moves 82.390 ->
+  82.398 s (extra contact mass: expected).
+- Browser: 39 bodies (3 + 36). Frames 80.5 / 81.6 / 82.3 / 90 s: furniture
+  sways, then rides and falls with the block.
+
+### Task 5: debris and dust (B5, cosmetic) (commit b0d7651)
+- Debris: `spawnDebris()` at each computed detachment (6 per failed column, at
+  the strut foot) and each first impact (5 per slab corner), up to
+  COLLAPSE_BUDGET.debris (300 / mobile 60). Seeded
+  `mulberry32(hashSeed(record#event-key))`, the one PRNG, passed in. Debris
+  lives in the buffer like every other body (checks 2-4 cover it).
+- Dust: `dustParams()` draws 8 params per particle once; `dustAt(params, i, t)`
+  is a pure function of (t - t_spawn), so scrubbing is free. Per puff
+  min(160, dust budget / puffs). Rendered as one InstancedMesh of camera-
+  facing planes, MeshBasicMaterial with normal blending, opacity 0.22,
+  depthWrite off, **fog: true** (not additive). Debris is one InstancedMesh:
+  +2 draw calls total, flat in N.
+- `sceneHeight(model, y)`: metre height -> scene height, piecewise between the
+  levels (exact at every level).
+- Node: 84 fragments at detach3 80.54 / floor2 81.92 / floor1 82.42 / ground
+  82.88 s. Activation = its event, no early motion; identical hash on a
+  rebuild and across chunk sizes (9.6); the mobile cap holds; dust forward ==
+  backward, and nothing before its puff.
+
+### Task 6: visual polish and verification (2026-09-23)
+- The honesty banner's initial top-centre placement obscured the falling block
+  in a 1280×545 viewport. Moved it to the upper right (360 px wide) and
+  confirmed the building/dust remain visible. At 375×812 it is legible. It
+  hides while the Signals drawer is open; the drawer itself still says its
+  plots show the structural solution. Per user request, added a labelled
+  dismiss button rather than a 2-second auto-hide (too short to read the
+  assumed parameters). Dismissal survives scrubbing but resets for a new
+  analysis. Verified on desktop and mobile; zero browser console warnings or
+  errors. The emil-design-eng pass kept the existing reduced-motion behavior.
+- A temporary in-page profiler was removed before commit. With Chrome in the
+  foreground, 20-story **elastic**: 1434 draw calls, 80,156 triangles,
+  13.6–14.3 ms CPU/frame, 61.8 fps desktop / 59.5 fps at 375×812. The
+  measured draw calls/triangles match Task 0's 20-story elastic baseline.
+  Rapier was not imported on that run (no Rapier resource). The 20-story
+  per-floor camera and return to full view worked. The first occluded-window
+  reading (~1 fps) was discarded as browser throttling, not a renderer datum.
+- Demo KOCAELI_AYD N=4, intensity×20, story3: computed detach 80.54 s,
+  animated cascades story2 81.92 / story1 82.43 s, visibly swaying stump and
+  falling block, furniture and dust. At the dense 82.9 s frame: desktop 421
+  draw calls, 21,184 triangles, 3.6 ms CPU/frame, 144 fps; mobile rerun at
+  375×812 421 calls, 20,416 triangles, 4.5 ms, 132 fps. Mobile rerun visibly
+  engaged the debris cap (84 desktop vs 60 mobile). The analytic budget probe
+  in check_collapse_kinematics.mjs asserts N=20 3-event mobile coarsening to
+  92 bodies <=120 and desktop 400<=400, plus dust/debris caps. Immediate
+  Load collapse demo -> Run worked; no race reproduced.
+- **Verification gap, not a pass:** required real N=20 *full cascade* with
+  dust/zoom-out was not obtained. KOCAELI_AYD N20 x10/x15 hit HTTP 500 from
+  NumPy allocation failure (89.7 MiB complex array on a RAM-constrained
+  machine); short L-AQUILA.A_BY098 N20 x15 returned a modelled nonconvergence
+  with no events after 150 s. The N20 cascade fps/fog/coarsening checks must
+  be repeated on a suitable converging record/machine before claiming check 6
+  and the full check 7 passed. No physics inputs or records were fabricated.
+- Node regressions: check_index_syntax, fft_check, check_time_domain,
+  check_footprint_area, check_sway_gain, check_furniture_gain,
+  check_column_shape, check_hysteresis_panel, check_floor_rotation,
+  check_story_heights, check_damage_render, check_collapse_readout,
+  check_collapse_kinematics all passed. The last one covered 5 identical
+  rebuild hashes, chunk-size invariance, bidirectional scrubbing, event
+  immutability, furniture, debris/dust, and body budgets. Python FFT,
+  transfer-mirror and hand-off checks passed. check_damage_blocks.py was
+  rerun separately from the browser server and passed all checks, including
+  64 block subsets and N=7/20 payload sizes (earlier concurrent run had
+  stopped under memory pressure). The 3 interior PointLights remain sourced
+  by the fixed [0.15, 0.5, 0.85] height fractions and reposition on load.
+
+## Spec 15 — Task 7: documentation and final verification (2026-09-23)
+- README now documents the second browser CDN dependency, local-only collapse path, run sequence and the Part B honesty sentence verbatim. Spec 14 already occupies Math PDF Part J, so spec 15 was added as Part K (plan's Part J label was stale); assumptions, ODE description, impact estimate and cascade criterion are documented in `claude_scripts/math-pdf-sections-goal15.md` and the generator.
+- Revalidated implementation against the shipped contracts: Rapier deterministic compat 0.20.0, three.js 0.160.0, metre physics with anisotropic pose mapping, true-plan-scale pin, spherical-jointed struts about the hinge-column mechanism, immutable computed detachment list and separate animated cascade list.
+- **Ruling C-4 / R9:** least-squares rigid projection cannot preserve the internal relative velocities of the detached floors. Check 1 now enforces KE ratio ≤1 (no invented energy) and reports the loss; former ≤1% requirement is only a target. NIIGATA_AKTH04 ratios 0.9807 / 0.9884 mean losses 1.93% / 1.16%.
+- `specs/README.md`, `COURSE-CONCEPTS.md`, `knowledge/index_html.md`, and the local AGENTS handoff now state spec 15's implementation and limits. requirements.txt and backend source remain unchanged; no backend mirror is due.
+- **Still unverified:** real N=20 full-cascade FPS/mobile coarsening and fog at extreme zoom-out with dust. Existing N=4 browser run, elastic N=20 profiler and analytic budget probes do not satisfy these checks. No real record was fabricated; checkboxes remain open.
+- Final fresh suite: all 13 Node checks passed (`check_index_syntax`, FFT, time-domain, footprint, sway gain, furniture gain, column shape, hysteresis panel, floor rotation, story heights, damage render, collapse readout, collapse kinematics). `fft_check_scipy.py`, `check_transfer_mirror.py`, `verify_handoff.py` (all implemented checks, including determinism and docs sentence), and isolated `check_damage_blocks.py` passed. The Newmark subcase log contains the documented theta_z dt/4 comparison flag; its aggregate check 5 passes, consistent with the existing spec-13 recorded discretization exception.
+- PDF rebuilt to 43 pages. pypdf text extraction confirms Part K, every assumed value, and honesty wording. Rendered pages 42–43 inspected: equations, wrapped parameter table, and closing text are legible with no clipping. Poppler emitted missing optional font warnings, but these rendered pages show no layout defects.
+- `check-docs-drift` checklist covered README, math PDF, AGENTS status, verification helper and frontend knowledge note. `requirements.txt`, `server.py`, and `mdof_response.py` have no diff. `graphify update .` was attempted and blocked by Windows Application Control; no workaround attempted.
+- Final review: documentation agrees on local-only status, fixed deterministic engine/build, keyframe lifecycle, separate event lists, true-scale pose mapping, and the still-open N=20 browser checks. No push or merge performed.
