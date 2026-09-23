@@ -3479,3 +3479,10 @@ Ruling:
   `index.html`; no payload, physics, or backend changes. Documentation is the
   README/PDF update plus local ignored handoff, knowledge, specs and
   verification files. No unrelated changes found.
+# Spec 17 — Signals view of nonlinearity
+
+## Task 1 — Time-domain pseudo-force panel (2026-09-23)
+
+Added full-rate `p_nl` to collapse requests and reused the existing `buildEnvelope`/`playheadColumn` path for a third Time subplot. Elastic responses render an explicit zero trace. The first nonzero sample drives the yield marker; the panel prints its peak.
+
+Verification: `node claude_scripts/check_time_domain.mjs` passed 7176 real/synthetic comparisons. `git diff --check` passed. Ruling: retain a zero pseudo-force panel when the response has no nonlinear block, so elastic behavior is visible.

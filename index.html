@@ -4343,10 +4343,28 @@
             let rPeak = 0;
             for (let i = 0; i < rel.length; i++) { const v = Math.abs(rel[i]); if (v > rPeak) rPeak = v; }
 
+            const pBlock = damageData?.blocks?.p_nl;
+            const pAxis = damageData?.header?.axes?.indexOf(axis) ?? -1;
+            let pseudo = new Float64Array(rel.length), pPeak = 0, firstYield = -1;
+            if (pBlock && pAxis >= 0) {
+                const [, stories, samples] = pBlock.shape;
+                if (spectrumFloorIndex < stories && samples === rel.length) {
+                    const start = (pAxis * stories + spectrumFloorIndex) * samples;
+                    pseudo = pBlock.data.subarray(start, start + samples);
+                    for (let i = 0; i < samples; i++) {
+                        const v = Math.abs(pseudo[i]);
+                        if (v > pPeak) pPeak = v;
+                        if (v !== 0 && firstYield < 0) firstYield = i;
+                    }
+                }
+            }
+
             timeEnvelopes = {
                 axis, floorIndex: spectrumFloorIndex,
                 ground: buildEnvelope(gAcc, nCols), groundPeak: gPeak,
                 floor: buildEnvelope(rel, nCols), floorPeak: rPeak,
+                pseudo: buildEnvelope(pseudo, nCols),
+                pseudoPeak: pPeak, firstYield, pseudoSamples: pseudo.length,
             };
         }
 
@@ -4450,7 +4468,8 @@
             ctx.clearRect(0, 0, cssW, cssH);
 
             const topM = 8, bottomM = 16, sideM = 4, gap = 26;
-            const panelH = (cssH - topM - bottomM - gap) / 2;
+            const hasPseudo = !!timeEnvelopes.pseudo;
+            const panelH = (cssH - topM - bottomM - gap * (hasPseudo ? 2 : 1)) / (hasPseudo ? 3 : 2);
             const plotX = sideM, plotW = cssW - sideM * 2;
             const env = timeEnvelopes;
             const playCol = playheadColumn(animTime, totalDuration, env.ground.nCols);
@@ -4463,6 +4482,27 @@
             drawTimeSubplot(ctx, plotX, topM + panelH + gap, plotW, panelH,
                 `Relative u(t) · ${floorLabel} · peak ${env.floorPeak.toExponential(2)} m`,
                 env.floor, env.floorPeak, '#7fffb0', playCol);
+
+            if (hasPseudo) {
+                const pseudoY = topM + 2 * (panelH + gap);
+                drawTimeSubplot(ctx, plotX, pseudoY, plotW, panelH,
+                    `Pseudo-force p_NL(t) · story ${env.floorIndex + 1} · peak ${env.pseudoPeak.toExponential(2)} N`
+                        + (env.firstYield < 0 ? ' · identically zero' : ''),
+                    env.pseudo, env.pseudoPeak, '#ffb46b', playCol);
+                if (env.firstYield >= 0) {
+                    const yieldX = plotX + env.firstYield / env.pseudoSamples * plotW;
+                    ctx.strokeStyle = 'rgba(255,180,107,0.85)';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(yieldX, pseudoY);
+                    ctx.lineTo(yieldX, pseudoY + panelH);
+                    ctx.stroke();
+                    ctx.fillStyle = '#ffb46b';
+                    ctx.font = '9px ui-monospace, monospace';
+                    ctx.textAlign = 'right';
+                    ctx.fillText('first yield', Math.min(plotX + plotW, yieldX + 48), pseudoY + panelH - 3);
+                }
+            }
 
             // Shared time axis along the bottom.
             ctx.font = '9px ui-monospace, "SF Mono", "Cascadia Code", monospace';
@@ -5251,7 +5291,7 @@
                 // requesting more later would re-run a minute-long solve.
                 params.intensity_scale = INTENSITY_STEPS[parseInt(intensitySlider.value, 10)];
                 params.hftd_max_iterations = 200;
-                params.damage_blocks = ['story_drift', 'story_shear', 'damage_state',
+                params.damage_blocks = ['story_drift', 'story_shear', 'p_nl', 'damage_state',
                                         'stiffness_ratio', 'column_damage'];
             }
             const cacheKey = JSON.stringify(params);
