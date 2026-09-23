@@ -1008,3 +1008,22 @@ continues to represent record time. Manual camera input takes control for the
 rest of that playthrough; reduced-motion preferences disable shake and slow
 motion. These are display and playback features: they add no structural
 physics or payload data.
+
+## Spec 17: Signals view of nonlinearity
+
+The Signals drawer now makes the HFTD feedback method visible across four
+tabs: Time adds the selected story's pseudo-force, Frequency compares measured
+elastic and nonlinear output spectra and shows both the failing elastic
+identity and corrected feedback identity, and Convergence plots the actual
+fixed-point residual history. A theme-aware block diagram shows how the
+nonlinear restoring-force correction feeds the existing linear FFT kernel.
+The on-demand superposition experiment measures the difference between the
+computed `u_2a` and `2u_a` traces; its elastic control is linear while yielded
+responses can differ substantially. A cancellable 20-level intensity sweep
+plots the elastic control and measured nonlinear response as requests finish.
+
+The corrected identity is compared after aligning physical-time histories on
+a common display grid: the elastic base and nonlinear correction use separate
+solver FFT padding. Sweep outcomes depend on the ground-motion record; yield,
+collapse, and nonconvergence are shown only when returned by that run. Both
+Frequency output traces remain measured from relative floor displacement.
