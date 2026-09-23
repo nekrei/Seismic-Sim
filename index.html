@@ -295,6 +295,9 @@
             color: #ffd764;
         }
         .view-buttons button.primary:hover { background: rgba(255,215,100,0.25); }
+        .cinematic-reenable { margin-top: 8px; width: 100%; padding: 8px 10px; border: 1px solid rgba(255,215,100,0.35); border-radius: 8px; background: rgba(255,215,100,0.08); color: #ffd764; cursor: pointer; font: inherit; }
+        .cinematic-reenable[hidden] { display: none; }
+        #slowMotionRow[hidden], #replayCollapseBtn[hidden] { display: none; }
 
         #runCollapseBtn { white-space: normal; }
         #runCollapseBtn:active { transform: scale(0.97); }
@@ -1277,6 +1280,11 @@
                 <div class="view-buttons">
                     <button class="primary" id="backToFullViewBtn">⤢ Back to full view</button>
                 </div>
+                <button class="cinematic-reenable" id="cinematicReenableBtn" type="button" hidden>Cinematic camera off · turn back on</button>
+                <div class="ctrl-row"><label class="panel-label" for="cameraShakeToggle">Camera shake</label><input type="checkbox" id="cameraShakeToggle" checked /></div>
+                <div class="ctrl-row"><label class="panel-label" for="cinematicCameraToggle">Cinematic camera</label><input type="checkbox" id="cinematicCameraToggle" checked /></div>
+                <div class="ctrl-row" id="slowMotionRow" hidden><label class="panel-label" for="slowMotionToggle">Slow motion</label><input type="checkbox" id="slowMotionToggle" checked /></div>
+                <div class="view-buttons"><button id="replayCollapseBtn" type="button" hidden>↺ Replay collapse</button></div>
             </div>
         </details>
     </div>
@@ -1434,6 +1442,21 @@
         // spec 4, Part B (per-floor viewing) / Part E (redesigned panel) / Part H (recompute overlay)
         const floorSelect = document.getElementById('floorSelect');
         const backToFullViewBtn = document.getElementById('backToFullViewBtn');
+        const cinematicReenableBtn = document.getElementById('cinematicReenableBtn');
+        const cameraShakeToggle = document.getElementById('cameraShakeToggle');
+        const cinematicCameraToggle = document.getElementById('cinematicCameraToggle');
+        const slowMotionToggle = document.getElementById('slowMotionToggle');
+        const slowMotionRow = document.getElementById('slowMotionRow');
+        const replayCollapseBtn = document.getElementById('replayCollapseBtn');
+        const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+        function syncCinematicMotionPreference() {
+            cameraShakeToggle.disabled = reducedMotion.matches;
+            slowMotionToggle.disabled = reducedMotion.matches;
+            cameraShakeToggle.title = reducedMotion.matches ? 'Camera shake is off under reduced motion' : '';
+            slowMotionToggle.title = reducedMotion.matches ? 'Slow motion is off under reduced motion' : '';
+        }
+        reducedMotion.addEventListener('change', syncCinematicMotionPreference);
+        syncCinematicMotionPreference();
         const recomputeOverlay = document.getElementById('recomputeOverlay');
         const recomputeError = document.getElementById('recomputeError');
         const toastEl = document.getElementById('toast');
@@ -1813,6 +1836,11 @@
         // static file no longer describes the motion on screen. Never derive
         // this by differentiating ground displacement in the browser.
         let groundAccelData = null;
+        let shakeTrace = null;
+        let cinematicOnset = null;
+        let cinematicTriggered = false;
+        let cinematicOverride = false;
+        let cinematicFollow = null;
         // Static-path fetch cache only (parameter-independent, like
         // groundSpectrum): the raw JSON for one record, reused across every
         // same-record live recompute rather than refetched on a drag.
@@ -4754,7 +4782,7 @@
         // fights limits that were sized for a single floor. Reuses the same
         // FOV-derived fit-distance math as frameCameraToBuilding(), applied
         // to a tight box around one floor instead of the whole height. ---
-        function frameCameraToFloor(floorIndex) {
+        function frameCameraToFloor(floorIndex, targetCentre = null, cinematic = false) {
             if (!buildingGroups[floorIndex]) return;
             activeFloorIndex = floorIndex;
 
@@ -4774,14 +4802,13 @@
 
             const floorY = buildingGroups[floorIndex].position.y; // floors only move in X/Z, so Y is safe/static to read here
             const dir = new THREE.Vector3(1.2, 0.5, 1.5).normalize().multiplyScalar(dist);
-            const toPos = dir.clone();
-            toPos.y += floorY;
-            const toTarget = new THREE.Vector3(0, floorY, 0);
+            const toTarget = targetCentre?.clone() ?? new THREE.Vector3(0, floorY, 0);
+            const toPos = dir.clone().add(toTarget);
 
             // activeFloorIndex is already set above, so tweenCameraTo()'s own
             // scheduleAutoOrbit() call (Part D) picks up the per-floor guard
             // immediately -- no separate call needed here.
-            tweenCameraTo(toPos, toTarget);
+            tweenCameraTo(toPos, toTarget, cinematic && reducedMotion.matches ? 1 : 550);
         }
 
         function frameCameraToFullBuilding() {
@@ -4821,6 +4848,82 @@
             return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
         }
 
+        // ---8<--- CINEMATIC-HELPERS-BEGIN
+        const SHAKE_CUTOFF_HZ = 8;
+        const SHAKE_MAX_OFFSET = 0.06;
+        function shakePole(dt, cutoffHz = SHAKE_CUTOFF_HZ) {
+            if (!(dt > 0) || !(cutoffHz > 0) || cutoffHz * dt >= 0.5) return 0;
+            const q = 2 - Math.cos(2 * Math.PI * cutoffHz * dt);
+            return q - Math.sqrt(q * q - 1);
+        }
+        function lowPassShake(samples, dt, cutoffHz = SHAKE_CUTOFF_HZ) {
+            const pole = shakePole(dt, cutoffHz), output = new Float64Array(samples.length);
+            let previous = 0;
+            for (let i = 0; i < samples.length; i++) {
+                previous = (1 - pole) * samples[i] + pole * previous;
+                output[i] = previous;
+            }
+            return output;
+        }
+        function makeShakeTrace(accel, dt) {
+            if (!accel?.X?.length || !(dt > 0)) return null;
+            const x = lowPassShake(accel.X, dt);
+            const z = lowPassShake(accel.Y?.length === accel.X.length ? accel.Y : new Float64Array(x.length), dt);
+            const mean = arr => arr.reduce((sum, v) => sum + v, 0) / arr.length;
+            const mx = mean(x), mz = mean(z);
+            let peak = 0;
+            for (let i = 0; i < x.length; i++) {
+                x[i] -= mx; z[i] -= mz;
+                peak = Math.max(peak, Math.hypot(x[i], z[i]));
+            }
+            return { x, z, dt, gain: peak > 0 ? SHAKE_MAX_OFFSET / peak : 0 };
+        }
+        function shakeAtTime(trace, t, enabled, reducedMotion) {
+            if (!trace || !enabled || reducedMotion) return [0, 0];
+            const u = Math.max(0, Math.min(trace.x.length - 1, t / trace.dt));
+            const i = Math.floor(u), j = Math.min(i + 1, trace.x.length - 1), f = u - i;
+            return [(trace.x[i] * (1-f) + trace.x[j] * f) * trace.gain,
+                    (trace.z[i] * (1-f) + trace.z[j] * f) * trace.gain];
+        }
+        const CINEMATIC_LEAD_SECONDS = 1.5;
+        function firstCinematicOnset(collapse) {
+            if (!collapse?.converged) return null;
+            let best = null;
+            for (const axis of ['X', 'Y']) {
+                (collapse.axes?.[axis]?.t_collapse || []).forEach((time, floorIndex) => {
+                    if (Number.isFinite(time) && (!best || time < best.time)) {
+                        best = { time, story: floorIndex + 1, floorIndex,
+                            leadTime: Math.max(0, time - CINEMATIC_LEAD_SECONDS) };
+                    }
+                });
+            }
+            return best;
+        }
+        function criticallyDampedFollow(position, velocity, target, dt, tau = 0.4) {
+            const omega = 2 / tau, change = position - target;
+            const temp = (velocity + omega * change) * dt;
+            const decay = Math.exp(-omega * dt);
+            return { position: target + (change + temp) * decay,
+                     velocity: (velocity - omega * temp) * decay };
+        }
+        const SLOWMO_MIN_RATE = 0.15;
+        const SLOWMO_RAMP_IN = 0.8;
+        const SLOWMO_RAMP_OUT = 1.2;
+        function slowMotionRate(t, onsetTime, enabled, reducedMotion) {
+            if (!enabled || reducedMotion || !Number.isFinite(onsetTime)) return 1;
+            const begin = Math.max(0, onsetTime - 1);
+            const full = begin + SLOWMO_RAMP_IN;
+            const end = onsetTime + 3;
+            if (t < begin || t >= end + SLOWMO_RAMP_OUT) return 1;
+            if (t < full) return 1 - (1 - SLOWMO_MIN_RATE) * easeInOutCubic((t - begin) / SLOWMO_RAMP_IN);
+            if (t < end) return SLOWMO_MIN_RATE;
+            return SLOWMO_MIN_RATE + (1 - SLOWMO_MIN_RATE) * easeInOutCubic((t - end) / SLOWMO_RAMP_OUT);
+        }
+        function replayStartTime(onset) {
+            return onset ? Math.max(0, onset.time - CINEMATIC_LEAD_SECONDS) : 0;
+        }
+        // ---8<--- CINEMATIC-HELPERS-END
+
         function tweenCameraTo(toPos, toTarget, duration = 550) {
             cameraTween = {
                 fromPos: camera.position.clone(),
@@ -4857,7 +4960,15 @@
             // the `if (activeFloorIndex === null) { autoOrbitTimer = setTimeout(...) }` body.
         }
 
-        controls.addEventListener('start', () => { cameraTween = null; scheduleAutoOrbit(); });
+        controls.addEventListener('start', () => {
+            cameraTween = null;
+            if (cinematicTriggered && !cinematicOverride) {
+                cinematicOverride = true;
+                cinematicFollow = null;
+                cinematicReenableBtn.hidden = false;
+            }
+            scheduleAutoOrbit();
+        });
         controls.addEventListener('end', () => { scheduleAutoOrbit(); });
         scheduleAutoOrbit(); // arm on load
 
@@ -4923,10 +5034,18 @@
             floorRotData = extra.floorRot ?? null; // spec 12 -- absent on every path that has no rotation block
             damageData = extra.damage ?? null;     // spec 14 -- only a collapse run carries blocks
             collapseData = extra.collapse ?? null; // spec 14 -- header.collapse of that run
+            cinematicOnset = firstCinematicOnset(collapseData);
+            cinematicTriggered = false;
+            cinematicOverride = false;
+            cinematicFollow = null;
+            cinematicReenableBtn.hidden = true;
+            slowMotionRow.hidden = !cinematicOnset;
+            replayCollapseBtn.hidden = !cinematicOnset;
             damageView = prepareDamageView(damageData, drawnHeights);
             hysteresisLoadSerial++; // spec 14 C6: new data -> the ghost key changes
             showDamageLegend(damageView);
             groundAccelData = extra.groundAccel ?? null; // spec 9 -- null-safe the same way; whichever path loaded it, the time panel reads only this
+            shakeTrace = makeShakeTrace(groundAccelData, (time[1] - time[0]) || 0);
 
             periodReadout.textContent = (periodX != null && periodY != null)
                 ? `${periodX.toFixed(2)}s / ${periodY.toFixed(2)}s`
@@ -5869,15 +5988,31 @@
             lastTime = now;
 
             if (isPlaying && !isSeeking) {
-                animTime += delta * speed;
+                animTime += delta * speed * slowMotionRate(animTime, cinematicOnset?.time,
+                    slowMotionToggle.checked, reducedMotion.matches);
                 if (totalDuration > 0) {
-                    if (animTime > totalDuration) animTime = animTime % totalDuration;
+                    if (animTime > totalDuration) {
+                        animTime = animTime % totalDuration;
+                        cinematicTriggered = false;
+                        cinematicOverride = false;
+                        cinematicFollow = null;
+                        cinematicReenableBtn.hidden = true;
+                    }
                     const dt = (timeData[1] - timeData[0]) || 0.01;
                     const idx = Math.floor(animTime / dt);
                     currentIndex = Math.min(idx, totalFrames - 1);
                 }
                 seekSlider.value = animTime;
                 timeDisplay.textContent = `${animTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`;
+            }
+
+            if (isPlaying && !isSeeking && cinematicCameraToggle.checked && cinematicOnset && !cinematicTriggered && !cinematicOverride &&
+                animTime >= cinematicOnset.leadTime) {
+                cinematicTriggered = true;
+                const g = buildingGroups[cinematicOnset.floorIndex];
+                const centre = g ? new THREE.Vector3(g.position.x, g.position.y, g.position.z) : null;
+                frameCameraToFloor(cinematicOnset.floorIndex, centre, true);
+                floorSelect.value = String(cinematicOnset.floorIndex);
             }
 
             const idx = currentIndex;
@@ -5919,6 +6054,26 @@
 
             applyCollapseFloors(scale); // spec 15: detached floors from the keyframe buffer (no-op otherwise)
 
+            if (cinematicCameraToggle.checked && cinematicTriggered && !cinematicOverride && !cameraTween && collapseAnim && cinematicOnset) {
+                const rec = collapseAnim.sim.bodies.find(r => r.source.kind === 'computed' && r.source.story === cinematicOnset.story);
+                const sample = rec && sampleBody(collapseAnim.sim, rec, animTime);
+                if (sample) {
+                    const target = new THREE.Vector3(
+                        rec.pivot[0] + SCENE_UNITS_PER_METRE * (sample.p[0] - rec.p0[0]),
+                        rec.pivot[1] + sample.p[1] - rec.p0[1],
+                        rec.pivot[2] + SCENE_UNITS_PER_METRE * (sample.p[2] - rec.p0[2]));
+                    if (!cinematicFollow) cinematicFollow = { position: controls.target.clone(), velocity: new THREE.Vector3() };
+                    const next = [0, 1, 2].map(i => criticallyDampedFollow(
+                        cinematicFollow.position.getComponent(i), cinematicFollow.velocity.getComponent(i),
+                        target.getComponent(i), delta));
+                    const previous = cinematicFollow.position.clone();
+                    next.forEach((v, i) => { cinematicFollow.position.setComponent(i, v.position); cinematicFollow.velocity.setComponent(i, v.velocity); });
+                    const shift = cinematicFollow.position.clone().sub(previous);
+                    controls.target.add(shift);
+                    camera.position.add(shift);
+                }
+            }
+
             // Columns span two differently-displaced levels, so their
             // transforms are re-derived every frame from the floor groups'
             // (and the foundation slab's) positions just set above -- see
@@ -5957,33 +6112,18 @@
             controls.update();
             updateFogRange(); // resolved camera position for this frame, before the (reverted-after-render) shake offset below -- see updateFogRange()'s comment above animate()
 
-            // Subtle camera shake driven by the same intensity, for a bit of
-            // visceral "you are here" feedback during the strongest moments.
-            // Quadratic ramp keeps it near-invisible except at genuinely high
-            // intensity. Applied only to the rendered frame and reverted
-            // immediately after -- OrbitControls treats camera.position as
-            // ground truth on the next update(), so leaving the offset in
-            // place would get baked in and drift the "official" orbit
-            // position/distance frame over frame (same class of bug as the
-            // damping-drift issue frameCameraToBuilding had to guard against).
-            const shakeAmt = 0.06 * intensity * intensity;
-            let shakeX = 0, shakeY = 0, shakeZ = 0;
-            if (shakeAmt > 0.0001) {
-                shakeX = Math.sin(now * 0.013) * shakeAmt;
-                shakeY = Math.sin(now * 0.017 + 1.3) * shakeAmt * 0.6;
-                shakeZ = Math.cos(now * 0.011 + 0.7) * shakeAmt;
-                camera.position.x += shakeX;
-                camera.position.y += shakeY;
-                camera.position.z += shakeZ;
-            }
+            // The real acceleration signal is filtered once per load, then
+            // sampled at record time. Revert after render so OrbitControls
+            // never incorporates this decorative offset into its pose.
+            const [shakeX, shakeZ] = shakeAtTime(shakeTrace, animTime, cameraShakeToggle.checked,
+                reducedMotion.matches);
+            camera.position.x += shakeX;
+            camera.position.z += shakeZ;
 
             composer.render();
 
-            if (shakeAmt > 0.0001) {
-                camera.position.x -= shakeX;
-                camera.position.y -= shakeY;
-                camera.position.z -= shakeZ;
-            }
+            camera.position.x -= shakeX;
+            camera.position.z -= shakeZ;
         }
 
         // --- Event bindings ---
@@ -6081,8 +6221,42 @@
         playBtn.addEventListener('click', togglePlayback);
         stripPlayBtn.addEventListener('click', togglePlayback);
 
+        cinematicCameraToggle.addEventListener('change', () => {
+            if (!cinematicCameraToggle.checked) {
+                if (cinematicTriggered) cameraTween = null;
+                cinematicFollow = null;
+                cinematicReenableBtn.hidden = true;
+            } else if (cinematicOnset && animTime >= cinematicOnset.leadTime) {
+                // A late toggle arms the next playthrough; it never yanks
+                // the camera back during the current one.
+                cinematicOverride = true;
+                cinematicTriggered = true;
+            } else {
+                cinematicOverride = false;
+                cinematicTriggered = false;
+            }
+        });
+        replayCollapseBtn.addEventListener('click', () => {
+            if (!cinematicOnset) return;
+            animTime = replayStartTime(cinematicOnset);
+            isSeeking = false;
+            const dt = (timeData[1] - timeData[0]) || 0.01;
+            currentIndex = Math.min(Math.floor(animTime / dt), totalFrames - 1);
+            seekSlider.value = animTime;
+            timeDisplay.textContent = `${animTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`;
+            cameraTween = null;
+            cinematicFollow = null;
+            cinematicTriggered = false;
+            cinematicOverride = false;
+            cinematicReenableBtn.hidden = true;
+            if (!isPlaying) togglePlayback();
+        });
+
         // Per-floor view controls (spec 4, Part B).
         floorSelect.addEventListener('change', (e) => {
+            if (cinematicTriggered) {
+                cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
+            }
             const val = e.target.value;
             if (val === 'full') {
                 frameCameraToFullBuilding();
@@ -6091,8 +6265,19 @@
             }
         });
         backToFullViewBtn.addEventListener('click', () => {
+            if (cinematicTriggered) {
+                cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
+            }
             floorSelect.value = 'full';
             frameCameraToFullBuilding();
+        });
+        cinematicReenableBtn.addEventListener('click', () => {
+            // Past the lead point, re-arm the next playthrough only. Do not
+            // pull the current user-owned camera back toward falling debris.
+            cinematicOverride = !!cinematicOnset && animTime >= cinematicOnset.leadTime;
+            cinematicTriggered = cinematicOverride;
+            cinematicFollow = null;
+            cinematicReenableBtn.hidden = true;
         });
 
         // --- Frequency-domain drawer wiring (spec 6, Part B4/B5/B6) ---
@@ -6303,6 +6488,15 @@
             isSeeking = true;
             const val = parseFloat(seekSlider.value);
             animTime = Math.min(val, totalDuration);
+            if (cinematicOnset) {
+                cameraTween = null;
+                cinematicFollow = null;
+                // A scrub before the lead starts a new playthrough. A scrub
+                // past it skips the automatic shot; Replay explicitly re-arms it.
+                cinematicTriggered = animTime >= cinematicOnset.leadTime;
+                cinematicOverride = cinematicTriggered;
+                cinematicReenableBtn.hidden = true;
+            }
             if (totalDuration > 0) {
                 const dt = (timeData[1] - timeData[0]) || 0.01;
                 const idx = Math.floor(animTime / dt);
