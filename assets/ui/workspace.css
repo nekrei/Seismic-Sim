@@ -1,5 +1,5 @@
 /* Spec 19 workspace: layout, tokens and components.
-   Dark palette kept from specs 4-18; the scene background (#0b0b1a) is set
+   Dark palette kept from specs 4-18; the scene background (#16162e since spec 20) is set
    in the three.js scene itself. Only transform/opacity and the one grid
    column/row track animate. */
 
@@ -330,17 +330,34 @@ abbr[title] { text-decoration: none; border: 1px solid var(--line-strong); borde
 
 /* ------------------------------------------------------------ scene layer */
 .recompute-overlay { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
-.busy-pill {
-    position: absolute; top: 12px; left: 50%; transform: translate(-50%, -6px);
-    display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 999px;
-    background: rgba(19,23,32,0.94); border: 1px solid var(--accent-line); color: var(--accent);
-    font-size: 13px; font-weight: 600; white-space: nowrap;
-    opacity: 0; transition: opacity 160ms ease, transform 160ms var(--ease-out);
+/* Stacked-floors loader (spec 4's, restored): a light scrim over the scene
+   cell only, so the panels stay usable. */
+.busy-stack {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;
+    background: rgba(11,11,26,0.45); backdrop-filter: blur(2px);
+    opacity: 0; transition: opacity 0.4s ease;
 }
-#recomputeElapsed { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.recompute-overlay.is-active:not(.is-error) .busy-pill { opacity: 1; transform: translate(-50%, 0); }
-.spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--accent-line); border-top-color: var(--accent); animation: spin 700ms linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
+.recompute-overlay.is-active:not(.is-error) .busy-stack { opacity: 1; }
+.recompute-stack { display: flex; flex-direction: column-reverse; gap: 6px; }
+.recompute-floor {
+    width: 140px; height: 14px; border: 1.5px solid rgba(255,215,100,0.55); border-radius: 3px;
+    background: rgba(255,215,100,0.06); opacity: 0; transform: translateY(10px) scaleX(0.85);
+    animation: floorAssemble 1.5s ease-in-out infinite;
+}
+@keyframes floorAssemble {
+    0%   { opacity: 0; transform: translateY(10px) scaleX(0.85); box-shadow: none; }
+    18%  { opacity: 1; transform: translateY(0) scaleX(1); box-shadow: 0 0 10px rgba(255,215,100,0.4); }
+    55%  { opacity: 1; transform: translateY(0) scaleX(1); box-shadow: none; }
+    85%  { opacity: 0.12; }
+    100% { opacity: 0; transform: translateY(10px) scaleX(0.85); }
+}
+/* Stops the stack animating while hidden (it sits under every idle frame). */
+.recompute-overlay:not(.is-active) .recompute-floor { animation-play-state: paused; }
+.recompute-label {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: rgba(255,215,100,0.85); white-space: nowrap;
+}
+#recomputeElapsed { font-variant-numeric: tabular-nums; }
 .notice {
     position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
     width: min(700px, calc(100% - 24px));
@@ -599,7 +616,6 @@ table.data thead th { position: sticky; top: 0; background: var(--raised); color
     .toast { top: 8px; left: 8px; right: auto; max-width: calc(100% - 16px); }
     .collapse-banner { top: 60px; left: 8px; width: calc(100% - 16px); }
     .illustrative-chip { top: 8px; left: 8px; }
-    .busy-pill { top: 52px; }
     .tab-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .select-grid { grid-template-columns: 1fr 1fr; }
     dialog#infoDialog, dialog#infoDialog.is-details { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
@@ -616,11 +632,11 @@ table.data thead th { position: sticky; top: 0; background: var(--raised); color
 
 @media (prefers-reduced-motion: reduce) {
     :root { --dur: 0ms; }
-    .ws-main, .ws-panel, .toast, .busy-pill, .collapse-banner, .switch, .switch::after,
+    .ws-main, .ws-panel, .toast, .busy-stack, .collapse-banner, .switch, .switch::after,
     .disclosure > summary::after { transition-duration: 0ms !important; }
     dialog#infoDialog[open] { animation: none; }
     .epicenter-pulse-ring { animation-duration: 1ms; }
-    .spinner { animation-duration: 1.6s; }
+    .recompute-floor { animation-duration: 3s; }
 }
 
 #manualControls, #codeDesignControls { display: flex; flex-direction: column; gap: 14px; }
