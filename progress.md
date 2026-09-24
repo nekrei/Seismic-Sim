@@ -3558,3 +3558,10 @@ Task 6 complete on local branch `goal/17-signals-view-of-nonlinearity`; not merg
 - Fixed the rebuild leak: `createBuilding()` now disposes the previous building's geometries, materials and instanced meshes (furniture template geometry and the cached dust texture excluded). Geometry count stays flat (23) across 20→1→7 rebuilds and at 26 across repeated collapse-demo runs; the demo still detaches 0→2→3→4 floors at 30/45/70/80/80.6/81.9/90 s.
 - Re-verified in headless Chrome: fog at maximum zoom-out for 1/7/20 stories, camera kept through panel toggles and window/phone resizes, cinematic shot sequence and manual-orbit cancel, layout/help/real-app smoke (all sliders, all records, 422 notice, tabs, code design apply, phone). 17/17 Node checks and the Python checks pass.
 - N=20 collapse through the UI (demo preset at 20 stories) did not converge at 20× or 5× and gave no result at 10× within an hour; no cascade was produced, so 20-story cascade frame-rate/fog checks remain open.
+
+## Final cleanup (2026-09-25)
+
+- Ground horizon line at maximum zoom-out: fog reached past the camera far plane, so the ground was clipped before it was fully fogged. `camera.far` now covers 1.6x `maxDistance` and the ground is scaled past the far plane; at N=7/20 the plane fades into the background with no edge.
+- Floor dropdown: a manual orbit that cancels a cinematic close-up now resets it to "Full building". Shot sequence, hand-back and scrub resync unchanged.
+- Phone post-failure notice: the phone `.notice { bottom }` rule stretched it over most of the scene (565 px of 633); it is now its content height (100 px) at the top.
+- Checked: 17/17 Node checks, smoke, layout, cinematic sequence, manual-orbit cancel; code design Compare (ANZA1_CIDLA, 7 stories, both converged); phone collapse at 390×844 (same 0/0/0/0/2/3/4 timeline as desktop, mobile body budget of 120 in use); reduced motion (shake and slow motion off, cinematic close-up still fires).
