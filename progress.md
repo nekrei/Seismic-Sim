@@ -3529,3 +3529,9 @@ Task 6 complete on local branch `goal/17-signals-view-of-nonlinearity`; not merg
 - Rulings: summarizeAnalysis/summarizePostFailure live in COLLAPSE-HELPERS (reuse firstOnset, extracted by check_ui_feedback.mjs) instead of a separate feedback.js; formatCollapseReadout's "(see the banner)" became "(see Result details)" and check_collapse_readout.mjs was updated for that string only.
 - Catalog: event facts from USGS ComCat (FDSN API) + PEER headers. Found: the L-AQUILA.A records are aftershock 1 (2009-04-07, USGS Mw 5.5) while the simulation reference magnitude is 6.3 (main shock). Shown as a note; simulation value unchanged.
 - Removed: "Successfully Cached" toast, mobile sheet strip (duplicate play button), full-viewport recompute scrim.
+
+### Tasks 7–8 (2026-09-24)
+- Eight clips captured from the real app with claude_scripts/spec19_media/capture.mjs (headless Chrome screencast → imageio-ffmpeg H.264 + WebP); 1.2 MB total. Analysis clip 14.5 s (real slow motion) exceeds the 6–10 s target; solve/load waits cut and captioned.
+- Measured checks (layout sweep, media lifecycle, error/experiment paths, A/B caching, frame times) all pass; details in verification/19.
+- Fixes found by those checks: active chart pane painting through the hidden panel on phones (opacity), flex children shrinking in scrolling pages (record card overlap), epicenter toggle target 36→44 px, phone notice 143→≤120 px, "M Mw" label, hysteresis selector options now read "Story n".
+- Ruling: capture tools installed only under claude_scripts/spec19_media (playwright-core, imageio-ffmpeg) — nothing added to the app or the project env.
