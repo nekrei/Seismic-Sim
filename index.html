@@ -1056,6 +1056,7 @@
         let cinematicFollow = null;
         let cinematicShotList = [];  // cinematicShots() of the loaded run
         let cinematicNext = 0;       // index of the next shot to fire
+        let cinematicSavedView = null; // the viewer's own camera, taken when a shot first takes over
         // Static-path fetch cache only (parameter-independent, like
         // groundSpectrum): the raw JSON for one record, reused across every
         // same-record live recompute rather than refetched on a drag.
@@ -4672,6 +4673,7 @@
         // is dropped rather than cut short. Every time comes from `collapse`.
         const ONSET_HOLD_SECONDS = 4;   // record seconds on the onset close-up
         const MIN_WIDE_SECONDS = 2;     // shortest wide shot worth cutting to
+        const RETURN_AFTER_SECONDS = 6; // record seconds after the detachment before the camera is handed back
         function cinematicShots(collapse) {
             if (!collapse?.converged) return [];
             let onset = null;
@@ -4687,7 +4689,11 @@
                 const wideAt = onset.time + ONSET_HOLD_SECONDS;
                 if (!failure || failure.leadTime - wideAt >= MIN_WIDE_SECONDS) shots.push({ kind: 'wide', startTime: wideAt });
             }
-            if (failure) shots.push({ kind: 'failure', ...failure, startTime: failure.leadTime });
+            if (failure) {
+                shots.push({ kind: 'failure', ...failure, startTime: failure.leadTime });
+                // Once the fall has played out, give the viewer's own camera back.
+                shots.push({ kind: 'return', startTime: failure.time + RETURN_AFTER_SECONDS });
+            }
             return shots;
         }
         // Index of the next shot to fire from record time t (a scrub never
@@ -4743,6 +4749,7 @@
                 cinematicFollow = null;
                 cinematicReenableBtn.hidden = false;
             }
+            cinematicSavedView = null;   // the viewer is steering; nothing to hand back
             scheduleAutoOrbit();
         });
         controls.addEventListener('end', () => { scheduleAutoOrbit(); });
@@ -4814,6 +4821,7 @@
             cinematicOnset = firstCinematicOnset(collapseData);
             cinematicShotList = cinematicShots(collapseData);
             cinematicNext = 0;
+            cinematicSavedView = null;   // applyLoadedData reframes the new building itself
             cinematicTriggered = false;
             cinematicOverride = false;
             cinematicFollow = null;
@@ -6076,6 +6084,7 @@
             get animTime() { return animTime; },
             get detachedGroups() { return buildingGroups.filter(g => !g.matrixAutoUpdate).length; },
             get cameraTarget() { return controls.target.toArray(); },
+            get cameraPosition() { return camera.position.toArray(); },
         };
 
         // Gravity-instability / bad-parameter message on the recompute
@@ -6605,6 +6614,7 @@
                     if (animTime > totalDuration) {
                         animTime = animTime % totalDuration;
                         cinematicNext = 0;
+                        restoreCinematicView();   // a new playthrough starts from the viewer's own view
                         cinematicTriggered = false;
                         cinematicOverride = false;
                         cinematicFollow = null;
@@ -6851,17 +6861,48 @@
         // per-floor framing (a sibling of the whole-building one, so its
         // limits are untouched); the wide shot is the ordinary full view.
         function takeCinematicShot(shot) {
-            if (shot.kind === 'wide') {
-                frameCameraToFullBuilding();
-                if (reducedMotion.matches && cameraTween) cameraTween.duration = 1;
-                floorSelect.value = 'full';
+            if (shot.kind === 'wide' || shot.kind === 'return') {
+                restoreCinematicView();
+                if (shot.kind === 'return') cinematicTriggered = false;   // ends the fall follow
                 return;
+            }
+            // Remember the viewer's camera the first time a shot takes it.
+            if (!cinematicSavedView) {
+                cinematicSavedView = { position: camera.position.clone(), target: controls.target.clone(),
+                    floor: activeFloorIndex, select: floorSelect.value };
             }
             const g = buildingGroups[shot.floorIndex];
             const centre = g ? new THREE.Vector3(g.position.x, g.position.y, g.position.z) : null;
             frameCameraToFloor(shot.floorIndex, centre, true);
             floorSelect.value = String(shot.floorIndex);
             if (shot.kind === 'failure') cinematicTriggered = true;   // arms the fall follow
+        }
+        // Back to the camera the viewer had before the cinematic shots (or
+        // the whole building if none was recorded), and stop following.
+        function restoreCinematicView() {
+            cinematicFollow = null;
+            const v = cinematicSavedView;
+            cinematicSavedView = null;
+            if (!v) return;
+            activeFloorIndex = v.floor;
+            floorSelect.value = v.select;
+            tweenCameraTo(v.position, v.target, reducedMotion.matches ? 1 : 900);
+        }
+        // After a scrub: show what the cinematic sequence shows at this
+        // moment instead of leaving the camera wherever the fall took it.
+        // Before the first shot, during the wide shot and after the hand-back
+        // that is the viewer's own view; inside the onset close-up it is that
+        // close-up. A scrub into the failure itself still does not take the
+        // camera automatically (Replay does), but a stale close-up is undone.
+        function resyncCinematicCamera() {
+            if (!cinematicCameraToggle.checked || !cinematicShotList.length) return;
+            const failure = cinematicShotList.find(s => s.kind === 'failure');
+            const active = cinematicShotList[cinematicNext - 1];
+            if ((failure && animTime >= failure.startTime) || !active || active.kind !== 'onset') {
+                restoreCinematicView();
+                return;
+            }
+            takeCinematicShot(active);
         }
         // Where the collapse is, in scene units: the mass-weighted centre of
         // every falling structural body that is active at t -- the detached
@@ -6909,6 +6950,7 @@
             if (cinematicNext > 0) {
                 cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
             }
+            cinematicSavedView = null;   // the viewer chose a view; nothing to hand back
             const val = e.target.value;
             if (val === 'full') {
                 frameCameraToFullBuilding();
@@ -6920,6 +6962,7 @@
             if (cinematicNext > 0) {
                 cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
             }
+            cinematicSavedView = null;   // the viewer chose a view; nothing to hand back
             floorSelect.value = 'full';
             frameCameraToFullBuilding();
         });
@@ -7193,6 +7236,8 @@
         });
         seekSlider.addEventListener('change', () => {
             isSeeking = false;
+            if (cinematicOnset && !cinematicOverride) resyncCinematicCamera();
+            else if (cinematicOnset && cinematicSavedView) restoreCinematicView();
         });
 
         // Spec 19: the renderer follows the scene cell. Panels opening or
