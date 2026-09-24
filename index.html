@@ -939,7 +939,8 @@
         // --- Static Ground (fixed reference) ---
         // Spec 20: large enough that its edge always sits inside the fog
         // (a 60-unit plate showed its edge behind tall buildings).
-        const groundGeo = new THREE.PlaneGeometry(400, 400);
+        const GROUND_HALF = 200;   // rescaled per building in frameCameraToBuilding()
+        const groundGeo = new THREE.PlaneGeometry(2 * GROUND_HALF, 2 * GROUND_HALF);
         const groundMat = new THREE.MeshStandardMaterial({ color: 0x151232, roughness: 0.9, metalness: 0 });
         const ground = new THREE.Mesh(groundGeo, groundMat);
         ground.rotation.x = -Math.PI / 2;
@@ -4553,8 +4554,14 @@
             const dist = Math.max(distForHeight, distForWidth, 8);
 
             controls.maxDistance = Math.max(40, dist * 2.5);
-            camera.far = Math.max(100, dist * 3);
+            // updateFogRange() puts fog.far at 1.6x the camera's distance, so
+            // the far plane must reach past that at the maxDistance clamp,
+            // and the ground must reach past the far plane from any camera
+            // position: then the plane is clipped only where it is fully
+            // fogged and never shows an edge against the background.
+            camera.far = Math.max(100, dist * 3, controls.maxDistance * 1.6);
             camera.updateProjectionMatrix();
+            ground.scale.setScalar(Math.max(1, (camera.far + controls.maxDistance) / GROUND_HALF));
 
             // scene.fog's fixed (30, 60) range was tuned for the ~50-unit
             // distance a 7-story default building needs -- at 20 stories
@@ -4825,6 +4832,12 @@
                 cinematicOverride = true;
                 cinematicFollow = null;
                 cinematicReenableBtn.hidden = false;
+            }
+            // A close-up set the Floor dropdown; the viewer's free orbit is
+            // not that floor's framing any more.
+            if (cinematicSavedView && floorSelect.value !== 'full') {
+                floorSelect.value = 'full';
+                activeFloorIndex = null;
             }
             cinematicSavedView = null;   // the viewer is steering; nothing to hand back
             scheduleAutoOrbit();
