@@ -277,9 +277,9 @@ results. It:
   to `server.py`,
   which recomputes the *actual physics* for that building live (not a
   visual trick) and updates the animation, roughly 200-400ms after you stop
-  moving the slider. While a live recompute is in flight, a full-viewport
-  loading overlay (animated floor-bars assembling, plus a pulsing
-  "Recomputing…" label) appears over the 3D view — the control panel stays
+  moving the slider. While a live recompute is in flight, a loading
+  overlay (animated floor-bars assembling, plus a "Recomputing" label)
+  covers the 3D view only — the control panel stays
   fully usable throughout, this is purely a visual cue that new results are
   on the way. Requires `server.py` running, not a plain static server —
   see "Running it yourself" below. There's no Target Period slider any
@@ -392,12 +392,11 @@ results. It:
   camera shake at high intensity, and renders lit surfaces/the roof beacon
   through a bloom pass for a bit more visual punch — all purely cosmetic,
   none of it feeds back into the physics.
-- Lighting is brighter across the board than earlier versions of this
-  project, plus three fixed interior point lights (warm-neutral, no
-  shadows) specifically so the columns/beams/furniture inside the open
-  cutaway read clearly from any camera angle — the moody night exterior
-  (fog, background, hemisphere colors) is unchanged, only the amount of
-  light went up, not its color/character.
+- Lighting is a moody night scene (retuned in spec 20, below): a warm key
+  light that casts the one set of shadows, a cool fill, a warm rim, violet
+  ambient light and three fixed interior point lights (warm-neutral, no
+  shadows) so the columns/beams/furniture inside the open cutaway read
+  clearly from any camera angle.
 - The page is one workspace (spec 19): a header with the record picker, a
   **Setup** inspector on the left (Building / Earthquake / Analysis / View,
   one page at a time), the 3D scene in the middle, **Signals** on the right
@@ -1171,3 +1170,34 @@ rather than leaving the camera on the rubble. Slow motion and Replay still
 centre on the failure. Orbiting,
 choosing a camera focus or pressing Back to full view hands the camera back to
 you for that playthrough.
+
+## Spec 20: structural visual polish
+
+Appearance only: no physics, request, payload, damage colour or camera
+behaviour changed, and the same control sequence (including a full collapse
+demo run) sends byte-identical `/compute` bodies before and after.
+
+- **Concrete look.** Slabs, beams and columns are non-metallic and rough, so
+  they read as concrete instead of plastic. The floor colour gradient (warm
+  at the base, cool at the top) is kept but pulled toward concrete tones; the
+  roof no longer glows. Column instance colours and the damage palette are
+  unchanged.
+- **Lighting.** A warm key, a restrained cool fill and a warm rim for edges,
+  with more violet ambient and sky light so shadowed and back faces stay
+  readable. The background is a slightly brighter navy (`#16162e`); the fog
+  uses the same colour so distant geometry fades into it. Bloom starts later,
+  so hinge markers and lamps glow but lit concrete does not.
+- **Shadows fit the building.** The one shadow-casting light's box is now
+  fitted to the drawn building's height and footprint (plus a margin for sway
+  and rubble) on every rebuild, instead of a fixed box that cut 7- and
+  20-story shadows off mid-ground. The shadow bias follows the box size.
+- **Ground.** A darker violet floor that reaches the fog, a 50×50 grid with
+  lines that read over both floor and background, and a cool slate
+  foundation that separates from the warm lower floors.
+- **Loader.** The stacked yellow floor-bars loader from spec 4 is back,
+  covering the scene only. Every elastic recompute says "Recomputing" (it
+  used to say "Updating building…" even when an earthquake slider triggered
+  it).
+- **Chart titles.** Time and Frequency panel titles sit in a strip above each
+  plot instead of on a box inside its top-left corner, which hid peaks; the
+  frequency axis end ticks no longer clip.
