@@ -1163,6 +1163,11 @@ now gets three shots: a close-up of the story at the first computed collapse
 onset, a return to the whole building a few seconds later, and a second
 close-up at the actual failure (the first detachment). From there the camera
 follows the falling material down to the ground, including the rubble once a
-floor shatters. Slow motion and Replay still centre on the failure. Orbiting,
+floor shatters. About six seconds (record time) after the failure the camera
+returns to the view you had before the first close-up; the zoom-out between
+the two close-ups returns there too. Scrubbing back to an earlier moment shows
+what the sequence shows at that moment (your view, or the onset close-up)
+rather than leaving the camera on the rubble. Slow motion and Replay still
+centre on the failure. Orbiting,
 choosing a camera focus or pressing Back to full view hands the camera back to
 you for that playthrough.
