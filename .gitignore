@@ -16,7 +16,7 @@ __pycache__/
 *.pyc
 .serena/
 claude_scripts/
-
+progress.md
 
 
 .worktrees/
