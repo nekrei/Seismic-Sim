@@ -1,0 +1,92 @@
+{
+  "about": "Spec 19 event catalog. Event parameters are from the USGS ComCat event pages linked in each entry (accessed 2026-09-24). Record-to-event links come from each PEER NGA-West2 file header (event name and date). The simulation's reference magnitude is a separate value (out/<record>/, data/richter readings.json) and is never replaced by these facts.",
+  "events": {
+    "anza-2001": {
+      "name": "Anza-02 (Anza, California)",
+      "year": 2001,
+      "date": "2001-10-31 07:56 UTC",
+      "region": "About 16 km ESE of Anza, California, USA",
+      "magnitude": { "value": 5.02, "type": "Mw", "source": "USGS ComCat" },
+      "depth_km": 13.7,
+      "depth_source": "USGS ComCat",
+      "description": "A moderate earthquake in southern California east-southeast of Anza. PEER's NGA-West2 database names this event Anza-02.",
+      "sources": [
+        { "title": "USGS event page ci9718013", "url": "https://earthquake.usgs.gov/earthquakes/eventpage/ci9718013" },
+        { "title": "PEER NGA-West2 ground motion database", "url": "https://ngawest2.berkeley.edu/", "note": "record source; header “Anza-02, 10/31/2001”" }
+      ]
+    },
+    "kocaeli-1999": {
+      "name": "Kocaeli (İzmit), Turkey",
+      "year": 1999,
+      "date": "1999-08-17 00:01 UTC",
+      "region": "About 4 km ESE of Derince, northwestern Turkey",
+      "magnitude": { "value": 7.6, "type": "Mw", "source": "USGS ComCat (Mwc)" },
+      "depth_km": 17,
+      "depth_source": "USGS ComCat",
+      "description": "A large earthquake on the northern strand of the North Anatolian fault zone. USGS mapping associates it with a 145-km-long surface rupture.",
+      "sources": [
+        { "title": "USGS event page usp0009d4z", "url": "https://earthquake.usgs.gov/earthquakes/eventpage/usp0009d4z" },
+        { "title": "USGS: surface rupture and slip distribution of the 17 August 1999 İzmit earthquake", "url": "https://pubs.usgs.gov/publication/70025089" },
+        { "title": "PEER NGA-West2 ground motion database", "url": "https://ngawest2.berkeley.edu/", "note": "record source; header “Kocaeli Turkey, 8/17/1999”" }
+      ]
+    },
+    "laquila-aftershock-2009": {
+      "name": "L'Aquila aftershock, Italy",
+      "year": 2009,
+      "date": "2009-04-07 17:47 UTC",
+      "region": "Central Apennines, about 1 km SW of San Panfilo d'Ocre, Italy",
+      "magnitude": { "value": 5.5, "type": "Mw", "source": "USGS ComCat (Mwc)" },
+      "depth_km": 15.1,
+      "depth_source": "USGS ComCat",
+      "description": "The largest aftershock of the 6 April 2009 L'Aquila earthquake (Mw 6.3, USGS). These recordings are of this aftershock, not of the main shock.",
+      "reference_note": "The simulation's reference magnitude for these records is 6.3, which matches the 6 April main shock rather than this Mw 5.5 aftershock. The simulation value is left unchanged.",
+      "sources": [
+        { "title": "USGS event page usp000gvvw (aftershock)", "url": "https://earthquake.usgs.gov/earthquakes/eventpage/usp000gvvw" },
+        { "title": "USGS event page usp000gvtu (6 April main shock)", "url": "https://earthquake.usgs.gov/earthquakes/eventpage/usp000gvtu" },
+        { "title": "PEER NGA-West2 ground motion database", "url": "https://ngawest2.berkeley.edu/", "note": "record source; header “L'Aquila (aftershock 1) Italy, 4/7/2009”" }
+      ]
+    },
+    "niigata-2004": {
+      "name": "Niigata, Japan",
+      "year": 2004,
+      "date": "2004-10-23 08:56 UTC",
+      "region": "About 8 km SSW of Ojiya, Niigata Prefecture, Japan",
+      "magnitude": { "value": 6.6, "type": "Mw", "source": "USGS ComCat (Mwc)" },
+      "depth_km": 16,
+      "depth_source": "USGS ComCat",
+      "description": "An earthquake in Niigata Prefecture, followed about 40 minutes later by an Mw 6.3 aftershock (USGS).",
+      "sources": [
+        { "title": "USGS event page usp000d6vk", "url": "https://earthquake.usgs.gov/earthquakes/eventpage/usp000d6vk" },
+        { "title": "USGS event page usp000d6vu (Mw 6.3 aftershock)", "url": "https://earthquake.usgs.gov/earthquakes/eventpage/usp000d6vu" },
+        { "title": "PEER NGA-West2 ground motion database", "url": "https://ngawest2.berkeley.edu/", "note": "record source; header “Niigata Japan, 10/23/2004” (NGA-West2 labels aftershock records separately)" }
+      ]
+    },
+    "parkfield-2004": {
+      "name": "Parkfield, California",
+      "year": 2004,
+      "date": "2004-09-28 17:15 UTC",
+      "region": "San Andreas Fault near Parkfield, central California, USA",
+      "magnitude": { "value": 6.0, "type": "Mw", "source": "USGS ComCat (Mw 5.97)" },
+      "depth_km": 8.1,
+      "depth_source": "USGS ComCat",
+      "description": "A long-anticipated earthquake on the San Andreas Fault at Parkfield. The USGS describes it as the best-recorded earthquake to that date.",
+      "sources": [
+        { "title": "USGS event page nc30228270", "url": "https://earthquake.usgs.gov/earthquakes/eventpage/nc30228270" },
+        { "title": "USGS: introduction to the special issue on the 2004 Parkfield earthquake", "url": "https://pubs.usgs.gov/publication/70028715" },
+        { "title": "PEER NGA-West2 ground motion database", "url": "https://ngawest2.berkeley.edu/", "note": "record source; header “Parkfield-02 CA, 9/28/2004”" }
+      ]
+    }
+  },
+  "records": {
+    "ANZA1_CIDLA": { "event": "anza-2001", "station": "Del Amo", "source": "PEER NGA-West2 RSN8203", "components": "HLE, HLN, HLZ", "verification": "verified" },
+    "ANZA1_CIDNR": { "event": "anza-2001", "station": "Anza Mitchell Rd.", "source": "PEER NGA-West2 RSN8204", "components": "HLE, HLN, HLZ", "verification": "verified" },
+    "KOCAELI_ATK": { "event": "kocaeli-1999", "station": "Atakoy", "source": "PEER NGA-West2 RSN1149", "verification": "verified" },
+    "KOCAELI_AYD": { "event": "kocaeli-1999", "station": "Aydin", "source": "PEER NGA-West2 RSN1150", "components": "090, 180, UP", "verification": "verified" },
+    "L-AQUILA.A_AZ009": { "event": "laquila-aftershock-2009", "station": "Bazzano", "source": "PEER NGA-West2 RSN4515", "verification": "verified" },
+    "L-AQUILA.A_BY098": { "event": "laquila-aftershock-2009", "station": "Montereale", "source": "PEER NGA-West2 RSN4516", "verification": "verified" },
+    "NIIGATA_AKTH04": { "event": "niigata-2004", "station": "AKTH04", "source": "PEER NGA-West2 RSN6462", "verification": "verified" },
+    "NIIGATA_AKTH05": { "event": "niigata-2004", "station": "AKTH05", "source": "PEER NGA-West2 RSN6463", "verification": "verified" },
+    "PARK2004_HOG": { "event": "parkfield-2004", "station": "Parkfield – Hog Canyon", "source": "PEER NGA-West2 RSN4068", "verification": "verified" },
+    "PARK2004_JACK": { "event": "parkfield-2004", "station": "Parkfield – Jack Canyon", "source": "PEER NGA-West2 RSN4069", "verification": "verified" }
+  }
+}
