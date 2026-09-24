@@ -7350,6 +7350,7 @@
                         ev.depth_km != null ? ['Hypocentral depth', `${ev.depth_km} km (${ev.depth_source || 'catalog'})`] : null,
                     ]));
                     if (ev.description) body.append(el('p', { text: ev.description }));
+                    if (ev.reference_note) body.append(el('p', { class: 'qualifier', text: ev.reference_note }));
                     if (ev.magnitude?.type && /^M[wW]/.test(ev.magnitude.type)) body.append(el('p', { class: 'hint', text: 'Mw is moment magnitude, the modern standard for large earthquakes; it is not the Richter (local, ML) scale.' }));
                     body.append(el('h3', { text: 'Sources' }), sourceList(ev.sources));
                 } else {
