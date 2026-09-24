@@ -11,7 +11,7 @@ __pycache__/
 *.pyc
 .serena/
 dev_scripts/
-
+progress.md
 
 
 .worktrees/
