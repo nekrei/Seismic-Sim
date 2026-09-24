@@ -329,11 +329,19 @@
             </div>
             <!-- Busy/error state. Keeps its old ids (the experiment code
                  drives #recomputeOverlay/#recomputeText) but is now a compact
-                 pill plus an inline error card, never a full-screen scrim. -->
+                 stacked-floors loader (restored from spec 4) over the scene
+                 cell only, plus an inline error card. -->
             <div class="recompute-overlay" id="recomputeOverlay">
-                <div class="busy-pill" aria-hidden="true">
-                    <span class="spinner"></span>
-                    <span id="recomputeText">Recomputing</span><span id="recomputeElapsed"></span>
+                <div class="busy-stack" aria-hidden="true">
+                    <div class="recompute-stack">
+                        <div class="recompute-floor" style="animation-delay:0.5s"></div>
+                        <div class="recompute-floor" style="animation-delay:0.4s"></div>
+                        <div class="recompute-floor" style="animation-delay:0.3s"></div>
+                        <div class="recompute-floor" style="animation-delay:0.2s"></div>
+                        <div class="recompute-floor" style="animation-delay:0.1s"></div>
+                        <div class="recompute-floor" style="animation-delay:0s"></div>
+                    </div>
+                    <div class="recompute-label"><span id="recomputeText">Recomputing</span><span id="recomputeElapsed"></span></div>
                 </div>
                 <div class="notice notice-error" id="recomputeErrorBox" role="alert">
                     <div class="notice-body">
@@ -804,8 +812,11 @@
 
         // --- Scene setup ---
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x0b0b1a);
-        scene.fog = new THREE.Fog(0x0b0b1a, 30, 60);
+        // Spec 20: a touch brighter than the old 0x0b0b1a night. Fog must
+        // stay the same colour, or distant geometry fades to a visible band.
+        const SCENE_BG = 0x16162e;
+        scene.background = new THREE.Color(SCENE_BG);
+        scene.fog = new THREE.Fog(SCENE_BG, 30, 60);
 
         // Spec 19: the scene is one cell of the workspace grid, so every size
         // below comes from that box, never from the window.
@@ -820,7 +831,7 @@
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        renderer.toneMappingExposure = 1.2;
+        renderer.toneMappingExposure = 1.1;
         sceneHost.prepend(renderer.domElement);
 
         // Bloom pass makes the emissive elements (lit windows, roof beacon,
@@ -832,9 +843,9 @@
         composer.addPass(new RenderPass(scene, camera));
         const bloomPass = new UnrealBloomPass(
             new THREE.Vector2(sceneSize().w, sceneSize().h),
-            0.55,  // strength
+            0.4,   // strength
             0.4,   // radius
-            0.82,  // threshold
+            0.9,   // threshold (spec 20: only emissive markers/lamps glow, not lit concrete)
         );
         composer.addPass(bloomPass);
         composer.addPass(new OutputPass());
@@ -856,27 +867,42 @@
         // Hues are all UNCHANGED on purpose -- this keeps the moody-night
         // exterior identity (fog, background, hemisphere palette) intact;
         // only the amount of light changes, not its character.
-        scene.add(new THREE.AmbientLight(0x40406b, 0.7));
-        scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a1a3a, 1.0));
-        const sunLight = new THREE.DirectionalLight(0xffeedd, 3.4);
-        sunLight.position.set(10, 18, 8);
+        // Spec 20: same night palette, retuned for a solid concrete read --
+        // a broad warm key, a restrained cool fill/sky and a warm rim for
+        // edges. The hemisphere sky was sky-blue, which tinted every upper
+        // face cyan; it is now a muted blue-grey.
+        scene.add(new THREE.AmbientLight(0x4a4a80, 0.9));
+        scene.add(new THREE.HemisphereLight(0x9fb0d0, 0x3a2c52, 0.9));
+        const SUN_DIR = new THREE.Vector3(10, 18, 8).normalize();
+        const sunLight = new THREE.DirectionalLight(0xffe0c0, 3.5);
+        sunLight.position.copy(SUN_DIR).multiplyScalar(25);
         sunLight.castShadow = true;
         sunLight.shadow.mapSize.width = 2048;
         sunLight.shadow.mapSize.height = 2048;
-        sunLight.shadow.camera.near = 1;
-        sunLight.shadow.camera.far = 40;
-        sunLight.shadow.camera.left = -15;
-        sunLight.shadow.camera.right = 15;
-        sunLight.shadow.camera.top = 15;
-        sunLight.shadow.camera.bottom = -15;
-        sunLight.shadow.bias = -0.001;
-        scene.add(sunLight);
-        const fillLight = new THREE.DirectionalLight(0x8888ff, 0.7);
+        // Bounds are fitted to each drawn building in fitSunShadow().
+        scene.add(sunLight, sunLight.target);
+        const fillLight = new THREE.DirectionalLight(0x9aa8e0, 0.75);
         fillLight.position.set(-8, 6, -10);
         scene.add(fillLight);
-        const rimLight = new THREE.DirectionalLight(0xffaa66, 0.55);
+        const rimLight = new THREE.DirectionalLight(0xffb27a, 1.1);
         rimLight.position.set(-5, 10, -8);
         scene.add(rimLight);
+
+        // Spec 20: the one shadow caster's orthographic box follows the
+        // building (it was a fixed +/-15 box, so 7- and 20-story shadows
+        // were cut off mid-ground). Texel size grows with the box, so the
+        // normal bias follows it to keep acne away without peter-panning.
+        function fitSunShadow(totalHeight) {
+            const b = fitShadowBounds(SUN_DIR, currentFootprintW, currentFootprintD, totalHeight);
+            sunLight.target.position.set(0, b.cy, 0);
+            sunLight.position.copy(SUN_DIR).multiplyScalar(b.dist).add(sunLight.target.position);
+            const cam = sunLight.shadow.camera;
+            Object.assign(cam, { left: b.left, right: b.right, bottom: b.bottom, top: b.top, near: b.near, far: b.far });
+            cam.updateProjectionMatrix();
+            const texel = Math.max(b.right - b.left, b.top - b.bottom) / sunLight.shadow.mapSize.width;
+            sunLight.shadow.bias = -0.0005;
+            sunLight.shadow.normalBias = 1.5 * texel;
+        }
 
         // New interior fill lighting (spec 4, Part C2) -- the open cutaway
         // (spec 5) means columns/beams/furniture are visible from every
@@ -892,10 +918,10 @@
         // once the current building's height is known -- see
         // repositionInteriorLights().
         const INTERIOR_LIGHT_COLOR = 0xfff2e0;
-        const INTERIOR_LIGHT_INTENSITY = 1.2;
+        const INTERIOR_LIGHT_INTENSITY = 1.6;
         const INTERIOR_LIGHT_FRACTIONS = [0.15, 0.5, 0.85];
         const interiorLights = INTERIOR_LIGHT_FRACTIONS.map(() => {
-            const light = new THREE.PointLight(INTERIOR_LIGHT_COLOR, INTERIOR_LIGHT_INTENSITY, 20, 2);
+            const light = new THREE.PointLight(INTERIOR_LIGHT_COLOR, INTERIOR_LIGHT_INTENSITY, 20, 1.6);
             light.castShadow = false;
             scene.add(light);
             return light;
@@ -911,15 +937,17 @@
         }
 
         // --- Static Ground (fixed reference) ---
-        const groundGeo = new THREE.PlaneGeometry(60, 60);
-        const groundMat = new THREE.MeshStandardMaterial({ color: 0x1a1a2e, roughness: 0.8, metalness: 0.1 });
+        // Spec 20: large enough that its edge always sits inside the fog
+        // (a 60-unit plate showed its edge behind tall buildings).
+        const groundGeo = new THREE.PlaneGeometry(400, 400);
+        const groundMat = new THREE.MeshStandardMaterial({ color: 0x151232, roughness: 0.9, metalness: 0 });
         const ground = new THREE.Mesh(groundGeo, groundMat);
         ground.rotation.x = -Math.PI / 2;
         ground.position.y = -0.01;
         ground.receiveShadow = true;
         scene.add(ground);
 
-        const gridHelper = new THREE.GridHelper(50, 50, 0x444466, 0x333355);
+        const gridHelper = new THREE.GridHelper(50, 50, 0x5a5a8c, 0x363660); // spec 20: original size, lines tuned to read over floor and background
         gridHelper.position.y = 0;
         scene.add(gridHelper);
 
@@ -1570,6 +1598,40 @@
             return { y, totalHeight: acc };
         }
         // ---8<--- STORYHEIGHT-HELPERS-END
+
+        // ---8<--- SHADOWFIT-HELPERS-BEGIN (extracted verbatim by claude_scripts/check_shadow_fit.mjs)
+        // Spec 20: orthographic bounds for the key light's shadow camera,
+        // fitted to the drawn building. Covers the building box widened by
+        // a sway/rubble margin plus that box's shadow on the ground, in the
+        // basis three.js's lookAt gives the shadow camera (x = up x dir,
+        // y = dir x x). `dir` is the unit vector toward the light (y > 0).
+        function fitShadowBounds(dir, width, depth, height) {
+            const m = 1.5 + 0.3 * height;
+            const hx = width / 2 + m, hz = depth / 2 + m, top = height + 1;
+            const cy = height / 2;
+            const xl = Math.hypot(dir.z, dir.x);
+            const X = [dir.z / xl, 0, -dir.x / xl];
+            const Z = [dir.x, dir.y, dir.z];
+            const Y = [Z[1] * X[2] - Z[2] * X[1], Z[2] * X[0] - Z[0] * X[2], Z[0] * X[1] - Z[1] * X[0]];
+            let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+            const add = (px, py, pz) => {
+                const q = [px, py - cy, pz];
+                const u = q[0] * X[0] + q[1] * X[1] + q[2] * X[2];
+                const v = q[0] * Y[0] + q[1] * Y[1] + q[2] * Y[2];
+                const w = q[0] * Z[0] + q[1] * Z[1] + q[2] * Z[2];
+                x0 = Math.min(x0, u); x1 = Math.max(x1, u);
+                y0 = Math.min(y0, v); y1 = Math.max(y1, v);
+                z0 = Math.min(z0, w); z1 = Math.max(z1, w);
+            };
+            for (const sx of [-hx, hx]) for (const sz of [-hz, hz]) {
+                add(sx, 0, sz);
+                add(sx, top, sz);
+                add(sx - dir.x * top / dir.y, 0, sz - dir.z * top / dir.y); // the top corner's ground shadow
+            }
+            const dist = z1 + 5;
+            return { cy, dist, left: x0 - 1, right: x1 + 1, bottom: y0 - 1, top: y1 + 1, near: dist - z1 - 1, far: dist - z0 + 1 };
+        }
+        // ---8<--- SHADOWFIT-HELPERS-END
 
         // ---8<--- ROTATION-HELPERS-BEGIN
         // Spec 12 floor rotation. Its own sentinel block, extracted verbatim
@@ -2776,8 +2838,10 @@
             const levels = floorLevels(heights, gap);
             currentFootprintW = width;
             currentFootprintD = depth;
-            const colorBottom = new THREE.Color(0xc47a5a);
-            const colorTop = new THREE.Color(0x7ab8d4);
+            // Spec 20: the same warm-base-to-cool-top floor gradient, pulled
+            // toward concrete (was terracotta 0xc47a5a to cyan 0x7ab8d4).
+            const colorBottom = new THREE.Color(0xba876b);
+            const colorTop = new THREE.Color(0x8aa8b9);
 
             // Column/beam render thickness derives from the REAL physical
             // member dimensions at that same fixed scale, times a named
@@ -2830,7 +2894,7 @@
                 // pushed toward a flatter "poured concrete" read (spec 4,
                 // Part F) -- widens the gap against beams/columns below,
                 // which previously clustered closely around 0.5/0.3-0.6/0.2.
-                const slabMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.9), roughness: 0.9, metalness: 0.05 });
+                const slabMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.9), roughness: 0.92, metalness: 0 });
                 const slab = new THREE.Mesh(slabGeo, slabMat);
                 slab.castShadow = true;
                 slab.receiveShadow = true;
@@ -2840,7 +2904,7 @@
                 // per floor) -- front/back span X, left/right span Z.
                 // roughness/metalness (spec 4, Part F): less "structural
                 // dense" than columns, less flat than slabs.
-                const beamMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(1.05), roughness: 0.65, metalness: 0.15 });
+                const beamMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(1.05), roughness: 0.85, metalness: 0 });
                 const beamY = -slabThickness / 2 - beamHeight / 2 - 0.01;
                 // Spec 14 C1: these beams top story f, so they take its drift colour.
                 beamMat.userData.base = beamMat.color.clone();
@@ -2916,7 +2980,7 @@
             // Not frustum-culled: the instances move every frame, and a
             // bounding sphere computed once would go stale.
             columnInstances = new THREE.InstancedMesh(columnGeo,
-                new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.45, metalness: 0.25 }),
+                new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8, metalness: 0 }),
                 columnDefs.length * COLUMN_SEGMENTS);
             columnInstances.castShadow = true;
             columnInstances.receiveShadow = true;
@@ -2964,7 +3028,7 @@
             // that had to re-derive the top floor's displacement itself).
             const topGroup = groups[groups.length - 1];
             const roofGeo = new THREE.BoxGeometry(width + 0.15, 0.1, depth + 0.15);
-            const roofMat = new THREE.MeshStandardMaterial({ color: 0x6a7a9a, roughness: 0.3, metalness: 0.5, emissive: 0x223355, emissiveIntensity: 0.1 });
+            const roofMat = new THREE.MeshStandardMaterial({ color: 0x5f6873, roughness: 0.85, metalness: 0 });
             const roofMesh = new THREE.Mesh(roofGeo, roofMat);
             roofMesh.position.y = slabThickness / 2 + 0.05;
             roofMesh.castShadow = true;
@@ -3356,9 +3420,9 @@
             const slabHeight = 0.4;  // was 0.2
             const geo = new THREE.BoxGeometry(slabWidth, slabHeight, slabDepth);
             const mat = new THREE.MeshStandardMaterial({
-                color: 0x4a4a6a, // slightly lighter to stand out
-                roughness: 0.9,
-                metalness: 0.1,
+                color: 0x2f3b52, // spec 20: cool slate, contrasts the warm lower floors (was lavender 0x4a4a6a)
+                roughness: 0.95,
+                metalness: 0,
             });
             foundationSlab = new THREE.Mesh(geo, mat);
             // Position it so its top is at y=0 (ground level)
@@ -3722,6 +3786,8 @@
                 ctx.lineTo(px, y + h);
                 ctx.stroke();
                 ctx.fillStyle = 'rgba(255,224,178,0.4)';
+                // edge ticks align inward so the canvas edge doesn't clip them
+                ctx.textAlign = f === 0.1 ? 'left' : f === 50 ? 'right' : 'center';
                 ctx.fillText(f < 1 ? f.toFixed(1) : String(f), px, y + h + 11);
             }
 
@@ -3739,17 +3805,19 @@
                 ctx.globalAlpha = 1;
             }
 
-            // Label last, over a solid backing plate -- the curves run
-            // right through the top-left corner (the Transfer panel's own
-            // resonance peak in particular), and plain text on top of them
-            // is unreadable.
+            drawPanelTitle(ctx, x, y, label);
+        }
+
+        // Panel title in the strip ABOVE the plot box. It used to sit inside
+        // the box's top-left corner on a backing plate, which hid whatever
+        // peak ran through that corner; callers leave PANEL_TITLE_H above
+        // each panel for it.
+        const PANEL_TITLE_H = 14;
+        function drawPanelTitle(ctx, x, y, label) {
             ctx.textAlign = 'left';
             ctx.font = '10px ui-monospace, "SF Mono", "Cascadia Code", monospace';
-            const labelW = ctx.measureText(label).width;
-            ctx.fillStyle = 'rgba(11,11,26,0.82)';
-            ctx.fillRect(x + 1, y + 1, labelW + 8, 15);
             ctx.fillStyle = 'rgba(255,255,255,0.72)';
-            ctx.fillText(label, x + 5, y + 12);
+            ctx.fillText(label, x + 1, y - 4);
         }
 
         // Rebuilds the drawer's floor <select> whenever the building is
@@ -3843,7 +3911,7 @@
                 return;
             }
 
-            const topM = 8, bottomM = 16, sideM = 4, gap = 26;
+            const topM = 4 + PANEL_TITLE_H, bottomM = 16, sideM = 4, gap = 14 + PANEL_TITLE_H + 4; // tick row + title
             const panelH = (cssH - topM - bottomM - gap * 2) / 3;
             const plotX = sideM, plotW = cssW - sideM * 2;
             const floorLabel = `floor ${spectrumFloorIndex + 1}`;
@@ -4028,13 +4096,7 @@
             ctx.arc(penX, valToY((env.max[playCol] + env.min[playCol]) / 2), 2.2, 0, Math.PI * 2);
             ctx.fill();
 
-            ctx.textAlign = 'left';
-            ctx.font = '10px ui-monospace, "SF Mono", "Cascadia Code", monospace';
-            const labelW = ctx.measureText(label).width;
-            ctx.fillStyle = 'rgba(11,11,26,0.82)';
-            ctx.fillRect(x + 1, y + 1, labelW + 8, 15);
-            ctx.fillStyle = 'rgba(255,255,255,0.72)';
-            ctx.fillText(label, x + 5, y + 12);
+            drawPanelTitle(ctx, x, y, label);
         }
 
         // Called every animation frame while the drawer is open AND the Time
@@ -4065,7 +4127,7 @@
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
             ctx.clearRect(0, 0, cssW, cssH);
 
-            const topM = 8, bottomM = 16, sideM = 4, gap = 26;
+            const topM = 4 + PANEL_TITLE_H, bottomM = 16, sideM = 4, gap = 8 + PANEL_TITLE_H;
             const hasPseudo = !!timeEnvelopes.pseudo;
             const panelH = (cssH - topM - bottomM - gap * (hasPseudo ? 2 : 1)) / (hasPseudo ? 3 : 2);
             const plotX = sideM, plotW = cssW - sideM * 2;
@@ -4808,6 +4870,7 @@
             currentTotalHeight = totalHeight;
             currentStoryHeights = drawnHeights;
             repositionInteriorLights(totalHeight); // spec 4, Part C -- interior fill lights move with building height
+            fitSunShadow(totalHeight);
             populateFloorSelect(numStories);
             populateSpectrumFloorSelect(numStories); // spec 6 -- independent of the View section's floor select, see its own comment
 
@@ -5063,7 +5126,7 @@
             clearRecomputeError();
             stopElapsed();
             if (nonlinear && collapseCache?.key !== cacheKey) startElapsed('Running collapse analysis…');
-            else if (!nonlinear) startElapsed('Updating building…');
+            else if (!nonlinear) startElapsed('Recomputing');
             if (nonlinear) setAnalysisStatus('running');
             recomputeOverlay.classList.add('is-active');
             try {
@@ -5624,7 +5687,7 @@
         function stopElapsed() {
             clearInterval(elapsedTimer);
             elapsedTimer = null;
-            recomputeText.textContent = 'Updating building…';
+            recomputeText.textContent = 'Recomputing';
             recomputeElapsed.textContent = '';
         }
 
