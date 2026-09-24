@@ -2809,8 +2809,23 @@
 
         // Scene units between a story's top and the next slab: floorLevels(h, gap).
         const FLOOR_RENDER_GAP = 0.04;
+        // Furniture clones share these template geometries; never dispose them.
+        const FURNITURE_GEOS = new Set();
+        for (const t of Object.values(FURNITURE_TEMPLATES)) t.traverse(n => n.geometry && FURNITURE_GEOS.add(n.geometry));
         function createBuilding(numFloors, storyHeights, frame, folderName) {
-            for (const obj of sceneObjects) scene.remove(obj);
+            // Free the outgoing building's GPU resources. Clones share
+            // geometry/material, so dedupe; the dust sprite texture is cached
+            // and material.dispose() leaves maps alone.
+            const garbage = new Set();
+            for (const obj of sceneObjects) {
+                scene.remove(obj);
+                obj.traverse(n => {
+                    if (n.geometry && !FURNITURE_GEOS.has(n.geometry)) garbage.add(n.geometry);
+                    for (const m of [].concat(n.material ?? [])) garbage.add(m);
+                    if (n.isInstancedMesh) garbage.add(n);
+                });
+            }
+            for (const r of garbage) r.dispose();
             sceneObjects = [];
             buildingGroups = [];
             columnDefs = [];
