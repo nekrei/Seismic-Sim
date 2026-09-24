@@ -1157,3 +1157,12 @@ shock.
 
 No physics, request or payload changed: the same control sequence sends
 byte-identical `/compute` and `/design` bodies before and after.
+
+**Cinematic camera (updated).** With the cinematic camera on, a collapse run
+now gets three shots: a close-up of the story at the first computed collapse
+onset, a return to the whole building a few seconds later, and a second
+close-up at the actual failure (the first detachment). From there the camera
+follows the falling material down to the ground, including the rubble once a
+floor shatters. Slow motion and Replay still centre on the failure. Orbiting,
+choosing a camera focus or pressing Back to full view hands the camera back to
+you for that playthrough.
