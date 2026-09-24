@@ -114,13 +114,17 @@ button { cursor: pointer; }
     border: 1px solid var(--line);
     border-radius: 14px;
     overflow: hidden;
+    /* Closed: hidden after the slide. Opacity as well as visibility, because
+       a descendant with its own visibility:visible (the active chart pane)
+       would otherwise still paint through a hidden panel. */
     visibility: hidden;
-    transition: visibility 0s linear var(--dur);
+    opacity: 0;
+    transition: visibility 0s linear var(--dur), opacity 0s linear var(--dur);
 }
 .ws-setup { grid-column: 1; justify-self: end; margin-left: var(--gap); }
 .ws-signals { grid-column: 3; justify-self: start; width: var(--signals-w); margin-right: var(--gap); }
 .ws.setup-visible .ws-setup,
-.ws.signals-visible .ws-signals { visibility: visible; transition-delay: 0s; }
+.ws.signals-visible .ws-signals { visibility: visible; opacity: 1; transition-delay: 0s; }
 .ws-scene { grid-column: 2; grid-row: 1; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .ws-scene > canvas { position: absolute; inset: 0; }
 
@@ -299,7 +303,7 @@ abbr[title] { text-decoration: none; border: 1px solid var(--line-strong); borde
 .metric-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .metric { background: var(--panel); border-radius: 8px; padding: 7px 9px; min-width: 0; }
 .metric dt, .metric .metric-label { font-size: 12px; color: var(--muted); }
-.metric dd, .metric .metric-value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text); margin-top: 2px; overflow-wrap: anywhere; }
+.metric dd, .metric .metric-value { font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; color: var(--text); margin-top: 2px; overflow-wrap: anywhere; }
 .card-note { font-size: 12px; color: var(--muted); line-height: 1.45; }
 .card-note:empty { display: none; }
 .card-actions { display: flex; gap: 8px; }
@@ -567,11 +571,18 @@ table.data thead th { position: sticky; top: 0; background: var(--raised); color
     .ws-panel, .ws-setup, .ws-signals {
         grid-column: 1; grid-row: 2; width: auto; justify-self: stretch; margin: 0;
         border-radius: 14px 14px 0 0; border-bottom: 0;
+        transition: none; /* both panels share one slot: swap instantly */
     }
-    .ws-transport { flex-wrap: wrap; gap: 8px 10px; padding-bottom: 8px; }
-    .transport-speed { order: 5; width: auto; flex: 1; }
-    .transport-meter { order: 6; width: 64px; }
-    .transport-time { min-width: 0; }
+    .ws-transport {
+        display: grid; gap: 4px 10px; padding-top: 6px; padding-bottom: 6px;
+        grid-template-columns: 44px minmax(0, 1fr) auto;
+        grid-template-areas: "play seek time" "speed speed meter";
+    }
+    #playBtn { grid-area: play; }
+    .seek-track { grid-area: seek; min-width: 0; }
+    .transport-time { grid-area: time; min-width: 0; font-size: 12px; }
+    .transport-speed { grid-area: speed; width: auto; }
+    .transport-meter { grid-area: meter; width: 64px; align-self: center; }
     .ws-mobile-nav {
         grid-area: nav; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
         padding: 6px var(--gap) calc(6px + var(--safe-b)); border-top: 1px solid var(--line); background: var(--bg);
