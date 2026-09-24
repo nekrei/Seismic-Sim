@@ -3552,3 +3552,9 @@ Task 6 complete on local branch `goal/17-signals-view-of-nonlinearity`; not merg
 - Review rounds with the user: more ambient, non-brown foundation, brighter background, chart titles, stronger then softer grid, grid back to 50×50. Accepted revision: diff fingerprint `c6db34d85cc4` (Gate A, 2026-09-25).
 - Checks: 17/17 Node scripts incl. new check_shadow_fit.mjs; collapse demo detaches 0→2→3→4 floors at the same record times as baseline, `/compute` bodies identical. Frame times identical to baseline (headless Chrome, refresh-capped). N=20 draw calls 1434→1967 (whole tower now in the shadow pass). Rebuild leaks +9 geometries per rebuild on baseline and candidate alike (pre-existing).
 - Not exercised: an N=20 damage/collapse run, fog at maximum zoom-out, cinematic shots on the new look.
+
+## Wrap-up pass (2026-09-25)
+
+- Fixed the rebuild leak: `createBuilding()` now disposes the previous building's geometries, materials and instanced meshes (furniture template geometry and the cached dust texture excluded). Geometry count stays flat (23) across 20→1→7 rebuilds and at 26 across repeated collapse-demo runs; the demo still detaches 0→2→3→4 floors at 30/45/70/80/80.6/81.9/90 s.
+- Re-verified in headless Chrome: fog at maximum zoom-out for 1/7/20 stories, camera kept through panel toggles and window/phone resizes, cinematic shot sequence and manual-orbit cancel, layout/help/real-app smoke (all sliders, all records, 422 notice, tabs, code design apply, phone). 17/17 Node checks and the Python checks pass.
+- N=20 collapse through the UI (demo preset at 20 stories) did not converge at 20× or 5× and gave no result at 10× within an hour; no cascade was produced, so 20-story cascade frame-rate/fog checks remain open.
