@@ -5116,6 +5116,26 @@
         });
 
         const comparisonBuffers = new Map();
+        // The collapse demo's /compute response, saved once in out/collapse_demo/
+        // (request.json + response.bin) so a live demo needs no minute-long
+        // solve. Used only for a request byte-identical to the saved one;
+        // anything else, or a missing file, goes to /compute as usual.
+        // Regenerate after any solver change (README, "Collapse demo cache").
+        let demoRequestKey;
+        async function precomputedDemoResponse(key, signal) {
+            try {
+                if (demoRequestKey === undefined) {
+                    const r = await fetch('out/collapse_demo/request.json', { signal });
+                    demoRequestKey = r.ok ? JSON.stringify(await r.json()) : null;
+                }
+                if (key !== demoRequestKey) return null;
+                const r = await fetch('out/collapse_demo/response.bin', { signal });
+                return r.ok ? r : null;
+            } catch (error) {
+                if (error.name === 'AbortError') throw error;
+                return null;
+            }
+        }
         async function liveRecompute(folder, autoScaleAmplify = false, nonlinear = false, overrideParams = null) {
             if (!folder) return;
             if (liveAbortController) liveAbortController.abort();
@@ -5160,9 +5180,11 @@
             try {
                 const storedBuffer = overrideParams ? comparisonBuffers.get(cacheKey) :
                     (nonlinear && collapseCache?.key === cacheKey ? collapseCache.buffer : null);
+                const demoRes = !storedBuffer && nonlinear && !overrideParams
+                    ? await precomputedDemoResponse(cacheKey, signal) : null;
                 const res = storedBuffer
                     ? new Response(storedBuffer)
-                    : await fetch(COMPUTE_URL, {
+                    : demoRes ?? await fetch(COMPUTE_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(params),

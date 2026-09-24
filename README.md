@@ -539,6 +539,26 @@ listed in Result details as animation, separately from the computed events.
 > Post-failure rigid-body model with assumed contact parameters — not a
 > solution of the structural equations of motion.
 
+### Collapse demo cache
+
+The demo's collapse solve takes about a minute, so its `/compute` response
+is saved in `out/collapse_demo/`: `request.json` is the exact request the
+**Load collapse demo** preset sends, and `response.bin` is the server's
+reply to it (the solver is deterministic, so this is the same data a live
+solve returns). When **Run collapse analysis** sends a request identical to
+`request.json`, the viewer loads `response.bin` instead of calling
+`/compute`; the Rapier fall is still built in the browser. Any other
+request (another record, intensity, story count…) goes to the server as
+before. After any change to the solver or the payload, regenerate it with
+the local server running:
+
+```bash
+curl -X POST http://127.0.0.1:8000/compute -H "Content-Type: application/json" --data-binary @out/collapse_demo/request.json -o out/collapse_demo/response.bin
+```
+
+If the preset itself changes, save its new request body as `request.json`
+first (the old file then simply stops matching and the demo solves live).
+
 ## The live version, hosted
 
 This project is also hosted online. GitHub Pages (static-only — no
