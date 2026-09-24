@@ -1103,3 +1103,57 @@ reinforcement bounds, capacity ratio and ductility-to-backbone mapping are
 project assumptions. The current interface is an educational demonstration,
 not a design tool for a real building. Math PDF Part M and
 `verification/18-code-design-mode.md` list every candidate value and status.
+
+## Spec 19: the workspace
+
+The viewer is organised as one workspace instead of stacked accordions.
+
+- **Header:** the record picker (labelled by event, year and station) with an
+  **i** button for the event's facts and sources, plus **Setup** and
+  **Signals** buttons that show or hide those panels.
+- **Setup** (left): Building (Manual or Code design, then Structure and
+  Irregularities behind disclosures), Earthquake (the recording, a
+  Recorded / Modified scenario badge, magnitude/distance/depth and Reset),
+  Analysis (Run collapse analysis, intensity, torsion, Load collapse demo and
+  a short result card), View (camera focus, elastic ghost, damage legend,
+  motion settings). One page is shown at a time. Hiding the panel frees its
+  width for the scene; showing it again returns to the same page, values,
+  open disclosures and scroll position.
+- **Signals** (right): **Charts** (Time, Frequency, Hysteresis, Convergence;
+  one Plot floor/story and axis for all four) and **Experiments**
+  (Superposition, Intensity sweep, Building comparison, one at a time).
+  Switching views never starts a calculation.
+- **Playback bar** (bottom): play/pause, the seek bar with computed onset and
+  detachment markers, time, speed and a shaking meter.
+- **Phones:** the scene sits above one sheet that shows Setup or Signals,
+  chosen with Scene / Setup / Signals buttons at the bottom.
+
+**Results are short; details are one click away.** A collapse run shows a
+card with at most four numbers (iterations, first onset, detachment and, with
+several, how many) and one qualification. When a story detaches during
+playback a one-line notice says which story and when and that the fall is
+illustrative. **Details** opens one dialog with the solver status, every
+computed onset and detachment, the animated cascades, crushes and fractures
+(listed separately), the assumed contact parameters, scale and budget
+limits. A code-design preview is a card marked **Not applied** until you
+press Apply; its per-story member sizes are a table in Details. Errors are a
+compact notice in the scene with Restore/Dismiss, Retry where a retry makes
+sense, and Details; the previous building stays on screen.
+
+**Help.** Each section and chart has an **i** button. It opens a dialog with
+a short silent clip recorded from the real app (`assets/help/*.mp4`, with a
+still for reduced motion or if the clip can't play), one sentence of purpose,
+up to three steps and an optional technical note. The clips were captured
+from actual runs; the long nonlinear solve in the Analysis clip is cut and
+captioned "Calculation shortened".
+
+**Earthquake facts** come from `assets/earthquakes.json`: event date,
+location, moment magnitude (Mw, not "Richter") and depth from the USGS
+ComCat event pages, and each record's station and event from its PEER file
+header. They never change the simulation. One caveat is shown in the dialog:
+the two L'Aquila records are from the 7 April 2009 aftershock (USGS Mw 5.5),
+while the simulation's reference magnitude for them is 6.3, the 6 April main
+shock.
+
+No physics, request or payload changed: the same control sequence sends
+byte-identical `/compute` and `/design` bodies before and after.
