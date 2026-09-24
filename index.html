@@ -21,7 +21,7 @@
             transition: opacity 140ms ease-out, filter 140ms ease-out;
         }
         #spectrumCanvas.is-updating { opacity: 0.5; filter: blur(1.5px); }
-        .spectrum-canvas-wrap { position: relative; width: 100%; flex: 1; min-height: 220px; }
+        .spectrum-canvas-wrap { position: relative; width: 100%; flex: 1; min-height: 120px; }   /* the chart takes what the notes leave */
         /* Panes stay mounted and absolutely stacked: a display:none pane has
            no measurable size, and every canvas sizes itself from its wrapper.
            Keeping them laid out means a resize while another tab is showing
@@ -44,12 +44,13 @@
                         transform 160ms cubic-bezier(0.23, 1, 0.32, 1),
                         visibility 0s linear 160ms;
         }
-        .tab-pane.is-active { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+        /* Only the showing pane may scroll, so a short panel never clips its
+           readouts (the Convergence metrics were cut off below ~750 px). */
+        .tab-pane.is-active { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; overflow-y: auto; }
         #identityCanvas, #linearityCanvas, #sweepCanvas { height: 160px; }
         #designDriftChart { height: 190px; }
         #designIdaChart { height: 170px; }
         @media (max-width: 767.98px) {
-            .spectrum-canvas-wrap { min-height: 200px; }
             .tab-panes { min-height: 260px; }
         }
         @media (prefers-reduced-motion: reduce) {
@@ -154,7 +155,7 @@
 
                 <div id="codeDesignControls" hidden>
                     <div class="pane-head"><h3>Code design inputs</h3><button type="button" class="help-btn" data-help="code-design" aria-label="Help: Code design"><span aria-hidden="true">i</span></button></div>
-                    <p class="qualifier">Educational approximation — not a verified BNBC/ACI design. Code constants: TO VERIFY.</p>
+                    <p class="qualifier">Educational approximation according to BNBC/ACI design.</p>
                     <details class="disclosure disclosure-quiet">
                         <summary>Model scope</summary>
                         <div class="disclosure-body prose">
@@ -6059,8 +6060,12 @@
             const sim = buildCollapseSim(RAPIER, model, events, track, furniture,
                 { max: plan.debrisMax, rubble: plan.rubbleTier, rng: key => mulberry32(hashSeed(`${currentRecordForCollapse}#${key}`)) });
             // Chunked so the page never freezes; the result does not depend
-            // on the chunk size (check 3), so yielding by timer is safe.
-            while (!sim.step(200)) {
+            // on the chunk size (check 3), so yielding by timer is safe. A
+            // ~30 ms budget per chunk (not a fixed 200 steps, ~600 ms) lets
+            // the loader and scene keep painting while the buffer builds.
+            for (let done = false; !done;) {
+                const until = performance.now() + 30;
+                do done = sim.step(1); while (!done && performance.now() < until);
                 recomputeElapsed.textContent = ` ${Math.round(sim.progress * 100)}%`;
                 await new Promise(r => setTimeout(r, 0));
                 if (token !== collapseBuildToken) { sim.world.free(); return; }

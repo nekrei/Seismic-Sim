@@ -342,12 +342,15 @@ abbr[title] { text-decoration: none; border: 1px solid var(--line-strong); borde
 .recompute-floor {
     width: 140px; height: 14px; border: 1.5px solid rgba(255,215,100,0.55); border-radius: 3px;
     background: rgba(255,215,100,0.06); opacity: 0; transform: translateY(10px) scaleX(0.85);
+    box-shadow: 0 0 8px rgba(255,215,100,0.3);
     animation: floorAssemble 1.5s ease-in-out infinite;
 }
+/* Transform and opacity only, so the compositor runs it even while the main
+   thread is busy (a box-shadow keyframe pinned it to the main thread). */
 @keyframes floorAssemble {
-    0%   { opacity: 0; transform: translateY(10px) scaleX(0.85); box-shadow: none; }
-    18%  { opacity: 1; transform: translateY(0) scaleX(1); box-shadow: 0 0 10px rgba(255,215,100,0.4); }
-    55%  { opacity: 1; transform: translateY(0) scaleX(1); box-shadow: none; }
+    0%   { opacity: 0; transform: translateY(10px) scaleX(0.85); }
+    18%  { opacity: 1; transform: translateY(0) scaleX(1); }
+    55%  { opacity: 1; transform: translateY(0) scaleX(1); }
     85%  { opacity: 0.12; }
     100% { opacity: 0; transform: translateY(10px) scaleX(0.85); }
 }
@@ -471,9 +474,12 @@ abbr[title] { text-decoration: none; border: 1px solid var(--line-strong); borde
 .pane-head h3 { font-size: 13px; font-weight: 650; color: var(--muted); }
 .spectrum-sampling-note { font-size: 12px; font-family: var(--mono); color: var(--muted); text-align: right; line-height: 1.4; }
 .spectrum-sampling-note:empty { display: none; }
+/* The empty state covers its pane, centred, instead of stacking under the
+   (empty) chart area, whose minimum height pushed the button out of view. */
 .spectrum-disabled-note {
-    display: none; flex-direction: column; align-items: center; gap: 12px;
-    font-size: 13px; color: var(--muted); text-align: center; padding: 40px 12px;
+    display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    position: absolute; inset: 36px 0 0; z-index: 1;   /* below the 28px pane head + 8px gap */
+    font-size: 13px; color: var(--muted); text-align: center; padding: 12px;
 }
 .spectrum-disabled-note[style*="block"] { display: flex !important; }
 .signals-loop-diagram { margin: 0; color: rgba(255,224,178,0.8); }
