@@ -526,6 +526,9 @@ How the fall is animated:
   geometry. If it lands faster than 3 m/s (an assumed threshold), it shatters
   into irregular slab chunks that carry exactly its mass, and its beams break
   off where they hang.
+- **Debris and dust.** Small debris and a fogged dust puff spawn only at
+  computed failures and impacts. They are cosmetic: debris uses the leftover
+  body budget and dust is a fogged sprite that fades in 7 s.
 
 Every piece starts at the place, motion and on-screen colour of the member it
 came from, so it replaces that member without a jump. The pieces settle into
@@ -545,7 +548,7 @@ which Pages can't run — so `index.html` sends those requests to a
 separately-deployed backend instead: see
 [seismic-sim-backend](https://github.com/Raufur1234/seismic-sim-backend)
 (a trimmed mirror of `server.py`, deployed on Render at
-https://seismic-sim-backend.onrender.com). That repo's own README
+https://seismic-sim-backend-sg.onrender.com). That repo's own README
 explains why it exists and what it contains.
 
 ## Current state (as of this pull)
