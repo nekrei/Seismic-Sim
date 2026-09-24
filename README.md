@@ -398,15 +398,19 @@ results. It:
   cutaway read clearly from any camera angle — the moody night exterior
   (fog, background, hemisphere colors) is unchanged, only the amount of
   light went up, not its color/character.
-- The control panel is a real redesign, not just a re-layout: grouped
-  collapsible sections (Playback / Building Parameters / View), a
-  deliberate system-font typography scale (headers/labels/values sized and
-  weighted differently, numeric readouts in a monospace-flavored stack with
-  tabular figures), and a genuine mobile layout — below ~600px width the
-  panel becomes a bottom sheet with a collapsed strip (record name +
-  play/pause) you can tap to expand, larger touch targets throughout, and
-  no hover-only controls. One-finger drag / two-finger pinch-pan orbiting
-  and zooming still come from `OrbitControls`' own built-in touch handling.
+- The page is one workspace (spec 19): a header with the record picker, a
+  **Setup** inspector on the left (Building / Earthquake / Analysis / View,
+  one page at a time), the 3D scene in the middle, **Signals** on the right
+  (Charts / Experiments), and a playback bar along the bottom. Setup and
+  Signals each hide and come back with their header button without losing
+  any value, page or scroll position, and the scene takes the freed space.
+  On a phone the same panels share one sheet under the scene, switched by
+  Scene / Setup / Signals buttons at the bottom. Results appear as short
+  cards; the full numbers, tables and model assumptions open with
+  **Details**. Every section has an **i** button with a short looping clip
+  of the real app and the same steps in text. See "Spec 19: the workspace"
+  near the end of this file. One-finger drag / two-finger pinch orbiting and
+  zooming still come from `OrbitControls`' own touch handling.
 
 **This is the file to open when you want to see whether the simulation
 "looks right."**
@@ -497,12 +501,13 @@ collapse analysis disabled.
    (like `python -m http.server`) will load the page fine but the sliders
    will fail, since there's no `/compute` to POST to.
 
-To watch a collapse locally, open **Collapse Analysis**, choose **Load
+To watch a collapse locally, open **Setup → Analysis**, choose **Load
 collapse demo**, press **Run collapse analysis**, then play the timeline.
 The structural solver computes when stories fail; Rapier animates the block
-after that instant from the computed hand-off state. Its assumed contact
-parameters are shown with the animation. The deployed backend keeps collapse
-analysis disabled.
+after that instant from the computed hand-off state. A short notice says
+which story detached and that the fall is illustrative; its **Details**
+button lists the assumed contact parameters and every computed and animated
+event. The deployed backend keeps collapse analysis disabled.
 
 How the fall is animated:
 
@@ -527,7 +532,7 @@ Every piece starts at the place, motion and on-screen colour of the member it
 came from, so it replaces that member without a jump. The pieces settle into
 a rubble heap. The number of pieces scales with the device's body budget; a
 20-story building on a phone gets none. Crushes, cascades and fractures are
-listed on the banner as animation, not computed results.
+listed in Result details as animation, separately from the computed events.
 
 > Post-failure rigid-body model with assumed contact parameters — not a
 > solution of the structural equations of motion.
@@ -724,7 +729,7 @@ variability and the hysteresis constants are assumptions, not calibrated
 component data; progressive load-path changes are not included, and torsion
 is opt-in (see Spec 12 below).
 
-Open **Collapse Analysis** and press **Run collapse analysis**. This sends
+Open **Setup → Analysis** and press **Run collapse analysis**. This sends
 one `/compute` request with `nonlinear: true`. Live sliders still run the
 elastic model; changing a parameter or record invalidates the nonlinear
 cache. The result adds a `collapse` JSON header, including convergence,
@@ -818,7 +823,10 @@ be closed with its × button or Esc. Closing an *unstable building* or *invalid
 parameters* message also snaps the building sliders back to their last
 accepted values, so the panel matches the building still on screen. A new
 collapse result being cached shows a brief green "Successfully Cached" toast
-at the top right; the run button's label never changes.
+at the top right; the run button's label never changes. *(Spec 19 replaced
+this presentation: errors are a compact notice at the bottom of the scene
+with Restore/Dismiss, Retry where it makes sense, and Details; the cache
+toast is gone.)*
 
 ## Spec 13: what happens after a story breaks
 
@@ -1095,3 +1103,71 @@ reinforcement bounds, capacity ratio and ductility-to-backbone mapping are
 project assumptions. The current interface is an educational demonstration,
 not a design tool for a real building. Math PDF Part M and
 `verification/18-code-design-mode.md` list every candidate value and status.
+
+## Spec 19: the workspace
+
+The viewer is organised as one workspace instead of stacked accordions.
+
+- **Header:** the record picker (labelled by event, year and station) with an
+  **i** button for the event's facts and sources, plus **Setup** and
+  **Signals** buttons that show or hide those panels.
+- **Setup** (left): Building (Manual or Code design, then Structure and
+  Irregularities behind disclosures), Earthquake (the recording, a
+  Recorded / Modified scenario badge, magnitude/distance/depth and Reset),
+  Analysis (Run collapse analysis, intensity, torsion, Load collapse demo and
+  a short result card), View (camera focus, elastic ghost, damage legend,
+  motion settings). One page is shown at a time. Hiding the panel frees its
+  width for the scene; showing it again returns to the same page, values,
+  open disclosures and scroll position.
+- **Signals** (right): **Charts** (Time, Frequency, Hysteresis, Convergence;
+  one Plot floor/story and axis for all four) and **Experiments**
+  (Superposition, Intensity sweep, Building comparison, one at a time).
+  Switching views never starts a calculation.
+- **Playback bar** (bottom): play/pause, the seek bar with computed onset and
+  detachment markers, time, speed and a shaking meter.
+- **Phones:** the scene sits above one sheet that shows Setup or Signals,
+  chosen with Scene / Setup / Signals buttons at the bottom.
+
+**Results are short; details are one click away.** A collapse run shows a
+card with at most four numbers (iterations, first onset, detachment and, with
+several, how many) and one qualification. When a story detaches during
+playback a one-line notice says which story and when and that the fall is
+illustrative. **Details** opens one dialog with the solver status, every
+computed onset and detachment, the animated cascades, crushes and fractures
+(listed separately), the assumed contact parameters, scale and budget
+limits. A code-design preview is a card marked **Not applied** until you
+press Apply; its per-story member sizes are a table in Details. Errors are a
+compact notice in the scene with Restore/Dismiss, Retry where a retry makes
+sense, and Details; the previous building stays on screen.
+
+**Help.** Each section and chart has an **i** button. It opens a dialog with
+a short silent clip recorded from the real app (`assets/help/*.mp4`, with a
+still for reduced motion or if the clip can't play), one sentence of purpose,
+up to three steps and an optional technical note. The clips were captured
+from actual runs; the long nonlinear solve in the Analysis clip is cut and
+captioned "Calculation shortened".
+
+**Earthquake facts** come from `assets/earthquakes.json`: event date,
+location, moment magnitude (Mw, not "Richter") and depth from the USGS
+ComCat event pages, and each record's station and event from its PEER file
+header. They never change the simulation. One caveat is shown in the dialog:
+the two L'Aquila records are from the 7 April 2009 aftershock (USGS Mw 5.5),
+while the simulation's reference magnitude for them is 6.3, the 6 April main
+shock.
+
+No physics, request or payload changed: the same control sequence sends
+byte-identical `/compute` and `/design` bodies before and after.
+
+**Cinematic camera (updated).** With the cinematic camera on, a collapse run
+now gets three shots: a close-up of the story at the first computed collapse
+onset, a return to the whole building a few seconds later, and a second
+close-up at the actual failure (the first detachment). From there the camera
+follows the falling material down to the ground, including the rubble once a
+floor shatters. About six seconds (record time) after the failure the camera
+returns to the view you had before the first close-up; the zoom-out between
+the two close-ups returns there too. Scrubbing back to an earlier moment shows
+what the sequence shows at that moment (your view, or the onset close-up)
+rather than leaving the camera on the rubble. Slow motion and Replay still
+centre on the failure. Orbiting,
+choosing a camera focus or pressing Back to full view hands the camera back to
+you for that playthrough.
