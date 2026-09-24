@@ -614,7 +614,7 @@ table.data thead th { position: sticky; top: 0; background: var(--raised); color
     .notice-actions { width: 100%; }
     .notice-actions .btn { flex: 1 1 auto; white-space: nowrap; font-size: 13px; padding: 6px 10px; min-height: 44px; }
     .toast { top: 8px; left: 8px; right: auto; max-width: calc(100% - 16px); }
-    .collapse-banner { top: 60px; left: 8px; width: calc(100% - 16px); }
+    .collapse-banner { top: 60px; bottom: auto; left: 8px; width: calc(100% - 16px); }
     .illustrative-chip { top: 8px; left: 8px; }
     .tab-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .select-grid { grid-template-columns: 1fr 1fr; }
