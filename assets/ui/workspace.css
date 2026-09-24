@@ -329,12 +329,6 @@ abbr[title] { text-decoration: none; border: 1px solid var(--line-strong); borde
 .damage-legend-notes { padding-left: 16px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px; }
 
 /* ------------------------------------------------------------ scene layer */
-.scene-status {
-    position: absolute; top: 12px; left: 12px; z-index: 3; max-width: calc(100% - 220px);
-    font-size: 12px; color: var(--muted); padding: 5px 10px; border-radius: 999px;
-    background: rgba(9,11,16,0.72); border: 1px solid var(--line);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
-}
 .recompute-overlay { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
 .busy-pill {
     position: absolute; top: 12px; left: 50%; transform: translate(-50%, -6px);
@@ -365,13 +359,16 @@ abbr[title] { text-decoration: none; border: 1px solid var(--line-strong); borde
 @media (hover: hover) and (pointer: fine) { .notice-close:hover { background: var(--raised); color: var(--text); } }
 .notice-error { display: none; border-color: rgba(255,138,128,0.55); }
 .recompute-overlay.is-error .notice-error { display: flex; }
-.collapse-banner { border-color: rgba(255,180,92,0.5); bottom: 16px; opacity: 0; visibility: hidden;
-    transform: translate(-50%, 6px); transition: opacity 180ms ease, transform 180ms var(--ease-out), visibility 0s linear 180ms; }
-.collapse-banner.is-shown { opacity: 1; visibility: visible; transform: translate(-50%, 0); transition-delay: 0s; }
+/* The post-failure notice sits top-left, clear of the epicenter map, so it
+   never covers the falling building or the rubble at ground level. */
+.collapse-banner { border-color: rgba(255,180,92,0.5); top: 12px; left: 12px; bottom: auto;
+    width: min(460px, calc(100% - 210px)); opacity: 0; visibility: hidden;
+    transform: translateY(-6px); transition: opacity 180ms ease, transform 180ms var(--ease-out), visibility 0s linear 180ms; }
+.collapse-banner.is-shown { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
 .collapse-banner[data-incomplete="true"] { border-color: rgba(255,138,128,0.6); }
 .ws-scene:has(.recompute-overlay.is-error) .collapse-banner { visibility: hidden; }
 .illustrative-chip {
-    position: absolute; left: 12px; bottom: 12px; z-index: 3; min-height: 36px; padding: 6px 12px;
+    position: absolute; left: 12px; top: 12px; z-index: 3; min-height: 36px; padding: 6px 12px;
     border-radius: 999px; border: 1px solid rgba(255,180,92,0.5); background: rgba(19,23,32,0.9);
     color: var(--warn); font-size: 12px; font-weight: 600;
 }
@@ -588,7 +585,6 @@ table.data thead th { position: sticky; top: 0; background: var(--raised); color
         padding: 6px var(--gap) calc(6px + var(--safe-b)); border-top: 1px solid var(--line); background: var(--bg);
     }
     .ws-mobile-nav button { min-height: 44px; }
-    .scene-status { max-width: calc(100% - 24px); top: auto; bottom: 8px; left: 8px; }
     #info { display: none; }
     #epicenterMap { top: 8px; right: 8px; width: auto; padding: 0 8px; }
     #epicenterMap:not([data-collapsed="false"]) .epicenter-map-row { display: none; }
@@ -601,6 +597,8 @@ table.data thead th { position: sticky; top: 0; background: var(--raised); color
     .notice-actions { width: 100%; }
     .notice-actions .btn { flex: 1 1 auto; white-space: nowrap; font-size: 13px; padding: 6px 10px; min-height: 44px; }
     .toast { top: 8px; left: 8px; right: auto; max-width: calc(100% - 16px); }
+    .collapse-banner { top: 60px; left: 8px; width: calc(100% - 16px); }
+    .illustrative-chip { top: 8px; left: 8px; }
     .busy-pill { top: 52px; }
     .tab-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .select-grid { grid-template-columns: 1fr 1fr; }

@@ -294,7 +294,7 @@
                 <h3 class="group-title">Appearance</h3>
                 <div class="toggle-row">
                     <label for="ghostToggle">Elastic ghost</label>
-                    <span class="field-value" id="ghostLabel">—</span>
+                    <span class="field-value" id="ghostLabel"></span>
                     <input type="checkbox" class="switch" id="ghostToggle" checked />
                 </div>
                 <div id="damageLegend" class="damage-legend" hidden>
@@ -322,7 +322,9 @@
         <!-- The scene. The WebGL canvas is appended here and sized to this
              box (ResizeObserver), not to the window. -->
         <main class="ws-scene" id="sceneHost" aria-label="Building viewport">
-            <div class="scene-status" id="sceneStatus">
+            <!-- Screen-reader context only (the visible pill was removed at the
+                 user's request). -->
+            <div class="sr-only" id="sceneStatus">
                 <span id="sceneStatusText">Loading…</span>
             </div>
             <!-- Busy/error state. Keeps its old ids (the experiment code
@@ -1052,6 +1054,8 @@
         let cinematicTriggered = false;
         let cinematicOverride = false;
         let cinematicFollow = null;
+        let cinematicShotList = [];  // cinematicShots() of the loaded run
+        let cinematicNext = 0;       // index of the next shot to fire
         // Static-path fetch cache only (parameter-independent, like
         // groundSpectrum): the raw JSON for one record, reused across every
         // same-record live recompute rather than refetched on a drag.
@@ -4661,6 +4665,37 @@
         function replayStartTime(onset) {
             return onset ? Math.max(0, onset.time - CINEMATIC_LEAD_SECONDS) : 0;
         }
+        // The cinematic camera's shot list, in record time: zoom in on the
+        // first computed collapse onset, hold, zoom back out to the whole
+        // building, then zoom in again at the first detachment (the actual
+        // failure) and follow the fall. A shot that would crowd the next one
+        // is dropped rather than cut short. Every time comes from `collapse`.
+        const ONSET_HOLD_SECONDS = 4;   // record seconds on the onset close-up
+        const MIN_WIDE_SECONDS = 2;     // shortest wide shot worth cutting to
+        function cinematicShots(collapse) {
+            if (!collapse?.converged) return [];
+            let onset = null;
+            for (const axis of ['X', 'Y']) {
+                (collapse.axes?.[axis]?.t_collapse || []).forEach((time, floorIndex) => {
+                    if (Number.isFinite(time) && (!onset || time < onset.time)) onset = { time, story: floorIndex + 1, floorIndex };
+                });
+            }
+            const failure = collapse.detachment_events?.length ? firstCinematicOnset(collapse) : null;
+            const shots = [];
+            if (onset && (!failure || onset.time < failure.leadTime)) {
+                shots.push({ kind: 'onset', ...onset, startTime: Math.max(0, onset.time - CINEMATIC_LEAD_SECONDS) });
+                const wideAt = onset.time + ONSET_HOLD_SECONDS;
+                if (!failure || failure.leadTime - wideAt >= MIN_WIDE_SECONDS) shots.push({ kind: 'wide', startTime: wideAt });
+            }
+            if (failure) shots.push({ kind: 'failure', ...failure, startTime: failure.leadTime });
+            return shots;
+        }
+        // Index of the next shot to fire from record time t (a scrub never
+        // fires a shot whose moment has already passed).
+        function nextShotIndex(shots, t, inclusive = false) {
+            const i = shots.findIndex(s => (inclusive ? s.startTime >= t : s.startTime > t));
+            return i < 0 ? shots.length : i;
+        }
         // ---8<--- CINEMATIC-HELPERS-END
 
         function tweenCameraTo(toPos, toTarget, duration = 550) {
@@ -4701,7 +4736,9 @@
 
         controls.addEventListener('start', () => {
             cameraTween = null;
-            if (cinematicTriggered && !cinematicOverride) {
+            // A manual orbit hands the camera back to the user for the rest
+            // of the playthrough, once any cinematic shot has taken it.
+            if (cinematicNext > 0 && !cinematicOverride) {
                 cinematicOverride = true;
                 cinematicFollow = null;
                 cinematicReenableBtn.hidden = false;
@@ -4775,6 +4812,8 @@
             collapseData = extra.collapse ?? null; // spec 14 -- header.collapse of that run
             identityData = extra.identity ?? null;
             cinematicOnset = firstCinematicOnset(collapseData);
+            cinematicShotList = cinematicShots(collapseData);
+            cinematicNext = 0;
             cinematicTriggered = false;
             cinematicOverride = false;
             cinematicFollow = null;
@@ -5542,9 +5581,11 @@
             updateGhostLabel(true);
         }
         function updateGhostLabel(collapseShown) {
-            ghostLabel.textContent = ghostSource
-                ? (ghostToggle.checked ? `elastic × ${ghostSource.scale} (linear)` : 'off')
-                : collapseShown ? 'no elastic run of this building' : 'shown after a collapse run';
+            // Short: the row is narrow. The full meaning sits in the title.
+            ghostLabel.textContent = ghostSource ? (ghostToggle.checked ? `×${ghostSource.scale}` : 'off')
+                : collapseShown ? 'n/a' : '';
+            ghostLabel.title = ghostSource ? `Elastic response × ${ghostSource.scale} (linear scaling)`
+                : collapseShown ? 'No elastic run of this same building to compare' : '';
         }
         function updateGhost(scale) {
             const on = !!ghostSource && ghostToggle.checked;
@@ -6034,6 +6075,7 @@
             get cascades() { return collapseAnim ? collapseAnim.sim.cascades.slice() : []; },
             get animTime() { return animTime; },
             get detachedGroups() { return buildingGroups.filter(g => !g.matrixAutoUpdate).length; },
+            get cameraTarget() { return controls.target.toArray(); },
         };
 
         // Gravity-instability / bad-parameter message on the recompute
@@ -6562,6 +6604,7 @@
                 if (totalDuration > 0) {
                     if (animTime > totalDuration) {
                         animTime = animTime % totalDuration;
+                        cinematicNext = 0;
                         cinematicTriggered = false;
                         cinematicOverride = false;
                         cinematicFollow = null;
@@ -6575,13 +6618,15 @@
                 timeDisplay.textContent = `${animTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`;
             }
 
-            if (isPlaying && !isSeeking && cinematicCameraToggle.checked && cinematicOnset && !cinematicTriggered && !cinematicOverride &&
-                animTime >= cinematicOnset.leadTime) {
-                cinematicTriggered = true;
-                const g = buildingGroups[cinematicOnset.floorIndex];
-                const centre = g ? new THREE.Vector3(g.position.x, g.position.y, g.position.z) : null;
-                frameCameraToFloor(cinematicOnset.floorIndex, centre, true);
-                floorSelect.value = String(cinematicOnset.floorIndex);
+            // Cinematic shots: onset close-up -> wide -> failure close-up.
+            // If several shot times have passed in one frame, only the latest
+            // one is taken.
+            if (isPlaying && !isSeeking && cinematicCameraToggle.checked && !cinematicOverride
+                && cinematicNext < cinematicShotList.length && animTime >= cinematicShotList[cinematicNext].startTime) {
+                let shot;
+                do { shot = cinematicShotList[cinematicNext++]; }
+                while (cinematicNext < cinematicShotList.length && animTime >= cinematicShotList[cinematicNext].startTime);
+                takeCinematicShot(shot);
             }
 
             const idx = currentIndex;
@@ -6624,13 +6669,11 @@
             applyCollapseFloors(scale); // spec 15: detached floors from the keyframe buffer (no-op otherwise)
 
             if (cinematicCameraToggle.checked && cinematicTriggered && !cinematicOverride && !cameraTween && collapseAnim && cinematicOnset) {
-                const rec = collapseAnim.sim.bodies.find(r => r.source.kind === 'computed' && r.source.story === cinematicOnset.story);
-                const sample = rec && sampleBody(collapseAnim.sim, rec, animTime);
-                if (sample) {
-                    const target = new THREE.Vector3(
-                        rec.pivot[0] + SCENE_UNITS_PER_METRE * (sample.p[0] - rec.p0[0]),
-                        rec.pivot[1] + sample.p[1] - rec.p0[1],
-                        rec.pivot[2] + SCENE_UNITS_PER_METRE * (sample.p[2] - rec.p0[2]));
+                // Follow the falling material itself down the building (see
+                // collapseFallTarget), not one slab whose track stops when it
+                // shatters.
+                const target = collapseFallTarget(collapseAnim, animTime);
+                if (target) {
                     if (!cinematicFollow) cinematicFollow = { position: controls.target.clone(), velocity: new THREE.Vector3() };
                     const next = [0, 1, 2].map(i => criticallyDampedFollow(
                         cinematicFollow.position.getComponent(i), cinematicFollow.velocity.getComponent(i),
@@ -6790,7 +6833,7 @@
 
         cinematicCameraToggle.addEventListener('change', () => {
             if (!cinematicCameraToggle.checked) {
-                if (cinematicTriggered) cameraTween = null;
+                if (cinematicNext > 0) cameraTween = null;
                 cinematicFollow = null;
                 cinematicReenableBtn.hidden = true;
             } else if (cinematicOnset && animTime >= cinematicOnset.leadTime) {
@@ -6801,11 +6844,53 @@
             } else {
                 cinematicOverride = false;
                 cinematicTriggered = false;
+                cinematicNext = nextShotIndex(cinematicShotList, animTime);
             }
         });
+        // One cinematic shot. The onset and failure close-ups reuse the
+        // per-floor framing (a sibling of the whole-building one, so its
+        // limits are untouched); the wide shot is the ordinary full view.
+        function takeCinematicShot(shot) {
+            if (shot.kind === 'wide') {
+                frameCameraToFullBuilding();
+                if (reducedMotion.matches && cameraTween) cameraTween.duration = 1;
+                floorSelect.value = 'full';
+                return;
+            }
+            const g = buildingGroups[shot.floorIndex];
+            const centre = g ? new THREE.Vector3(g.position.x, g.position.y, g.position.z) : null;
+            frameCameraToFloor(shot.floorIndex, centre, true);
+            floorSelect.value = String(shot.floorIndex);
+            if (shot.kind === 'failure') cinematicTriggered = true;   // arms the fall follow
+        }
+        // Where the collapse is, in scene units: the mass-weighted centre of
+        // every falling structural body that is active at t -- the detached
+        // block, floors released by a cascade, and once a floor shatters its
+        // rubble instead of the slab. Scene mapping as the renderer's:
+        // plan x/z at SCENE_UNITS_PER_METRE, height unscaled plus the floor's
+        // render gap. Read from the keyframe buffer only (no engine step).
+        function collapseFallTarget(A, t) {
+            let mass = 0, x = 0, y = 0, z = 0;
+            for (const rec of A.sim.bodies) {
+                const kind = rec.source.kind;
+                if (kind !== 'computed' && kind !== 'cascade' && kind !== 'rubble') continue;
+                if (kind !== 'rubble' && rec.floors.some(f => t >= A.fractureT[f])) continue;
+                const s = sampleBody(A.sim, rec, t);
+                if (!s) continue;
+                const f = kind === 'rubble' ? rec.source.story - 1 : rec.floors[0];
+                const lift = (A.model.levelsScene[f] ?? 0) - (A.model.levelsM[f] ?? 0);
+                const w = rec.mass || 1;
+                x += w * s.p[0] * SCENE_UNITS_PER_METRE;
+                y += w * (s.p[1] + lift);
+                z += w * s.p[2] * SCENE_UNITS_PER_METRE;
+                mass += w;
+            }
+            return mass ? new THREE.Vector3(x / mass, Math.max(0.3, y / mass), z / mass) : null;
+        }
         replayCollapseBtn.addEventListener('click', () => {
             if (!cinematicOnset) return;
             animTime = replayStartTime(cinematicOnset);
+            cinematicNext = nextShotIndex(cinematicShotList, animTime, true);
             isSeeking = false;
             const dt = (timeData[1] - timeData[0]) || 0.01;
             currentIndex = Math.min(Math.floor(animTime / dt), totalFrames - 1);
@@ -6821,7 +6906,7 @@
 
         // Per-floor view controls (spec 4, Part B).
         floorSelect.addEventListener('change', (e) => {
-            if (cinematicTriggered) {
+            if (cinematicNext > 0) {
                 cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
             }
             const val = e.target.value;
@@ -6832,7 +6917,7 @@
             }
         });
         backToFullViewBtn.addEventListener('click', () => {
-            if (cinematicTriggered) {
+            if (cinematicNext > 0) {
                 cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
             }
             floorSelect.value = 'full';
@@ -6843,6 +6928,7 @@
             // pull the current user-owned camera back toward falling debris.
             cinematicOverride = !!cinematicOnset && animTime >= cinematicOnset.leadTime;
             cinematicTriggered = cinematicOverride;
+            if (!cinematicOverride) cinematicNext = nextShotIndex(cinematicShotList, animTime);
             cinematicFollow = null;
             cinematicReenableBtn.hidden = true;
         });
@@ -7095,6 +7181,7 @@
                 // past it skips the automatic shot; Replay explicitly re-arms it.
                 cinematicTriggered = animTime >= cinematicOnset.leadTime;
                 cinematicOverride = cinematicTriggered;
+                cinematicNext = nextShotIndex(cinematicShotList, animTime);
                 cinematicReenableBtn.hidden = true;
             }
             if (totalDuration > 0) {
