@@ -3768,6 +3768,14 @@
             }
             spectrumFloorIndex = (prev == null || prev >= numStories) ? numStories - 1 : prev; // default: roof
             spectrumFloorSelect.value = String(spectrumFloorIndex);
+            labelPlotOptions();
+        }
+        // Spec 19: Hysteresis plots the story below the selected floor, so
+        // the same selector reads "Story n" there (same value, same index).
+        function labelPlotOptions() {
+            const story = analysisTab === 'hysteresis';
+            document.getElementById('plotFloorLabel').textContent = story ? 'Plot story' : 'Plot floor';
+            [...spectrumFloorSelect.options].forEach((o, i) => { o.textContent = `${story ? 'Story' : 'Floor'} ${i + 1}`; });
         }
 
         // Full redraw of all three subplots. Called on data load (record
@@ -5536,7 +5544,7 @@
         function updateGhostLabel(collapseShown) {
             ghostLabel.textContent = ghostSource
                 ? (ghostToggle.checked ? `elastic × ${ghostSource.scale} (linear)` : 'off')
-                : collapseShown ? 'no elastic run of this building' : '—';
+                : collapseShown ? 'no elastic run of this building' : 'shown after a collapse run';
         }
         function updateGhost(scale) {
             const on = !!ghostSource && ghostToggle.checked;
@@ -6863,7 +6871,7 @@
             identitySection.hidden = analysisTab !== 'frequency';
             document.getElementById('howSolved').hidden = analysisTab !== 'frequency' && analysisTab !== 'convergence';
             // Hysteresis indexes the story below the selected floor.
-            document.getElementById('plotFloorLabel').textContent = analysisTab === 'hysteresis' ? 'Plot story' : 'Plot floor';
+            labelPlotOptions();
             redrawAnalysisTab();
         }
         chartTabButtons.forEach((btn, i) => {
@@ -7325,7 +7333,7 @@
             const folder = folderSelect.value;
             const { rec, ev } = catalogEntry(folder);
             document.getElementById('recordCardName').textContent = recordLabel(folder);
-            const mag = ev?.magnitude?.value != null ? `M${ev.magnitude.type ? ` ${ev.magnitude.type}` : ''} ${ev.magnitude.value}` : null;
+            const mag = ev?.magnitude?.value != null ? `${ev.magnitude.type || 'M'} ${ev.magnitude.value}` : null;
             document.getElementById('recordCardMeta').textContent = [ev?.region, mag, rec ? `record ${folder}` : null]
                 .filter(Boolean).join(' · ') || `Record ${folder} · event details not verified`;
         }

@@ -398,15 +398,19 @@ results. It:
   cutaway read clearly from any camera angle — the moody night exterior
   (fog, background, hemisphere colors) is unchanged, only the amount of
   light went up, not its color/character.
-- The control panel is a real redesign, not just a re-layout: grouped
-  collapsible sections (Playback / Building Parameters / View), a
-  deliberate system-font typography scale (headers/labels/values sized and
-  weighted differently, numeric readouts in a monospace-flavored stack with
-  tabular figures), and a genuine mobile layout — below ~600px width the
-  panel becomes a bottom sheet with a collapsed strip (record name +
-  play/pause) you can tap to expand, larger touch targets throughout, and
-  no hover-only controls. One-finger drag / two-finger pinch-pan orbiting
-  and zooming still come from `OrbitControls`' own built-in touch handling.
+- The page is one workspace (spec 19): a header with the record picker, a
+  **Setup** inspector on the left (Building / Earthquake / Analysis / View,
+  one page at a time), the 3D scene in the middle, **Signals** on the right
+  (Charts / Experiments), and a playback bar along the bottom. Setup and
+  Signals each hide and come back with their header button without losing
+  any value, page or scroll position, and the scene takes the freed space.
+  On a phone the same panels share one sheet under the scene, switched by
+  Scene / Setup / Signals buttons at the bottom. Results appear as short
+  cards; the full numbers, tables and model assumptions open with
+  **Details**. Every section has an **i** button with a short looping clip
+  of the real app and the same steps in text. See "Spec 19: the workspace"
+  near the end of this file. One-finger drag / two-finger pinch orbiting and
+  zooming still come from `OrbitControls`' own touch handling.
 
 **This is the file to open when you want to see whether the simulation
 "looks right."**
@@ -497,12 +501,13 @@ collapse analysis disabled.
    (like `python -m http.server`) will load the page fine but the sliders
    will fail, since there's no `/compute` to POST to.
 
-To watch a collapse locally, open **Collapse Analysis**, choose **Load
+To watch a collapse locally, open **Setup → Analysis**, choose **Load
 collapse demo**, press **Run collapse analysis**, then play the timeline.
 The structural solver computes when stories fail; Rapier animates the block
-after that instant from the computed hand-off state. Its assumed contact
-parameters are shown with the animation. The deployed backend keeps collapse
-analysis disabled.
+after that instant from the computed hand-off state. A short notice says
+which story detached and that the fall is illustrative; its **Details**
+button lists the assumed contact parameters and every computed and animated
+event. The deployed backend keeps collapse analysis disabled.
 
 How the fall is animated:
 
@@ -527,7 +532,7 @@ Every piece starts at the place, motion and on-screen colour of the member it
 came from, so it replaces that member without a jump. The pieces settle into
 a rubble heap. The number of pieces scales with the device's body budget; a
 20-story building on a phone gets none. Crushes, cascades and fractures are
-listed on the banner as animation, not computed results.
+listed in Result details as animation, separately from the computed events.
 
 > Post-failure rigid-body model with assumed contact parameters — not a
 > solution of the structural equations of motion.
@@ -724,7 +729,7 @@ variability and the hysteresis constants are assumptions, not calibrated
 component data; progressive load-path changes are not included, and torsion
 is opt-in (see Spec 12 below).
 
-Open **Collapse Analysis** and press **Run collapse analysis**. This sends
+Open **Setup → Analysis** and press **Run collapse analysis**. This sends
 one `/compute` request with `nonlinear: true`. Live sliders still run the
 elastic model; changing a parameter or record invalidates the nonlinear
 cache. The result adds a `collapse` JSON header, including convergence,
@@ -818,7 +823,10 @@ be closed with its × button or Esc. Closing an *unstable building* or *invalid
 parameters* message also snaps the building sliders back to their last
 accepted values, so the panel matches the building still on screen. A new
 collapse result being cached shows a brief green "Successfully Cached" toast
-at the top right; the run button's label never changes.
+at the top right; the run button's label never changes. *(Spec 19 replaced
+this presentation: errors are a compact notice at the bottom of the scene
+with Restore/Dismiss, Retry where it makes sense, and Details; the cache
+toast is gone.)*
 
 ## Spec 13: what happens after a story breaks
 
