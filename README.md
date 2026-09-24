@@ -504,6 +504,31 @@ after that instant from the computed hand-off state. Its assumed contact
 parameters are shown with the animation. The deployed backend keeps collapse
 analysis disabled.
 
+How the fall is animated:
+
+- **Block.** The detached block is one body per floor, held together by fixed
+  joints and started on the exact rigid motion of the computed hand-off, so
+  no momentum or energy is added.
+- **Crushing.** When the block lands, each of its own stories is tested the
+  same way a lower story is tested for a cascade: the carried mass times the
+  impact speed over 0.02 s, compared with that story's computed axial
+  capacity. A story that fails lets the floors above drop onto the one below.
+  They keep their own motion, minus the small impulse a crushed story can
+  still pass up.
+- **Columns.** When a story gives way, its columns buckle where they stand.
+  Each breaks at a knee into two stubs that kink outward, so they cannot hold
+  the floor above.
+- **Rubble.** A falling floor carries its perimeter beams as contact
+  geometry. If it lands faster than 3 m/s (an assumed threshold), it shatters
+  into irregular slab chunks that carry exactly its mass, and its beams break
+  off where they hang.
+
+Every piece starts at the place, motion and on-screen colour of the member it
+came from, so it replaces that member without a jump. The pieces settle into
+a rubble heap. The number of pieces scales with the device's body budget; a
+20-story building on a phone gets none. Crushes, cascades and fractures are
+listed on the banner as animation, not computed results.
+
 > Post-failure rigid-body model with assumed contact parameters — not a
 > solution of the structural equations of motion.
 
@@ -907,7 +932,9 @@ panel gained:
 - **Load collapse demo** — one click sets a known-detaching configuration
   (record, story count, weak story, weak columns, intensity) so a first-time
   reader doesn't have to hunt for parameters that actually converge to a
-  detachment.
+  detachment. Every other building and earthquake input is reset to its
+  default (and Code design mode and torsion are turned off), since the
+  verified case depends on them.
 - **The readout** — plain text naming, per axis, the first onset story and
   time, then (if it happened) the detached story, its time and axis, framed
   by the same honesty sentence spec 13 introduced: *"Structural solve; the
@@ -991,10 +1018,12 @@ rendered even one frame early. The fall itself is still spec 15's job.
 
 The View section can add a restrained camera shake driven by the same scaled
 ground acceleration used by the simulation. An 8 Hz low-pass filter removes
-content too fast to display cleanly, and one capped gain preserves the signal's
-shape. On a computed collapse, the camera can frame the first failing story,
-follow the existing collapse animation buffer, and replay from just before the
-onset. Slow motion changes playback time around onset while the seek slider
+content too fast to display cleanly. The gain is fixed against a 0.3 g
+reference and capped above it, so a weak record shakes proportionally less
+while a strong one keeps its waveform shape. On a computed collapse, the camera
+can frame the story that detaches, follow the existing collapse animation
+buffer, and replay from just before the fall (the first detachment; the first
+collapse onset only when nothing detaches). Slow motion changes playback time around onset while the seek slider
 continues to represent record time. Manual camera input takes control for the
 rest of that playthrough; reduced-motion preferences disable shake and slow
 motion. These are display and playback features: they add no structural

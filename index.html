@@ -2768,7 +2768,15 @@
             STRUT_DENSITY: 2400,  // kg/m^3, failed-column strut mass -- assumed
             FURNITURE_DENSITY: 150, // kg/m^3 over an item's bounding box (mostly air) -- assumed
             SLAB_T: 0.10,         // m, slab collider thickness (the drawn slab)
+            // Rubble -- all assumed, cosmetic in effect on the story:
+            FRACTURE_V: 3.0,      // m/s, landing speed at which a released floor shatters
+            KICK_V: 1.2,          // m/s, max outward/sideways velocity a fragment gains
+            KICK_W: 1.0,          // rad/s, max spin a fragment gains
         });
+        // Pieces per fractured floor at each rubble tier:
+        // [slab grid x, slab grid z, segments per beam edge, stubs per column].
+        // (Always >= 2 stubs per column: a crushed column buckles at a knee.)
+        const RUBBLE_TIERS = [null, [2, 1, 1, 2], [2, 2, 1, 2], [4, 3, 2, 2]];
         const HANDOFF_VERSION = 1;
         const HANDOFF_EVENT_FIELDS = ['story', 't_detach', 'axis', 'axes_tripped', 'direction', 'criterion',
             'failed_columns', 'surviving_columns', 'hinge_column', 'floor_state_frame',
@@ -2819,6 +2827,10 @@
                 floorMass: e0.upper_mass / (N - e0.story + 1),
                 P_cap: header.P_cap_per_story_N.slice(),
                 strutSection: dx.map((v, i) => [v, dy[i]]),
+                // The DRAWN beam section in metres (render depth is
+                // scaled by plan scale; x1.3 exaggeration), so a beam fragment
+                // is the same size as the beam that was on screen.
+                beamSection: [(header.beam_width ?? 0.5) * 1.3, (header.beam_depth ?? 1.5) * (2.8 / 8.4) * 1.3],
                 // mdof_response.column_plan_positions: CCW from (+x, +y).
                 columnPlan: [[a / 2, b / 2], [-a / 2, b / 2], [-a / 2, -b / 2], [a / 2, -b / 2]],
                 // Spec 10 D2: V_p = 8 M_p / h per story (4 columns, 2 ends)
@@ -2963,12 +2975,15 @@
             const slabDesc = () => RAPIER.ColliderDesc.cuboid(model.a / 2, T / 2, model.b / 2)
                 .setDensity(density).setRestitution(P.RESTITUTION).setFriction(P.FRICTION)
                 .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
-            const attach = (desc, body, f) => colliderFloor.set(world.createCollider(desc, body).handle, f);
+            const attach = (desc, body, f) => { const c = world.createCollider(desc, body); colliderFloor.set(c.handle, f); return c; };
 
             // A fixed ground far below, then the foundation and every floor
             // kinematic on the structural track.
             const ground = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -T - 0.5, 0));
-            world.createCollider(RAPIER.ColliderDesc.cuboid(500, 0.5, 500).setFriction(P.FRICTION), ground);
+            const groundHandle = world.createCollider(RAPIER.ColliderDesc.cuboid(500, 0.5, 500).setFriction(P.FRICTION), ground).handle;
+            // A detached block is one body per floor, fixed-jointed;
+            // its own stories crush on impact by the cascade's impulse test.
+            const blocks = [], blockOf = new Map(), crushes = [];
             const kinPose = (f, t) => {
                 const s = trackAt(track, f, t);
                 return { p: [s.x, f < 0 ? -T / 2 : model.levelsM[f], s.y], q: qYaw(-s.theta) };
@@ -3023,6 +3038,7 @@
                 }
             }
             function write(rec) {
+                if (rec.dead) { rec.data.copyWithin(k * 7, (k - 1) * 7, k * 7); return; }   // Fractured, body removed
                 const p = rec.body.translation(), q = rec.body.rotation(), o = k * 7, d = rec.data;
                 d[o] = p.x; d[o + 1] = p.y; d[o + 2] = p.z; d[o + 3] = q.x; d[o + 4] = q.y; d[o + 5] = q.z; d[o + 6] = q.w;
             }
@@ -3045,34 +3061,52 @@
                     world.removeRigidBody(b);   // removes its joints too
                     kinematic.delete(f);
                 }
-                const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(...seed.cm).setCcdEnabled(true));
-                floors.forEach((f, i) => attach(slabDesc().setTranslation(...seed.local[i]).setRotation(rq(qYaw(seed.psi[i]))), body, f));
-                // The block's own (unfailed) columns, as massless contact
-                // geometry: without them the block is two plates with empty
-                // stories between, and a slab can slip into the gap. Zero
-                // density keeps the mass and inertia exactly the lumped
-                // model's (check 1).
+                // One slab body per floor, each carrying the rigid
+                // seed's velocity field at its own centre, so the block starts
+                // as exactly the rigid motion the compound had (same momentum
+                // and KE). Fixed joints hold it together until an impact
+                // crushes a story (blockImpact); a rigid compound instead
+                // survived a 3.5 m drop intact and came to rest on its side.
+                const slabs = floors.map((f, i) => {
+                    const b = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+                        .setTranslation(...v3add(seed.cm, seed.local[i])).setRotation(rq(qYaw(seed.psi[i]))).setCcdEnabled(true));
+                    attach(slabDesc(), b, f);
+                    addBeams(b, f);
+                    b.setLinvel(rv(v3add(seed.v, v3cross(seed.w, seed.local[i]))), true);
+                    b.setAngvel(rv(seed.w), true);
+                    return b;
+                });
+                const block = { floors, links: [] };
                 for (let i = 1; i < floors.length; i++) {
-                    const lo = seed.local[i - 1], hi = seed.local[i], [dx, dy] = model.strutSection[floors[i]];
-                    const hh = (hi[1] - lo[1] - T) / 2;
-                    for (const [px, pz] of model.columnPlan) {
-                        attach(RAPIER.ColliderDesc.cuboid(dx / 2, hh, dy / 2).setDensity(0)
-                            .setRestitution(P.RESTITUTION).setFriction(P.FRICTION)
-                            .setTranslation((lo[0] + hi[0]) / 2 + px, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2 + pz), body, floors[i]);
-                    }
+                    const lo = slabs[i - 1], hi = slabs[i], [dx, dy] = model.strutSection[floors[i]];
+                    const h = seed.local[i][1] - seed.local[i - 1][1];
+                    // The story's (unfailed) columns, as massless contact
+                    // geometry hanging from the slab above; removed when the
+                    // story crushes so the slabs can pancake.
+                    const cols = model.columnPlan.map(([px, pz]) => attach(RAPIER.ColliderDesc.cuboid(dx / 2, (h - T) / 2, dy / 2).setDensity(0)
+                        .setRestitution(P.RESTITUTION).setFriction(P.FRICTION).setTranslation(px, -h / 2, pz), hi, floors[i]));
+                    const joint = world.createImpulseJoint(RAPIER.JointData.fixed(
+                        rv(localPoint(lo, tr(hi))), rq(qMul(qConj(rot(lo)), rot(hi))), { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0, w: 1 }), lo, hi, true);
+                    joint.setContactsEnabled(false);
+                    block.links.push({ lower: floors[i - 1], upper: floors[i], h, joint, cols });
                 }
-                body.setLinvel(rv(seed.v), true);
-                body.setAngvel(rv(seed.w), true);
-                const rec = register(body, floors, e.t_detach, { kind: 'computed', story: e.story, tEvent: e.t_detach },
-                    i => ({ local: seed.local[i], psi: seed.psi[i] }));
-                rec.seed = seed;
+                blocks.push(block);
+                for (const f of floors) blockOf.set(f, block);
+                // Bottom slab first: it is the story that failed, which the
+                // cinematic follow looks up by source.story.
+                floors.forEach((f, i) => {
+                    const r = register(slabs[i], [f], e.t_detach, { kind: 'computed', story: e.story, tEvent: e.t_detach },
+                        () => ({ local: [0, 0, 0], psi: 0 }));
+                    if (i === 0) r.seed = seed;
+                });
                 for (const st of moving) {
+                    const body = floorBody[st.bottomFloor];
                     st.bottomLocal = localPoint(body, st.anchorWorld);
                     st.bottomJoint = world.createImpulseJoint(RAPIER.JointData.spherical(
                         rv(st.bottomLocal), { x: 0, y: -st.L / 2, z: 0 }), body, st.body, true);
                 }
                 lowestDynamic = e.story - 1;
-                addStruts(e, rec);
+                addStruts(e, slabs[0]);
                 impacts.push({ t: e.t_detach, p: v3add(seed.cm, seed.local[0]).map((c, i) => (i === 1 ? model.levelsM[e.story - 1] : c)), kind: 'detach', story: e.story });
                 for (const st of struts.filter(x => x.story === e.story)) {
                     spawnDebris(worldPoint(st.body, [0, -st.L / 2, 0]), [0, 0, 0], e.t_detach, `detach#${e.story}#${st.column}`, 6);
@@ -3099,15 +3133,15 @@
                 }
             }
 
-            function addStruts(e, rec) {
-                const s = e.story - 1, bottomFloor = s - 1, below = supportOf(bottomFloor), seed = rec.seed;
+            function addStruts(e, slab) {
+                const s = e.story - 1, bottomFloor = s - 1, below = supportOf(bottomFloor);
                 const [dx, dy] = model.strutSection[s];
-                const iTop = rec.floors.indexOf(s);
+                const slabP = tr(slab), lvs = slab.linvel(), avs = slab.angvel();
                 model.columnPlan.forEach(([px, pz], j) => {
                     const bottomLocal = bottomFloor < 0 ? [px, T / 2, pz] : [px, 0, pz];
                     const bottom = worldPoint(below, bottomLocal);
-                    const topLocal = v3add(seed.local[iTop], qRot(qYaw(seed.psi[iTop]), [px, 0, pz]));
-                    const top = v3add(seed.cm, topLocal);
+                    const topLocal = [px, 0, pz];   // in the failed story's own slab frame
+                    const top = worldPoint(slab, topLocal);
                     const d = v3sub(top, bottom), L = Math.hypot(...d);
                     const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
                         .setTranslation(...[0, 1, 2].map(i => (top[i] + bottom[i]) / 2))
@@ -3116,7 +3150,7 @@
                         .setDensity(P.STRUT_DENSITY).setCollisionGroups(0), body);
                     // Rigid-link velocity: each end moves with the body it joins.
                     const vb = supportVel(bottomFloor, e.t_detach, bottom);
-                    const vt = v3add(seed.v, v3cross(seed.w, topLocal));
+                    const vt = v3add([lvs.x, lvs.y, lvs.z], v3cross([avs.x, avs.y, avs.z], v3sub(top, slabP)));
                     body.setLinvel(rv([0, 1, 2].map(i => (vb[i] + vt[i]) / 2)), true);
                     body.setAngvel(rv(v3cross(d, v3sub(vt, vb)).map(c => c / (L * L))), true);
                     struts.push({
@@ -3125,19 +3159,89 @@
                         bottomJoint: world.createImpulseJoint(RAPIER.JointData.spherical(
                             rv(bottomLocal), { x: 0, y: -L / 2, z: 0 }), below, body, true),
                         topJoint: world.createImpulseJoint(RAPIER.JointData.spherical(
-                            { x: 0, y: L / 2, z: 0 }, rv(topLocal)), body, rec.body, true),
+                            { x: 0, y: L / 2, z: 0 }, rv(topLocal)), body, slab, true),
                     });
                 });
             }
 
-            function crushStruts(story) {
+            // A released floor carries its perimeter beams as
+            // massless contact geometry at their drawn size and place (like the
+            // block's columns): it lands on its beams, which gives the pile real
+            // depth, and they break off exactly where they hang.
+            function addBeams(body, f) {
+                if (!rubbleTier) return;
+                const [bw, bd] = model.beamSection, y = -T / 2 - bd / 2 - 0.01;
+                for (const [x, z, hx, hz] of [[0, model.b / 2, model.a / 2, bw / 2], [0, -model.b / 2, model.a / 2, bw / 2],
+                                              [model.a / 2, 0, bw / 2, model.b / 2], [-model.a / 2, 0, bw / 2, model.b / 2]]) {
+                    attach(RAPIER.ColliderDesc.cuboid(hx, bd / 2, hz).setDensity(0)
+                        .setRestitution(P.RESTITUTION).setFriction(P.FRICTION).setTranslation(x, y, z), body, f);
+                }
+            }
+
+            // When a story gives way its columns break IN PLACE:
+            // each becomes nStub stubs laid along its current axis, with the
+            // velocity the column had there, so nothing jumps. `ends[c]` is
+            // {b, tp, vb, vt} for plan corner c (bottom/top point and velocity).
+            // The stubs fill the column's own volume, trimmed clear of the two
+            // slabs and the beam at its head, which is empty space by construction.
+            const columnCrushes = [], crushedStories = new Set();
+            function columnStubs(s, t, ends) {
+                if (crushedStories.has(s)) return;
+                crushedStories.add(s);
+                columnCrushes.push(deepFreeze({ storyIndex: s, t }));
+                if (!rubbleTier) return;
+                const nStub = rubbleTier[3], [cdx, cdy] = model.strutSection[s], bd = model.beamSection[1];
+                const rand = debris.rng(`columns#${s}`);
+                // A crushed column BUCKLES: it must not stand. Straight stubs
+                // filling the column were still a column to the engine -- the
+                // floor above sat on them until they happened to topple (the
+                // roof hung 2.7 s after the rest had fallen). So the lower half
+                // pivots outward about the column's foot and the upper half
+                // about its head (KINK rad), opening a knee, and the knee is
+                // kicked outward: an inclined stub cannot carry the floor.
+                const KINK = 0.18, KINK_W = 1.6, hw = Math.max(cdx, cdy) * 1.3 / 2;
+                ends.forEach((e, c) => {
+                    if (!e) return;
+                    const axis = v3sub(e.tp, e.b), L = Math.hypot(...axis);
+                    const clear = hw * Math.sin(KINK + 0.1) + 0.02;   // a tilted end must not dip into a slab
+                    const start = T / 2 + clear, len = (L - T / 2 - bd - clear - start) / nStub;
+                    if (!(len > 0.3)) return;
+                    const u = axis.map(x => x / L), q0 = qFromUp(u), [px, pz] = model.columnPlan[c];
+                    const outH = [Math.sign(px), 0, Math.sign(pz)].map(x => x / Math.SQRT2);
+                    const wAxis = v3cross(u, outH), wn = Math.hypot(...wAxis) || 1, w = wAxis.map(x => x / wn);
+                    const kink = KINK + 0.1 * rand();
+                    for (let k = 0; k < nStub; k++) {
+                        const lower = k < nStub / 2, pivotAt = lower ? start : L - T / 2 - bd - clear;
+                        // +angle about w = u x out swings a stub's far end outward.
+                        const pivot = v3add(e.b, u.map(x => x * pivotAt)), ang = lower ? kink : -kink;
+                        const qk = [...w.map(x => x * Math.sin(ang / 2)), Math.cos(ang / 2)];
+                        const at = start + (k + 0.5) * len, p = v3add(pivot, qRot(qk, v3sub(v3add(e.b, u.map(x => x * at)), pivot)));
+                        const fr = at / L, v0 = [0, 1, 2].map(i => e.vb[i] + (e.vt[i] - e.vb[i]) * fr);
+                        const om = w.map(x => x * (lower ? KINK_W : -KINK_W));
+                        spawnPiece({ part: 'column', f: s, corner: c, p, q: qMul(qk, q0), half: [cdx * 1.3 / 2, len / 2 - 0.02, cdy * 1.3 / 2],
+                            dens: P.STRUT_DENSITY, t, key: `col#${s}#${c}#${k}`,
+                            v: v3add(v0, v3add(v3cross(om, v3sub(p, pivot)), outH.map(x => x * 0.6 * rand()))),
+                            w: v3add(om, [0, (rand() - 0.5) * P.KICK_W, 0]) });
+                    }
+                });
+            }
+            const bodyVel = (body, p) => {
+                const lv = body.linvel(), av = body.angvel();
+                return v3add([lv.x, lv.y, lv.z], v3cross([av.x, av.y, av.z], v3sub(p, tr(body))));
+            };
+
+            function crushStruts(story, t) {
+                const ends = [];
                 for (const st of struts) {
                     if (st.story !== story || !st.topJoint) continue;
+                    const b = worldPoint(st.body, [0, -st.L / 2, 0]), tp = worldPoint(st.body, [0, st.L / 2, 0]);
+                    ends[st.column] = { b, tp, vb: bodyVel(st.body, b), vt: bodyVel(st.body, tp) };
                     if (st.bottomJoint) world.removeImpulseJoint(st.bottomJoint, true);
                     world.removeImpulseJoint(st.topJoint, true);
                     st.bottomJoint = st.topJoint = null;
                     st.body.setEnabled(false);
                 }
+                if (ends.length) columnStubs(story - 1, t, ends);
             }
 
             // B3: a falling body lands on kinematic floor f (-1 = foundation).
@@ -3149,7 +3253,7 @@
             function onImpact(f, vImpact, t) {
                 if (!hit.has(f)) {
                     hit.add(f);
-                    crushStruts(f + 2);
+                    crushStruts(f + 2, t);
                     const b = supportOf(f), c = tr(b), y = f < 0 ? 0 : model.levelsM[f] + T / 2;
                     impacts.push({ t, p: [c[0], y, c[2]], kind: f < 0 ? 'ground' : 'floor', story: f + 1 });
                     for (const [sx, sz] of model.columnPlan) {
@@ -3166,10 +3270,140 @@
                 b.enableCcd(true);
                 b.setLinvel(rv(v), true);
                 b.setAngvel({ x: 0, y: v[3], z: 0 }, true);
+                // The story under floor f gave way -- its columns
+                // break where they stand (floor f above, f-1 or the ground below).
+                columnStubs(f, t, model.columnPlan.map(([px, pz]) => {
+                    const tp = worldPoint(b, [px, 0, pz]);
+                    const below = supportOf(f - 1), bp = worldPoint(below, f - 1 < 0 ? [px, T / 2, pz] : [px, 0, pz]);
+                    return { b: bp, tp, vb: supportVel(f - 1, t, bp), vt: v.slice(0, 3) };
+                }));
+                addBeams(b, f);
                 register(b, [f], t, { kind: 'cascade', story: f + 1, tEvent: t }, () => ({ local: [0, 0, 0], psi: 0 }));
                 lowestDynamic = f;
                 cascades.push(deepFreeze({ story: f + 1, t, v_impact: vImpact, F_impact: F, P_cap: cap, M_u: Mu,
                     label: 'animated cascade (post-failure kinematics, not computed)' }));
+            }
+
+            // The falling block hits something. Each still-joined
+            // story of the block is tested like a cascade: the mass it carries
+            // stopped over CONTACT_DT, F = M v / dt, against its own P_cap. A
+            // story that gives way loses its joint and its columns, so the
+            // slabs above it drop onto the one below (pancake) instead of the
+            // block surviving as one rigid box.
+            function blockImpact(block, vImpact, t, motionPrev) {
+                for (const link of block.links) {
+                    if (!link.joint) continue;
+                    const carried = block.floors.filter(g => g >= link.upper).length * model.floorMass;
+                    const F = carried * vImpact / P.CONTACT_DT, cap = model.P_cap[link.upper];
+                    if (!(F > cap)) continue;
+                    world.removeImpulseJoint(link.joint, true);
+                    link.joint = null;
+                    // A crushed story passes at most P_cap to the floors it
+                    // carried, so they keep their pre-impact motion less that
+                    // impulse. Left alone, the rigid joint's one-step stop
+                    // turned the roof's 7.4 m/s fall into 6.9 m/s sideways.
+                    for (const g of block.floors.filter(g2 => g2 >= link.upper)) {
+                        const m = motionPrev.get(floorBody[g].handle);
+                        if (!m) continue;
+                        floorBody[g].setLinvel({ x: m.lin.x, y: m.lin.y + cap * DT / carried, z: m.lin.z }, true);
+                        floorBody[g].setAngvel(m.ang, true);
+                    }
+                    for (const c of link.cols) { colliderFloor.delete(c.handle); world.removeCollider(c, true); }
+                    link.cols = [];
+                    const lo = floorBody[link.lower], hi = floorBody[link.upper];
+                    columnStubs(link.upper, t, model.columnPlan.map(([px, pz]) => {
+                        const bp = worldPoint(lo, [px, 0, pz]), tp = worldPoint(hi, [px, 0, pz]);
+                        return { b: bp, tp, vb: bodyVel(lo, bp), vt: bodyVel(hi, tp) };
+                    }));
+                    const b = hi;
+                    crushes.push(deepFreeze({ story: link.upper + 1, t, v_impact: vImpact, F_impact: F, P_cap: cap, M_u: carried,
+                        label: 'animated crush of the falling block (post-failure kinematics, not computed)' }));
+                    impacts.push({ t, p: worldPoint(b, [0, -link.h / 2, 0]), kind: 'crush', story: link.upper + 1 });
+                    for (const [px, pz] of model.columnPlan) {
+                        spawnDebris(worldPoint(b, [px, -link.h / 2, pz]), [0, 0, 0], t, `crush#${link.upper + 1}#${px > 0}#${pz > 0}`, 5);
+                    }
+                }
+            }
+
+            // Rubble: a released floor that lands harder than
+            // FRACTURE_V shatters. Its slab becomes an irregular grid of
+            // chunks at the same pose and velocity field (same density, so
+            // they carry exactly the floor's mass) and its perimeter beams break
+            // off where they hang. (Columns broke in place earlier, when their
+            // story gave way: columnStubs.) Beam/column pieces add
+            // STRUT_DENSITY mass, like debris. The one
+            // PRNG makes the break pattern deterministic per record and floor.
+            const rubbleTier = RUBBLE_TIERS[debris?.rubble ?? 0];
+            const fractures = [], fractured = new Set();
+            const rubbleBodies = new Set();
+            function spawnPiece({ part, f, corner = null, p, q, half, dens, v, w, t, key }) {
+                const b = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(...p).setRotation(rq(q)).setCcdEnabled(true));
+                world.createCollider(RAPIER.ColliderDesc.cuboid(...half).setDensity(dens)
+                    .setRestitution(P.RESTITUTION).setFriction(P.FRICTION), b);
+                b.setLinvel(rv(v), true);
+                b.setAngvel(rv(w), true);
+                rubbleBodies.add(b.handle);
+                const r = register(b, [], t, { kind: 'rubble', part, story: f + 1, key, tEvent: t });
+                r.half = half; r.floor = f; r.corner = corner;
+            }
+            function fracture(f, t, vImpact) {
+                if (!rubbleTier || fractured.has(f) || kinematic.has(f)) return;
+                const b = floorBody[f], rec = bodies.find(r => r.body === b);
+                if (!rec) return;
+                fractured.add(f);
+                const p0 = tr(b), q0 = rot(b), lv = b.linvel(), av = b.angvel();
+                const vAt = pt => v3add([lv.x, lv.y, lv.z], v3cross([av.x, av.y, av.z], v3sub(pt, p0)));
+                const [nx, nz, nBeam, nStub] = rubbleTier;
+                const rand = debris.rng(`rubble#${f}`);
+                const kick = (dir, s = 1) => [dir[0] * P.KICK_V * s * rand(), 0.4 * P.KICK_V * rand(), dir[2] * P.KICK_V * s * rand()];
+                const spin = () => [0, 1, 2].map(() => (rand() - 0.5) * 2 * P.KICK_W);
+                const cuts = n => { const c = [0]; for (let i = 1; i < n; i++) c.push((i + (rand() - 0.5) * 0.6) / n); c.push(1); return c; };
+                const a = model.a, bb = model.b, xs = cuts(nx), zs = cuts(nz), gap = 0.01;
+                // Placed BEFORE the slab leaves the world: the query sees the
+                // world as the last step left it (the slab itself excluded).
+                const pieces = [];
+                // Slab chunks exactly tile the slab, so they cannot overlap each other.
+                for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) {
+                    const x0 = -a / 2 + xs[i] * a, x1 = -a / 2 + xs[i + 1] * a, z0 = -bb / 2 + zs[j] * bb, z1 = -bb / 2 + zs[j + 1] * bb;
+                    const local = [(x0 + x1) / 2, 0, (z0 + z1) / 2], half = [(x1 - x0) / 2 - gap, T / 2, (z1 - z0) / 2 - gap];
+                    const pw = worldPoint(b, local), out = qRot(q0, [Math.sign(local[0]) || 1, 0, Math.sign(local[2]) || 1]);
+                    pieces.push({ part: 'slab', f, p: pw, q: q0, half, dens: density, v: v3add(vAt(pw), kick(out)), w: spin(), t, key: `slab#${f}#${i}#${j}` });
+                }
+                // Perimeter beams break off where they hang: in the space of the
+                // floor's own beam colliders (addBeams), so nothing jumps and
+                // nothing overlaps. Cut into nBeam segments along each edge.
+                const [bw, bd] = model.beamSection, by = -T / 2 - bd / 2 - 0.01;
+                const edges = [[0, bb / 2, a, 'x'], [0, -bb / 2, a, 'x'], [a / 2, 0, bb, 'z'], [-a / 2, 0, bb, 'z']];
+                edges.forEach(([ex, ez, len, along], k) => {
+                    for (let s = 0; s < nBeam; s++) {
+                        const segL = len / nBeam - 0.04, off = -len / 2 + (s + 0.5) * len / nBeam;
+                        const local = along === 'x' ? [off, by, ez] : [ex, by, off];
+                        const half = along === 'x' ? [segL / 2, bd / 2, bw / 2] : [bw / 2, bd / 2, segL / 2];
+                        const pw = worldPoint(b, local), out = qRot(q0, [Math.sign(ex), 0, Math.sign(ez)]);
+                        pieces.push({ part: 'beam', f, p: pw, q: q0, half, dens: P.STRUT_DENSITY, v: v3add(vAt(pw), kick(out, 0.5)), w: spin(), t, key: `beam#${f}#${k}#${s}` });
+                    }
+                });
+                const debrisAt = model.columnPlan.map(([px, pz]) => worldPoint(b, [px * 0.8, T, pz * 0.8]));
+
+                // Everything holding this slab goes with it.
+                const B = blockOf.get(f);
+                if (B) for (const link of B.links) {
+                    if (!link.joint || (link.lower !== f && link.upper !== f)) continue;
+                    world.removeImpulseJoint(link.joint, true);
+                    link.joint = null;
+                    for (const c of link.cols) { colliderFloor.delete(c.handle); world.removeCollider(c, true); }
+                    link.cols = [];
+                }
+                for (const story of new Set(struts.filter(st => st.topJoint && (st.story - 1 === f || st.bottomFloor === f)).map(st => st.story))) {
+                    crushStruts(story, t);
+                }
+                for (let i = 0; i < b.numColliders(); i++) colliderFloor.delete(b.collider(i).handle);
+                rec.dead = true;          // holds its last pose from here on
+                world.removeRigidBody(b);
+                fractures.push(deepFreeze({ story: f + 1, floor: f, t, v_impact: vImpact }));
+                impacts.push({ t, p: p0, kind: 'fracture', story: f + 1 });
+                for (const piece of pieces) spawnPiece(piece);
+                debrisAt.forEach((p, i) => spawnDebris(p, [0, 0, 0], t, `fracture#${f}#${i}`, 4));
             }
 
             let nextEvent = 0;
@@ -3197,7 +3431,11 @@
                             * Math.min(1, Math.atan2(sn, u[1]) / 0.02);
                         st.body.addTorque({ x: -Mres * u[2] / sn, y: 0, z: Mres * u[0] / sn }, true);
                     }
-                    const vPrev = new Map(bodies.map(r => [r.body.handle, r.body.linvel().y]));
+                    const vPrev = new Map(bodies.filter(r => !r.dead).map(r => [r.body.handle, r.body.linvel().y]));
+                    // Full pre-step motion, for undoing a joint's
+                    // impact impulse on floors whose story then crushed.
+                    const motionPrev = new Map(bodies.filter(r => !r.dead && r.source.kind === 'computed')
+                        .map(r => [r.body.handle, { lin: r.body.linvel(), ang: r.body.angvel() }]));
                     world.step(queue);
                     k++;
                     // Collected, then handled: the engine swallows exceptions
@@ -3205,8 +3443,42 @@
                     // edited mid-drain.
                     const started = [];
                     queue.drainCollisionEvents((h1, h2, on) => { if (on) started.push([h1, h2]); });
+                    // Rubble: a released floor landing hard on the
+                    // ground, the foundation, another floor or rubble shatters
+                    // (after the crush/cascade tests below have had their turn).
+                    const toFracture = [];
+                    for (const [h1, h2] of started) {
+                        // Rubble landing on a still-standing floor is the same
+                        // impact the whole floor would have been: cascade test.
+                        for (const [hr, hk] of [[h1, h2], [h2, h1]]) {
+                            const rb = world.getCollider(hr)?.parent(), k2 = colliderFloor.get(hk);
+                            if (!rb || !rubbleBodies.has(rb.handle) || k2 === undefined || !(k2 < 0 || kinematic.has(k2))) continue;
+                            onImpact(k2, Math.abs(vPrev.get(rb.handle) ?? 0), t1);
+                        }
+                        for (const [hs, ho] of [[h1, h2], [h2, h1]]) {
+                            const f = colliderFloor.get(hs);
+                            if (f === undefined || f < 0 || kinematic.has(f) || fractured.has(f)) continue;
+                            const other = world.getCollider(ho)?.parent();
+                            const o = colliderFloor.get(ho);
+                            if (!(ho === groundHandle || o !== undefined || (other && rubbleBodies.has(other.handle)))) continue;
+                            if (o !== undefined && o >= 0 && blockOf.get(o) === blockOf.get(f) && blockOf.get(f)?.links.some(l => l.joint && [l.lower, l.upper].includes(o) && [l.lower, l.upper].includes(f))) continue;
+                            const vo = other ? (vPrev.get(other.handle) ?? 0) : 0;
+                            const v = Math.abs((vPrev.get(floorBody[f].handle) ?? 0) - vo);
+                            if (v > P.FRACTURE_V) toFracture.push([f, v]);
+                        }
+                    }
                     for (const [h1, h2] of started) {
                         const a = colliderFloor.get(h1), b = colliderFloor.get(h2);
+                        // A block floor touching the ground or any
+                        // floor outside its own block is an impact on the block.
+                        for (const [f, h] of [[a, h2], [b, h1]]) {
+                            const B = f === undefined ? null : blockOf.get(f);
+                            if (!B) continue;
+                            const o = colliderFloor.get(h), onGround = h === groundHandle;
+                            if (!onGround && (o === undefined || blockOf.get(o) === B)) continue;
+                            const vo = onGround || o < 0 || kinematic.has(o) ? 0 : (vPrev.get(floorBody[o].handle) ?? 0);
+                            blockImpact(B, Math.abs((vPrev.get(floorBody[f].handle) ?? 0) - vo), t1, motionPrev);
+                        }
                         if (a === undefined || b === undefined) continue;
                         for (const [dyn, sup] of [[a, b], [b, a]]) {
                             if (dyn < 0 || kinematic.has(dyn) || !(sup < 0 || kinematic.has(sup))) continue;
@@ -3214,6 +3486,7 @@
                             onImpact(sup, Math.abs(vy - trackVel(track, sup, t1)[1]), t1);
                         }
                     }
+                    for (const [f, v] of toFracture) fracture(f, t1, v);
                     releaseDue(t1);
                     for (const r of bodies) write(r);
                 }
@@ -3221,7 +3494,7 @@
             }
 
             return {
-                t0, dt: DT, K, bodies, struts, cascades, impacts, world,
+                t0, dt: DT, K, bodies, struts, cascades, crushes, fractures, columnCrushes, impacts, world,
                 step, get done() { return k >= K; }, get progress() { return k / K; },
             };
         }
@@ -3262,9 +3535,15 @@
         // is left, up to its own cap.
         function collapseBudgetPlan(model, events, nFurniture, budget) {
             const structural = model.N + 4 * events.length;
-            const furniture = structural + nFurniture <= budget.bodies;
-            const used = structural + (furniture ? nFurniture : 0);
-            return { structural, furniture, debrisMax: Math.max(0, Math.min(budget.debris, budget.bodies - used)), dustMax: budget.dust };
+            // Rubble (pieces per fractured floor) comes before
+            // furniture -- it is the collapse's shape. Largest tier that keeps
+            // structure + rubble inside 80% of the body budget, else none.
+            const perFloor = tier => (tier ? RUBBLE_TIERS[tier][0] * RUBBLE_TIERS[tier][1] + 4 * RUBBLE_TIERS[tier][2] + 4 * RUBBLE_TIERS[tier][3] : 0);
+            const rubbleTier = [3, 2, 1, 0].find(tier => structural + perFloor(tier) * model.N <= 0.8 * budget.bodies);
+            const rubble = perFloor(rubbleTier) * model.N;
+            const furniture = structural + rubble + nFurniture <= budget.bodies;
+            const used = structural + rubble + (furniture ? nFurniture : 0);
+            return { structural, rubbleTier, rubble, furniture, debrisMax: Math.max(0, Math.min(budget.debris, budget.bodies - used)), dustMax: budget.dust };
         }
 
         // Physics height (metres, no render gap) -> scene height, piecewise
@@ -3465,6 +3744,7 @@
                         baseColor: colBaseColor.clone().multiplyScalar(tintFactor),
                         cornerX: cx,
                         cornerZ: cz,
+                        rest: heights[f],   // Drawn length, for the torn-column test
                         thicknessX: frame.columnDepthXPerStory
                             ? frame.columnDepthXPerStory[f] * SCENE_UNITS_PER_METRE * FRAME_RENDER_EXAGGERATION : colThickX,
                         thicknessZ: frame.columnDepthYPerStory
@@ -3611,6 +3891,18 @@
                 // pre-spec-12 one exactly.
                 const twist = (lb.yaw + lt.yaw) / 2;
                 c.b = b; c.t = t; // this frame's end points, reused by the hinge/crack markers
+                // In the collapse, a column whose ends separate past
+                // 1.25x its length has been torn off (the engine removed its
+                // joint or collider); drawing it would stretch a bar across the
+                // gap. Hidden rather than stretched.
+                c.torn = straight && Math.hypot(t.x - b.x, t.y - b.y, t.z - b.z) > 1.25 * c.rest;
+                // Once its story gave way, a column is its stubs now
+                // (spawned along this same axis at that instant).
+                if (collapseAnim?.crushT && animTime >= collapseAnim.crushT[c.storyIndex]) c.torn = true;
+                if (c.torn) {
+                    for (let k = 0; k < COLUMN_SEGMENTS; k++, i++) columnInstances.setMatrixAt(i, _zeroMatrix);
+                    continue;
+                }
                 for (let k = 0; k < COLUMN_SEGMENTS; k++, i++) {
                     const s = straight ? straightSegment(b, t, k, COLUMN_SEGMENTS) : segmentTransform(b, t, k, COLUMN_SEGMENTS);
                     _segPos.set(s.px, s.py, s.pz);
@@ -3678,6 +3970,7 @@
                 const crack = v.cracks[s][j];
                 const thick = Math.max(c.thicknessX, c.thicknessZ);
                 for (let e = 0; e < 2; e++) {
+                    if (c.torn) { hingeInstances.setMatrixAt(ci * 2 + e, _zeroMatrix); crackInstances.setMatrixAt(ci * 2 + e, _zeroMatrix); continue; }
                     // Both markers sit just inside the column end, on the bent shape.
                     const p = columnPoint(c.b, c.t, e ? 0.94 : 0.06);
                     if (hingeOn(code)) {
@@ -5113,6 +5406,10 @@
         // ---8<--- CINEMATIC-HELPERS-BEGIN
         const SHAKE_CUTOFF_HZ = 8;
         const SHAKE_MAX_OFFSET = 0.06;
+        // a_ref of spec 16's shake = A.LPF(a_g)/a_ref: filtered ground
+        // acceleration that reaches the full offset (0.3 g, strong shaking --
+        // assumed, tunable). Weaker motion shakes proportionally less.
+        const SHAKE_REF_ACCEL = 0.3 * 9.81;
         function shakePole(dt, cutoffHz = SHAKE_CUTOFF_HZ) {
             if (!(dt > 0) || !(cutoffHz > 0) || cutoffHz * dt >= 0.5) return 0;
             const q = 2 - Math.cos(2 * Math.PI * cutoffHz * dt);
@@ -5138,7 +5435,9 @@
                 x[i] -= mx; z[i] -= mz;
                 peak = Math.max(peak, Math.hypot(x[i], z[i]));
             }
-            return { x, z, dt, gain: peak > 0 ? SHAKE_MAX_OFFSET / peak : 0 };
+            // Capped gain, not per-record normalisation: normalising to the
+            // record's own peak made every record and magnitude shake alike.
+            return { x, z, dt, gain: SHAKE_MAX_OFFSET / Math.max(peak, SHAKE_REF_ACCEL) };
         }
         function shakeAtTime(trace, t, enabled, reducedMotion) {
             if (!trace || !enabled || reducedMotion) return [0, 0];
@@ -5150,6 +5449,15 @@
         const CINEMATIC_LEAD_SECONDS = 1.5;
         function firstCinematicOnset(collapse) {
             if (!collapse?.converged) return null;
+            // The visible failure is the first detachment, which can come
+            // tens of seconds after the t_collapse criterion (demo: 35.5 s
+            // vs 80.5 s); anchoring there framed and slowed the wrong moment.
+            const detach = (collapse.detachment_events || [])
+                .reduce((a, e) => (!a || e.t_detach < a.t_detach ? e : a), null);
+            if (detach) {
+                return { time: detach.t_detach, story: detach.story, floorIndex: detach.story - 1,
+                    leadTime: Math.max(0, detach.t_detach - CINEMATIC_LEAD_SECONDS) };
+            }
             let best = null;
             for (const axis of ['X', 'Y']) {
                 (collapse.axes?.[axis]?.t_collapse || []).forEach((time, floorIndex) => {
@@ -5569,7 +5877,10 @@
                         `Invalid building parameters: ${info.detail || 'request rejected'}.`);
                     return;
                 }
-                if (!res.ok) throw new Error(`/compute failed (${res.status})`);
+                if (!res.ok) {
+                    const info = await res.json().catch(() => ({}));
+                    throw new Error(info.detail || info.error || `/compute failed (${res.status})`);
+                }
                 const buf = await res.arrayBuffer();
 
                 const view = new DataView(buf);
@@ -5712,7 +6023,10 @@
                 // hide it here, so it never gets stuck on indefinitely.
                 if (err.name === 'AbortError') return;
                 console.error('❌ Live recompute failed:', err);
-                recomputeOverlay.classList.remove('is-active');
+                // Visible, not console-only: a dropped connection used to end
+                // a minutes-long collapse run with the overlay silently gone.
+                revertOnDismiss = true;
+                showRecomputeError(`${nonlinear ? 'Collapse analysis' : 'Recompute'} failed: ${err.message}. The previous result is retained.`);
             } finally {
                 // An aborted request must not stop the NEWER request's counter.
                 if (!signal.aborted) {
@@ -6085,19 +6399,51 @@
         // B5 meshes: ONE InstancedMesh each for debris and dust (two draw
         // calls, flat in N). Dust uses normal blending with fog on -- additive
         // particles ignore fog and glow through it at zoom-out (spec 4's bug).
-        function makeCollapseFx(nDebris, nDust) {
+        function makeCollapseFx(nDebris, nDust, rubbleRecs = []) {
             const debrisMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
                 new THREE.MeshStandardMaterial({ color: 0x8d8680, roughness: 0.95, metalness: 0 }), Math.max(1, nDebris));
             const dustMesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1),
                 new THREE.MeshBasicMaterial({ color: 0x9c9285, map: dustSprite(), transparent: true, opacity: 0.35, depthWrite: false, fog: true }),
                 Math.max(1, nDust));
-            for (const m of [debrisMesh, dustMesh]) {
+            // Every rubble piece in one instanced draw call, each
+            // tinted like the member it broke off (slab, beam or column of that
+            // floor), darkened a little so broken concrete reads as rubble.
+            const rubbleMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+                new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, metalness: 0.02 }), Math.max(1, rubbleRecs.length));
+            rubbleMesh.castShadow = rubbleMesh.receiveShadow = true;
+            const tint = new THREE.Color();
+            rubbleRecs.forEach((rec, i) => rubbleMesh.setColorAt(i, memberColourAt(rec, tint)));
+            if (rubbleMesh.instanceColor) rubbleMesh.instanceColor.needsUpdate = true;
+            for (const m of [debrisMesh, dustMesh, rubbleMesh]) {
                 m.frustumCulled = false;
                 for (let i = 0; i < m.count; i++) m.setMatrixAt(i, _zeroMatrix);
                 scene.add(m);
                 sceneObjects.push(m);
             }
-            return { debrisMesh, dustMesh };
+            return { debrisMesh, dustMesh, rubbleMesh };
+        }
+        // The colour a member was DRAWN in at the instant it broke,
+        // by the same rule updateDamageVisuals() uses (drift ramp per story,
+        // damage shade per column), so a piece does not change colour as it
+        // replaces the member. Slabs are never damage-tinted.
+        function memberColourAt(rec, out) {
+            const f = rec.floor, part = rec.source.part;
+            if (part === 'slab') return out.copy(buildingGroups[f]?.children[0]?.material.color ?? out.set(0x8d8680));
+            const [px, pz] = rec.corner == null ? [1, 1] : [[1, 1], [-1, 1], [-1, -1], [1, -1]][rec.corner];
+            const col = columnDefs.find(c => c.storyIndex === f && Math.sign(c.cornerX) === px && Math.sign(c.cornerZ) === pz)
+                ?? columnDefs.find(c => c.storyIndex === f);
+            const v = damageView;
+            if (!v) return out.copy(part === 'beam' ? (beamMats[f]?.userData.base ?? out.set(0x8d8680)) : (col?.baseColor ?? out.set(0x8d8680)));
+            const dt = (timeData[1] - timeData[0]) || 0.01;
+            const idx = Math.min(Math.max(Math.round(rec.tAct / dt), 0), totalFrames - 1), j = decimatedIndex(idx, v.q, v.n);
+            let d = 0;
+            for (let ax = 0; ax < v.nAx; ax++) d = Math.max(d, Math.abs(v.drift[(ax * v.N + f) * v.full + idx]));
+            const [r, g, b] = driftRampColor(d / v.heights[f], v.limits);
+            if (part === 'beam') return out.setRGB(r, g, b);
+            let code = 0;
+            for (let ax = 0; ax < v.nAx; ax++) code = Math.max(code, v.codes[((ax * v.N + f) * 4 + (col?.cornerIndex ?? 0)) * v.n + j]);
+            const shade = DAMAGE_SHADE[code];
+            return out.setRGB(r * shade, g * shade, b * shade);
         }
         // A soft round puff, drawn procedurally once (no texture assets).
         let _dustTex = null;
@@ -6125,6 +6471,30 @@
                 debrisMesh.setMatrixAt(i, _fxMat.compose(_fxPos, _fxQuat, _fxScale));
             });
             debrisMesh.instanceMatrix.needsUpdate = true;
+            // A rubble piece is drawn as a RIGID box (its plan-scaled
+            // size, rotated as the engine has it) rather than through S.R.S^-1:
+            // under the 1/3 plan scale that map drew a chunk lying on edge 3x
+            // taller than it is, so the heap read as a row of upright panels.
+            // Its drawn bottom is pinned to the engine's lowest point, so a
+            // piece resting on the ground or the pile is still drawn resting.
+            const { rubbleMesh } = A.fx;
+            A.rubbleRecs.forEach((rec, i) => {
+                const smp = sampleBody(A.sim, rec, animTime);
+                if (!smp) { rubbleMesh.setMatrixAt(i, _zeroMatrix); return; }
+                const [x, y, z, w] = smp.q, h = rec.half, hs = [h[0] * u, h[1], h[2] * u];
+                const r = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                    [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                    [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]];
+                const extent = hv => Math.abs(r[1][0]) * hv[0] + Math.abs(r[1][1]) * hv[1] + Math.abs(r[1][2]) * hv[2];
+                const cy = sceneHeight(A.model, smp.p[1] - extent(h)) + extent(hs);
+                const L = (i2, j) => r[i2][j] * 2 * hs[j];
+                _fxMat.set(L(0, 0), L(0, 1), L(0, 2), smp.p[0] * u,
+                    L(1, 0), L(1, 1), L(1, 2), cy,
+                    L(2, 0), L(2, 1), L(2, 2), smp.p[2] * u,
+                    0, 0, 0, 1);
+                rubbleMesh.setMatrixAt(i, _fxMat);
+            });
+            rubbleMesh.instanceMatrix.needsUpdate = true;
             for (let i = 0; i < A.dust.length / 8; i++) {
                 const d = dustAt(A.dust, i, animTime);
                 if (!d || d[3] <= 0) { dustMesh.setMatrixAt(i, _zeroMatrix); continue; }
@@ -6174,14 +6544,14 @@
             collapseBuildToken++;   // abandons an in-flight build
             collapseBannerDismissed = false;
             if (collapseAnim?.fx) {
-                for (const m of [collapseAnim.fx.debrisMesh, collapseAnim.fx.dustMesh]) {
+                for (const m of [collapseAnim.fx.debrisMesh, collapseAnim.fx.dustMesh, collapseAnim.fx.rubbleMesh].filter(Boolean)) {
                     scene.remove(m);
                     m.geometry.dispose();
                     m.material.dispose();
                 }
             }
             collapseAnim = null;
-            for (const g of buildingGroups) g.matrixAutoUpdate = true;
+            for (const g of buildingGroups) { g.matrixAutoUpdate = true; for (const child of g.children) child.visible = true; }
             for (const it of furnitureItems) it.mesh.matrixAutoUpdate = true;
             collapseBanner.classList.remove('is-shown');
             collapseBanner.replaceChildren();
@@ -6222,7 +6592,7 @@
             const plan = collapseBudgetPlan(model, events, furnitureItems.length, budget);
             const furniture = plan.furniture ? furnitureForSim() : null;
             const sim = buildCollapseSim(RAPIER, model, events, track, furniture,
-                { max: plan.debrisMax, rng: key => mulberry32(hashSeed(`${currentRecordForCollapse}#${key}`)) });
+                { max: plan.debrisMax, rubble: plan.rubbleTier, rng: key => mulberry32(hashSeed(`${currentRecordForCollapse}#${key}`)) });
             // Chunked so the page never freezes; the result does not depend
             // on the chunk size (check 3), so yielding by timer is safe.
             while (!sim.step(200)) {
@@ -6255,10 +6625,18 @@
             const debrisRecs = sim.bodies.filter(r => r.source.kind === 'debris');
             const perPuff = Math.min(160, Math.floor(plan.dustMax / Math.max(1, sim.impacts.length)));
             const dust = dustParams(sim.impacts, perPuff, key => mulberry32(hashSeed(`${currentRecordForCollapse}#${key}`)));
-            const fx = makeCollapseFx(debrisRecs.length, dust.length / 8);
+            // Fragments, and when each floor shattered (its own
+            // drawn slab/beams/columns give way to them from then on).
+            const rubbleRecs = sim.bodies.filter(r => r.source.kind === 'rubble');
+            const fractureT = new Array(model.N).fill(Infinity);
+            for (const fr of sim.fractures) fractureT[fr.floor] = fr.t;
+            const crushT = new Array(model.N).fill(Infinity);   // a story's columns broke into stubs
+            for (const cc of sim.columnCrushes) crushT[cc.storyIndex] = cc.t;
+            const fx = makeCollapseFx(debrisRecs.length, dust.length / 8, rubbleRecs);
             collapseAnim = { sim, events, floors, items, coarsened: !furniture && furnitureItems.length > 0,
                              tFirst: sim.bodies[0].tAct, cap: !!header.collapse.cap_reached,
-                             model, debrisRecs, dust, fx };
+                             model, debrisRecs, dust, fx, rubbleRecs, fractureT, crushT,
+                             releasedItems: new Set(items.map(x => x.item)) };
             renderCollapseBanner();
             recomputeElapsed.textContent = '';
             recomputeOverlay.classList.remove('is-active');
@@ -6295,6 +6673,18 @@
                 item.mesh.matrix.copy(g.matrix).invert().multiply(_itemMat).multiply(_collapseBase[item.floorIndex]).multiply(local);
                 item.mesh.matrixAutoUpdate = false;
             }
+            // Once a floor shatters, its own slab/beams/roof give
+            // way to the rubble pieces (a pure function of animTime, so a
+            // backward scrub brings them back). Furniture still riding it
+            // (coarsened) goes too; released furniture is its own body.
+            buildingGroups.forEach((g, f) => {
+                const gone = animTime >= A.fractureT[f];
+                for (const child of g.children) {
+                    const item = furnitureItems.find(it => it.mesh === child);
+                    if (item) { if (!A.releasedItems.has(item)) child.visible = !gone; }
+                    else child.visible = !gone;
+                }
+            });
             updateCollapseFx(A);
             collapseBanner.classList.toggle('is-shown', !collapseBannerDismissed && animTime >= A.tFirst - A.sim.dt / 2);
         }
@@ -6312,13 +6702,19 @@
             };
             const rows = [
                 line('Post-failure rigid-body model with assumed contact parameters — not a solution of the structural equations of motion.', true),
-                line(`Assumed: restitution ${P.RESTITUTION} · friction ${P.FRICTION} · impact duration ${P.CONTACT_DT} s · hinge moment decay τ ${P.HINGE_TAU} s · strut density ${P.STRUT_DENSITY} kg/m³ · furniture density ${P.FURNITURE_DENSITY} kg/m³. Drawn at true scale.`),
+                line(`Assumed: restitution ${P.RESTITUTION} · friction ${P.FRICTION} · impact duration ${P.CONTACT_DT} s · hinge moment decay τ ${P.HINGE_TAU} s · strut density ${P.STRUT_DENSITY} kg/m³ · furniture density ${P.FURNITURE_DENSITY} kg/m³. Motion drawn at true scale; plan dimensions are drawn at 1/${Math.round(1 / SCENE_UNITS_PER_METRE)} of height scale, so a body that tips over is drawn stretched vertically.`),
             ];
             for (const e of A.events) {
                 rows.push(line(`Computed: story ${e.story} detached at ${e.t_detach.toFixed(2)} s (axis ${e.axis}, toward ${e.direction < 0 ? '−' : '+'}${e.axis.toLowerCase()}).`));
             }
             for (const c of A.sim.cascades) {
                 rows.push(line(`Animated cascade, not computed: story ${c.story} at ${c.t.toFixed(2)} s (impact ${c.F_impact.toExponential(1)} N > P_cap ${c.P_cap.toExponential(1)} N).`));
+            }
+            if (A.sim.fractures.length) {
+                rows.push(line(`Rubble (animation, not computed): ${A.sim.fractures.map(fr => `floor ${fr.story} shattered at ${fr.t.toFixed(2)} s`).join(', ')} -- landing faster than ${P.FRACTURE_V} m/s (assumed); ${A.rubbleRecs.length} fragments.`));
+            }
+            for (const c of A.sim.crushes) {
+                rows.push(line(`Animated crush of the falling block, not computed: story ${c.story} at ${c.t.toFixed(2)} s (impact ${c.F_impact.toExponential(1)} N > P_cap ${c.P_cap.toExponential(1)} N).`));
             }
             rows.push(line(`Debris (${A.debrisRecs.length}) and dust are cosmetic, spawned only at computed failures and impacts.`));
             if (A.coarsened) rows.push(line('Over the body budget: furniture rides its floor rigidly.'));
@@ -7257,6 +7653,23 @@
                 showToast(`Demo record ${d.record} is not available`);
                 return;
             }
+            // The verified case assumes every other input at its default; a
+            // leftover slider, applied code design or torsion made the "demo"
+            // an unverified building that need not detach.
+            if (designModeSelect.value !== 'manual') {
+                designModeSelect.value = 'manual';
+                designModeSelect.dispatchEvent(new Event('change'));
+            }
+            BUILDING_SLIDERS.forEach(([el, label, fmt]) => { el.value = el.defaultValue; label.textContent = fmt(el.value); });
+            softGroundStoryToggle.checked = false;
+            softGroundStoryLabel.textContent = 'off';
+            torsionToggle.checked = false;
+            torsionLabel.textContent = 'off';
+            for (const [el, label] of [[epicenterDistanceSlider, epicenterDistanceLabel], [epicenterDepthSlider, epicenterDepthLabel]]) {
+                el.value = el.defaultValue;
+                label.textContent = parseFloat(el.value).toFixed(0) + ' km';
+            }
+            updateEpicenterMap();
             storiesSlider.value = d.stories;
             storiesLabel.textContent = String(d.stories);
             rebuildWeakStoryOptions();
