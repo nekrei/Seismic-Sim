@@ -316,7 +316,13 @@
                 <h3 class="group-title">Motion</h3>
                 <div class="toggle-row"><label for="cameraShakeToggle">Camera shake</label><input type="checkbox" class="switch" id="cameraShakeToggle" checked /></div>
                 <div class="toggle-row"><label for="cinematicCameraToggle">Cinematic camera</label><input type="checkbox" class="switch" id="cinematicCameraToggle" checked /></div>
-                <div class="toggle-row" id="slowMotionRow" hidden><label for="slowMotionToggle">Slow motion</label><input type="checkbox" class="switch" id="slowMotionToggle" checked /></div>
+                <div class="toggle-row" id="slowMotionRow" hidden><label for="slowMotionSelect">Slow motion</label>
+                    <select id="slowMotionSelect">
+                        <option value="1">Real time</option>
+                        <option value="0.5" selected>Slow (0.5×)</option>
+                        <option value="0.3">Slower (0.3×)</option>
+                        <option value="0.15">Very slow (0.15×)</option>
+                    </select></div>
                 <button id="replayCollapseBtn" class="btn wide" type="button" hidden>Replay collapse</button>
             </section>
         </aside>
@@ -499,7 +505,7 @@
                 <p class="experiment-context" id="experimentContext">Uses the plot floor and axis from Charts.</p>
                 <section class="signals-action experiment-pane" data-experiment-pane="superposition">
                     <header><strong>Superposition at a and 2a</strong>
-                        <span class="action-group"><label class="sr-only" for="linearityMode">Superposition mode</label><select id="linearityMode"><option value="elastic">Elastic</option><option value="nonlinear">Nonlinear</option></select> <button id="linearityRunBtn" type="button">Run test</button></span></header>
+                        <span class="action-group"><label class="sr-only" for="linearityMode">Superposition mode</label><select id="linearityMode"><option value="elastic">Elastic</option><option value="nonlinear">Nonlinear</option></select> <button id="linearityRunBtn" type="button">Run test</button> <button id="linearityCancelBtn" type="button" disabled>Cancel</button></span></header>
                     <canvas id="linearityCanvas" aria-label="Superposition comparison"></canvas>
                     <p id="linearityNote">Run at the current intensity, then twice that intensity.</p>
                 </section>
@@ -631,15 +637,15 @@
         const cinematicReenableBtn = document.getElementById('cinematicReenableBtn');
         const cameraShakeToggle = document.getElementById('cameraShakeToggle');
         const cinematicCameraToggle = document.getElementById('cinematicCameraToggle');
-        const slowMotionToggle = document.getElementById('slowMotionToggle');
+        const slowMotionSelect = document.getElementById('slowMotionSelect');
         const slowMotionRow = document.getElementById('slowMotionRow');
         const replayCollapseBtn = document.getElementById('replayCollapseBtn');
         const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
         function syncCinematicMotionPreference() {
             cameraShakeToggle.disabled = reducedMotion.matches;
-            slowMotionToggle.disabled = reducedMotion.matches;
+            slowMotionSelect.disabled = reducedMotion.matches;
             cameraShakeToggle.title = reducedMotion.matches ? 'Camera shake is off under reduced motion' : '';
-            slowMotionToggle.title = reducedMotion.matches ? 'Slow motion is off under reduced motion' : '';
+            slowMotionSelect.title = reducedMotion.matches ? 'Slow motion is off under reduced motion' : '';
         }
         reducedMotion.addEventListener('change', syncCinematicMotionPreference);
         syncCinematicMotionPreference();
@@ -715,6 +721,7 @@
         const linearityMode = document.getElementById('linearityMode');
         const linearityCanvas = document.getElementById('linearityCanvas');
         const linearityNote = document.getElementById('linearityNote');
+        const linearityCancelBtn = document.getElementById('linearityCancelBtn');
         const sweepRunBtn = document.getElementById('sweepRunBtn');
         const sweepCancelBtn = document.getElementById('sweepCancelBtn');
         const sweepCanvas = document.getElementById('sweepCanvas');
@@ -4741,18 +4748,18 @@
             return { position: target + (change + temp) * decay,
                      velocity: (velocity - omega * temp) * decay };
         }
-        const SLOWMO_MIN_RATE = 0.15;
         const SLOWMO_RAMP_IN = 0.8;
         const SLOWMO_RAMP_OUT = 1.2;
-        function slowMotionRate(t, onsetTime, enabled, reducedMotion) {
-            if (!enabled || reducedMotion || !Number.isFinite(onsetTime)) return 1;
+        // minRate: the viewer's chosen slow-motion rate (1 = real time).
+        function slowMotionRate(t, onsetTime, minRate, reducedMotion) {
+            if (!(minRate < 1) || reducedMotion || !Number.isFinite(onsetTime)) return 1;
             const begin = Math.max(0, onsetTime - 1);
             const full = begin + SLOWMO_RAMP_IN;
             const end = onsetTime + 3;
             if (t < begin || t >= end + SLOWMO_RAMP_OUT) return 1;
-            if (t < full) return 1 - (1 - SLOWMO_MIN_RATE) * easeInOutCubic((t - begin) / SLOWMO_RAMP_IN);
-            if (t < end) return SLOWMO_MIN_RATE;
-            return SLOWMO_MIN_RATE + (1 - SLOWMO_MIN_RATE) * easeInOutCubic((t - end) / SLOWMO_RAMP_OUT);
+            if (t < full) return 1 - (1 - minRate) * easeInOutCubic((t - begin) / SLOWMO_RAMP_IN);
+            if (t < end) return minRate;
+            return minRate + (1 - minRate) * easeInOutCubic((t - end) / SLOWMO_RAMP_OUT);
         }
         function replayStartTime(onset) {
             return onset ? Math.max(0, onset.time - CINEMATIC_LEAD_SECONDS) : 0;
@@ -4835,11 +4842,7 @@
             cameraTween = null;
             // A manual orbit hands the camera back to the user for the rest
             // of the playthrough, once any cinematic shot has taken it.
-            if (cinematicNext > 0 && !cinematicOverride) {
-                cinematicOverride = true;
-                cinematicFollow = null;
-                cinematicReenableBtn.hidden = false;
-            }
+            if (cinematicNext > 0 && cinematicCameraToggle.checked) setCinematicOverride(true);
             // A close-up set the Floor dropdown; the viewer's free orbit is
             // not that floor's framing any more.
             if (cinematicSavedView && floorSelect.value !== 'full') {
@@ -4921,9 +4924,8 @@
             cinematicNext = 0;
             cinematicSavedView = null;   // applyLoadedData reframes the new building itself
             cinematicTriggered = false;
-            cinematicOverride = false;
+            setCinematicOverride(false);
             cinematicFollow = null;
-            cinematicReenableBtn.hidden = true;
             slowMotionRow.hidden = !cinematicOnset;
             replayCollapseBtn.hidden = !cinematicOnset;
             damageView = prepareDamageView(damageData, drawnHeights);
@@ -5103,6 +5105,7 @@
             collapseCache = null;
             comparisonBuffers.clear();
             comparisonModels = null;
+            designIdaAbort?.abort();   // its sweeps belong to the comparison just dropped
             document.getElementById('designComparison').hidden = true;
             identityData = null;
             convergenceRun = null;
@@ -5559,10 +5562,15 @@
 
         const signalBuffers = new Map();
         let linearityLast = null;
+        // One Signals experiment at a time: starting one aborts the other
+        // with a reason ('superposition' | 'sweep' | 'cancel' | 'invalidated'),
+        // and each run resets its own buttons whoever stopped it.
         let experimentAbort = null;
+        let sweepController = null;
+        let linearityController = null;
         let sweepState = null;
         function invalidateSignalExperiments() {
-            experimentAbort?.abort();
+            experimentAbort?.abort('invalidated');
             experimentAbort = null;
             recomputeOverlay.classList.remove('is-active');
             recomputeText.textContent = 'Recomputing';
@@ -5572,32 +5580,50 @@
             linearityNote.textContent = 'Parameters changed; run the test again.';
             sweepNote.textContent = 'Parameters changed; run a new intensity sweep.';
             signalCanvas(linearityCanvas); signalCanvas(sweepCanvas);
-            linearityRunBtn.disabled = false; sweepRunBtn.disabled = false; sweepCancelBtn.disabled = true;
+            linearityRunBtn.disabled = false; linearityCancelBtn.disabled = true;
+            sweepRunBtn.disabled = false; sweepCancelBtn.disabled = true;
         }
 
         async function experimentResponse(params, signal, cacheBuffer = false) {
             const key = JSON.stringify(params);
             if (cacheBuffer && signalBuffers.has(key)) return signalBuffers.get(key);
-            const response = await fetch(COMPUTE_URL, {
+            // Aborting the fetch alone leaves the server solving (minutes for a
+            // nonlinear level) and slowing whatever runs next; stop it too.
+            const runId = crypto.randomUUID();
+            const cancelServerRun = () => fetch(COMPUTE_URL.replace(/compute$/, 'cancel'), {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(params), signal,
-            });
-            if (!response.ok) throw new Error(`/compute returned ${response.status}`);
-            const buffer = await response.arrayBuffer();
+                body: JSON.stringify({ run_id: runId }), keepalive: true,
+            }).catch(() => {});
+            signal.addEventListener('abort', cancelServerRun, { once: true });
+            let buffer;
+            try {
+                const response = await fetch(COMPUTE_URL, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...params, run_id: runId }), signal,
+                });
+                if (!response.ok) throw new Error(`/compute returned ${response.status}`);
+                buffer = await response.arrayBuffer();
+            } finally {
+                signal.removeEventListener('abort', cancelServerRun);
+            }
             if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
             if (cacheBuffer) signalBuffers.set(key, buffer);
             return buffer;
         }
 
+        linearityCancelBtn.addEventListener('click', () => linearityController?.abort('cancel'));
         linearityRunBtn.addEventListener('click', async () => {
-            if (experimentAbort) experimentAbort.abort();
-            const controller = experimentAbort = new AbortController();
+            experimentAbort?.abort('superposition');
+            const controller = experimentAbort = linearityController = new AbortController();
             const mode = linearityMode.value, axis = spectrumAxis, floor = spectrumFloorIndex;
             const a = Math.min(10, INTENSITY_STEPS[parseInt(intensitySlider.value, 10)]);
             const base = { ...requestParams(folderSelect.value), nonlinear: mode === 'nonlinear',
                 torsion: mode === 'nonlinear' && torsionToggle.checked,
                 hftd_max_iterations: 200, analysis_trace: { axis, floor } };
-            linearityRunBtn.disabled = true;
+            // Both responses already cached: the same verdict comes back at
+            // once, so say so rather than look like nothing ran.
+            const cached = [a, 2 * a].every(s => signalBuffers.has(JSON.stringify({ ...base, intensity_scale: s })));
+            linearityRunBtn.disabled = true; linearityCancelBtn.disabled = false;
             recomputeText.textContent = 'Testing superposition'; recomputeOverlay.classList.add('is-active');
             try {
                 const first = decodeSignalResponse(await experimentResponse({ ...base, intensity_scale: a }, controller.signal, true), axis, floor);
@@ -5608,13 +5634,18 @@
                     const error = superpositionError(first.relative, second.relative);
                     drawLinearity(first.relative, second.relative);
                     linearityLast = [first.relative, second.relative]; // redrawn on reveal/resize (spec 19)
-                    linearityNote.textContent = `a=${a.toPrecision(3)}× · max|u₂ₐ − 2uₐ| / max|u₂ₐ| = ${error.toExponential(8)}`;
+                    linearityNote.textContent = `a=${a.toPrecision(3)}× · max|u₂ₐ − 2uₐ| / max|u₂ₐ| = ${error.toExponential(8)}`
+                        + (cached ? ' · cached result (parameters unchanged)' : '');
                 }
             } catch (error) {
-                if (error.name !== 'AbortError') linearityNote.textContent = error.message;
+                if (!controller.signal.aborted) linearityNote.textContent = error.message;
             } finally {
+                linearityRunBtn.disabled = false;
+                if (linearityController === controller) { linearityController = null; linearityCancelBtn.disabled = true; }
+                if (controller.signal.reason === 'sweep') linearityNote.textContent = 'Stopped for the intensity sweep; run the test again.';
+                else if (controller.signal.reason === 'cancel') linearityNote.textContent = 'Cancelled; run the test again.';
                 if (experimentAbort === controller) {
-                    experimentAbort = null; linearityRunBtn.disabled = false;
+                    experimentAbort = null;
                     recomputeOverlay.classList.remove('is-active'); recomputeText.textContent = 'Recomputing';
                 }
             }
@@ -5662,26 +5693,22 @@
             ctx.fillText('peak drift ratio', 32, 19); ctx.fillText('intensity →', w - 88, h - 4);
         }
 
-        sweepCancelBtn.addEventListener('click', () => {
-            if (sweepState) sweepState.cancelled = true;
-            experimentAbort?.abort();
-        });
+        sweepCancelBtn.addEventListener('click', () => sweepController?.abort('cancel'));
         sweepRunBtn.addEventListener('click', async () => {
-            if (experimentAbort) experimentAbort.abort();
-            const controller = experimentAbort = new AbortController();
+            experimentAbort?.abort('sweep');
+            const controller = experimentAbort = sweepController = new AbortController();
             const base = { ...requestParams(folderSelect.value), torsion: torsionToggle.checked,
                 hftd_max_iterations: 200 };
             const axis = spectrumAxis, floor = spectrumFloorIndex;
             const key = JSON.stringify({ base, axis, floor });
-            if (!sweepState || sweepState.key !== key) sweepState = { key, elastic: [], nonlinear: [], cancelled: false };
-            sweepState.cancelled = false;
+            if (!sweepState || sweepState.key !== key) sweepState = { key, elastic: [], nonlinear: [] };
             sweepRunBtn.disabled = true; sweepCancelBtn.disabled = false;
             recomputeOverlay.classList.add('is-active');
             try {
                 for (const nonlinear of [false, true]) {
                     const points = nonlinear ? sweepState.nonlinear : sweepState.elastic;
                     for (let i = points.length; i < SWEEP_LEVELS.length; i++) {
-                        if (sweepState.cancelled || controller.signal.aborted) return;
+                        if (controller.signal.aborted) return;
                         const intensity = SWEEP_LEVELS[i];
                         const kind = nonlinear ? 'Nonlinear' : 'Elastic';
                         recomputeText.textContent = `${kind} sweep ${i + 1}/20`;
@@ -5705,12 +5732,18 @@
                     ? `collapse capacity ${collapsed.intensity.toPrecision(3)}×`
                     : 'no collapse event in this record'}`;
             } catch (error) {
-                if (error.name !== 'AbortError') sweepNote.textContent = error.message;
+                if (!controller.signal.aborted) sweepNote.textContent = error.message;
             } finally {
+                if (sweepController === controller) {
+                    sweepController = null; sweepRunBtn.disabled = false; sweepCancelBtn.disabled = true;
+                }
+                const kept = sweepState ? sweepState.elastic.length + sweepState.nonlinear.length : 0;
+                const why = controller.signal.reason;
+                if (why === 'cancel') sweepNote.textContent = `Cancelled · ${kept} samples retained; Run sweep resumes`;
+                else if (why === 'superposition') sweepNote.textContent = `Paused for the superposition test · ${kept} samples retained; Run sweep resumes`;
                 if (experimentAbort === controller) {
-                    experimentAbort = null; sweepRunBtn.disabled = false; sweepCancelBtn.disabled = true;
+                    experimentAbort = null;
                     recomputeOverlay.classList.remove('is-active'); recomputeText.textContent = 'Recomputing';
-                    if (sweepState?.cancelled) sweepNote.textContent = `Cancelled · ${sweepState.elastic.length + sweepState.nonlinear.length} samples retained`;
                 }
             }
         });
@@ -6762,16 +6795,15 @@
 
             if (isPlaying && !isSeeking) {
                 animTime += delta * speed * slowMotionRate(animTime, cinematicOnset?.time,
-                    slowMotionToggle.checked, reducedMotion.matches);
+                    parseFloat(slowMotionSelect.value), reducedMotion.matches);
                 if (totalDuration > 0) {
                     if (animTime > totalDuration) {
                         animTime = animTime % totalDuration;
                         cinematicNext = 0;
                         restoreCinematicView();   // a new playthrough starts from the viewer's own view
                         cinematicTriggered = false;
-                        cinematicOverride = false;
+                        setCinematicOverride(false);
                         cinematicFollow = null;
-                        cinematicReenableBtn.hidden = true;
                     }
                     const dt = (timeData[1] - timeData[0]) || 0.01;
                     const idx = Math.floor(animTime / dt);
@@ -6995,21 +7027,24 @@
         playBtn.addEventListener('click', togglePlayback);
 
         cinematicCameraToggle.addEventListener('change', () => {
-            if (!cinematicCameraToggle.checked) {
-                if (cinematicNext > 0) cameraTween = null;
-                cinematicFollow = null;
-                cinematicReenableBtn.hidden = true;
-            } else if (cinematicOnset && animTime >= cinematicOnset.leadTime) {
-                // A late toggle arms the next playthrough; it never yanks
-                // the camera back during the current one.
-                cinematicOverride = true;
-                cinematicTriggered = true;
-            } else {
-                cinematicOverride = false;
-                cinematicTriggered = false;
-                cinematicNext = nextShotIndex(cinematicShotList, animTime);
-            }
+            cinematicOverride = false;   // the switch is the viewer's own choice now
+            cinematicReenableBtn.hidden = true;
+            if (cinematicCameraToggle.checked) { syncCinematicToNow(); return; }
+            if (cinematicNext > 0) cameraTween = null;
+            cinematicFollow = null;
+            cinematicTriggered = false;
         });
+        // The viewer took the camera (orbit, floor pick, full view): the
+        // switch shows the cinematic camera off for the rest of this
+        // playthrough, and a new playthrough (loop, Replay, new data) turns
+        // it back on. A switch the viewer turned off stays off.
+        function setCinematicOverride(on) {
+            if (cinematicOverride === on) return;
+            cinematicOverride = on;
+            cinematicCameraToggle.checked = !on;
+            cinematicReenableBtn.hidden = !on;
+            if (on) cinematicFollow = null;
+        }
         // One cinematic shot. The onset and failure close-ups reuse the
         // per-floor framing (a sibling of the whole-building one, so its
         // limits are untouched); the wide shot is the ordinary full view.
@@ -7041,21 +7076,22 @@
             floorSelect.value = v.select;
             tweenCameraTo(v.position, v.target, reducedMotion.matches ? 1 : 900);
         }
-        // After a scrub: show what the cinematic sequence shows at this
-        // moment instead of leaving the camera wherever the fall took it.
-        // Before the first shot, during the wide shot and after the hand-back
-        // that is the viewer's own view; inside the onset close-up it is that
-        // close-up. A scrub into the failure itself still does not take the
-        // camera automatically (Replay does), but a stale close-up is undone.
-        function resyncCinematicCamera() {
-            if (!cinematicCameraToggle.checked || !cinematicShotList.length) return;
-            const failure = cinematicShotList.find(s => s.kind === 'failure');
-            const active = cinematicShotList[cinematicNext - 1];
-            if ((failure && animTime >= failure.startTime) || !active || active.kind !== 'onset') {
-                restoreCinematicView();
+        // Show what the cinematic sequence shows at this record time: the
+        // shot in progress (onset close-up, or the failure close-up and its
+        // fall follow) or, between shots, the viewer's own view. Used when
+        // the camera is switched on mid-run and at the end of a scrub, so a
+        // late switch-on during the collapse still follows the fall.
+        function syncCinematicToNow() {
+            cinematicFollow = null;
+            cinematicTriggered = false;
+            if (!cinematicCameraToggle.checked || cinematicOverride || !cinematicShotList.length) {
+                if (cinematicSavedView) restoreCinematicView();
                 return;
             }
-            takeCinematicShot(active);
+            cinematicNext = nextShotIndex(cinematicShotList, animTime);
+            const active = cinematicShotList[cinematicNext - 1];
+            if (active && (active.kind === 'onset' || active.kind === 'failure')) takeCinematicShot(active);
+            else restoreCinematicView();
         }
         // Where the collapse is, in scene units: the mass-weighted centre of
         // every falling structural body that is active at t -- the detached
@@ -7093,16 +7129,13 @@
             cameraTween = null;
             cinematicFollow = null;
             cinematicTriggered = false;
-            cinematicOverride = false;
-            cinematicReenableBtn.hidden = true;
+            setCinematicOverride(false);
             if (!isPlaying) togglePlayback();
         });
 
         // Per-floor view controls (spec 4, Part B).
         floorSelect.addEventListener('change', (e) => {
-            if (cinematicNext > 0) {
-                cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
-            }
+            if (cinematicNext > 0 && cinematicCameraToggle.checked) setCinematicOverride(true);
             cinematicSavedView = null;   // the viewer chose a view; nothing to hand back
             const val = e.target.value;
             if (val === 'full') {
@@ -7112,21 +7145,14 @@
             }
         });
         backToFullViewBtn.addEventListener('click', () => {
-            if (cinematicNext > 0) {
-                cinematicOverride = true; cinematicFollow = null; cinematicReenableBtn.hidden = false;
-            }
+            if (cinematicNext > 0 && cinematicCameraToggle.checked) setCinematicOverride(true);
             cinematicSavedView = null;   // the viewer chose a view; nothing to hand back
             floorSelect.value = 'full';
             frameCameraToFullBuilding();
         });
         cinematicReenableBtn.addEventListener('click', () => {
-            // Past the lead point, re-arm the next playthrough only. Do not
-            // pull the current user-owned camera back toward falling debris.
-            cinematicOverride = !!cinematicOnset && animTime >= cinematicOnset.leadTime;
-            cinematicTriggered = cinematicOverride;
-            if (!cinematicOverride) cinematicNext = nextShotIndex(cinematicShotList, animTime);
-            cinematicFollow = null;
-            cinematicReenableBtn.hidden = true;
+            cinematicCameraToggle.checked = true;
+            cinematicCameraToggle.dispatchEvent(new Event('change'));
         });
 
         // --- Signals panel wiring (spec 6/9/17; workspace, spec 19) ---
@@ -7373,12 +7399,11 @@
             if (cinematicOnset) {
                 cameraTween = null;
                 cinematicFollow = null;
-                // A scrub before the lead starts a new playthrough. A scrub
-                // past it skips the automatic shot; Replay explicitly re-arms it.
-                cinematicTriggered = animTime >= cinematicOnset.leadTime;
-                cinematicOverride = cinematicTriggered;
+                // Shots wait for the release (syncCinematicToNow); a scrub
+                // back before the first shot starts a new playthrough.
+                cinematicTriggered = false;
                 cinematicNext = nextShotIndex(cinematicShotList, animTime);
-                cinematicReenableBtn.hidden = true;
+                if (cinematicNext === 0) setCinematicOverride(false);
             }
             if (totalDuration > 0) {
                 const dt = (timeData[1] - timeData[0]) || 0.01;
@@ -7389,8 +7414,7 @@
         });
         seekSlider.addEventListener('change', () => {
             isSeeking = false;
-            if (cinematicOnset && !cinematicOverride) resyncCinematicCamera();
-            else if (cinematicOnset && cinematicSavedView) restoreCinematicView();
+            if (cinematicOnset) syncCinematicToNow();
         });
 
         // Spec 19: the renderer follows the scene cell. Panels opening or
