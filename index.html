@@ -4402,8 +4402,9 @@
         // --- Load data for a folder ---
         async function loadFolderData(folder) {
             if (!folder) return;
-            progressEl.style.display = 'block';
-            progressEl.textContent = `⏳ loading ${folder}…`;
+            // Same stacked-floors loader as a live recompute.
+            startElapsed('Loading record');
+            recomputeOverlay.classList.add('is-active');
 
             try {
                 const metaUrl = `out/${folder}/building_data.json`;
@@ -4516,13 +4517,16 @@
                     groundAccel: groundAccelFile,
                 });
                 holdElastic(folder, floorX, floorY, groundX, groundY, time); // spec 14 C8
-                progressEl.style.display = 'none';
                 console.log(`✅ Loaded ${folder} (${numStories} floors, ${totalFrames} frames)`);
             } catch (err) {
                 console.error('❌ Error loading folder:', err);
                 progressEl.textContent = `❌ ${err.message}`;
                 progressEl.style.color = '#ff6b6b';
+                progressEl.style.display = 'block';
                 setTimeout(() => { progressEl.style.display = 'none'; }, 5000);
+            } finally {
+                recomputeOverlay.classList.remove('is-active');
+                stopElapsed();
             }
         }
 
