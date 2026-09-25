@@ -8,6 +8,7 @@ import re
 import os
 import sys
 import copy
+import threading
 from collections import namedtuple
 from time import perf_counter
 from types import SimpleNamespace
@@ -1661,6 +1662,26 @@ class _HFTDConvolution:
 
 
 
+class AnalysisCancelled(Exception):
+    """A nonlinear solve stopped because its caller asked it to."""
+
+
+# server.py's /compute installs a threading.Event here for the request's own
+# thread; the fixed-point loops poll it once per iteration. Offline runs never
+# set it, so they are unaffected.
+_cancel = threading.local()
+
+
+def set_cancel_event(event):
+    _cancel.event = event
+
+
+def _check_cancelled():
+    event = getattr(_cancel, 'event', None)
+    if event is not None and event.is_set():
+        raise AnalysisCancelled()
+
+
 def _causal_fft_predictor(building, base, constitutive, convolution, dt, max_iterations):
     """Causal block predictor for the whole-record FFT fixed point.
 
@@ -1698,6 +1719,7 @@ def _causal_fft_predictor(building, base, constitutive, convolution, dt, max_ite
         size = end - start
         trial = np.repeat(force[:, start-1:start], size, axis=1) if start else np.zeros((base.shape[0], size))
         for _ in range(max_iterations):
+            _check_cancelled()
             total_iterations += 1
             modal = b.phi.T @ trial
             correction = b.phi @ irfft(local_kernel * rfft(modal, n=local_length, axis=1), n=local_length, axis=1)[:, :size]
@@ -1759,6 +1781,7 @@ def _hftd_fixed_point(building, base, constitutive, convolution, dt, p, dy_min, 
     causality_error = 0.
     u=base.copy()
     for iteration in range(1,int(p['hftd_max_iterations'])+1):
+        _check_cancelled()
         if iteration == 3:
             predicted, predictor_iterations = _causal_fft_predictor(
                 building, base, constitutive, convolution, dt, int(p['hftd_max_iterations']))

@@ -754,7 +754,11 @@ is opt-in (see Spec 12 below).
 Open **Setup → Analysis** and press **Run collapse analysis**. This sends
 one `/compute` request with `nonlinear: true`. Live sliders still run the
 elastic model; changing a parameter or record invalidates the nonlinear
-cache. The result adds a `collapse` JSON header, including convergence,
+cache. **Cancel analysis** (shown while it runs) stops the run: the request
+carries a `run_id`, and `POST /cancel {run_id}` makes the server's
+fixed-point loop stop at its next iteration (HTTP 499), so an abandoned
+solve never competes with the next one. Changing a setting mid-run cancels
+the same way. The result adds a `collapse` JSON header, including convergence,
 per-story criterion times, per-column ultimate-drift times and residual
 drifts. It adds no binary payload blocks or new damage animation. A failed
 iteration reports numerical failure and preserves the previous valid view.
