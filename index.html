@@ -255,6 +255,7 @@
                     <button type="button" class="help-btn" data-help="analysis" aria-label="Help: Analysis"><span aria-hidden="true">i</span></button>
                 </div>
                 <button id="runCollapseBtn" type="button" class="btn primary wide">Run collapse analysis</button>
+                <button id="cancelCollapseBtn" type="button" class="btn wide" hidden>Cancel analysis</button>
                 <div class="field">
                     <div class="field-row"><label for="intensitySlider">Analysis intensity ×</label><span class="field-value" id="intensityLabel">1×</span></div>
                     <input type="range" id="intensitySlider" min="0" max="12" step="1" value="4" />
@@ -671,6 +672,7 @@
         }
         const softGroundStoryToggle = document.getElementById('softGroundStoryToggle');
         const runCollapseBtn = document.getElementById('runCollapseBtn');
+        const cancelCollapseBtn = document.getElementById('cancelCollapseBtn');
         const softGroundStoryLabel = document.getElementById('softGroundStoryLabel');
         const torsionToggle = document.getElementById('torsionToggle');
         const torsionLabel = document.getElementById('torsionLabel');
@@ -5115,6 +5117,17 @@
             if (liveDebounceTimer) clearTimeout(liveDebounceTimer);
             liveRecompute(folderSelect.value, false, true);
         });
+        // Aborting the request also stops the server's solve (see liveRecompute).
+        // Nothing was applied yet, so the previous building and status stay.
+        let statusBeforeCollapseRun = 'idle';
+        cancelCollapseBtn.addEventListener('click', () => {
+            liveAbortController?.abort();
+            recomputeOverlay.classList.remove('is-active');
+            stopElapsed();
+            runCollapseBtn.disabled = false;
+            setAnalysisStatus(statusBeforeCollapseRun);
+            announce('Collapse analysis cancelled');
+        });
 
         const comparisonBuffers = new Map();
         // The collapse demo's /compute response, saved once in out/collapse_demo/
@@ -5170,6 +5183,22 @@
                                         'stiffness_ratio', 'column_damage'];
             }
             const cacheKey = JSON.stringify(params);
+            // A collapse solve runs for minutes in its own server thread, so any
+            // abort (Cancel, a settings change, a newer request) must tell the
+            // server too, or the orphaned solve competes with the next run.
+            const runId = nonlinear ? crypto.randomUUID() : null;
+            const cancelServerRun = () => {
+                cancelCollapseBtn.hidden = true;
+                fetch(COMPUTE_URL.replace(/compute$/, 'cancel'), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ run_id: runId }), keepalive: true,
+                }).catch(() => {});
+            };
+            if (nonlinear) {
+                if (analysisState !== 'running') statusBeforeCollapseRun = analysisState;
+                signal.addEventListener('abort', cancelServerRun, { once: true });
+                cancelCollapseBtn.hidden = false;
+            }
             runCollapseBtn.disabled = nonlinear;
             revertOnDismiss = false;
             clearRecomputeError();
@@ -5188,7 +5217,7 @@
                     : demoRes ?? await fetch(COMPUTE_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(params),
+                    body: JSON.stringify(runId ? { ...params, run_id: runId } : params),
                     signal,
                 });
                 if (res.status === 422) {
@@ -5385,6 +5414,8 @@
             } finally {
                 // An aborted request must not stop the NEWER request's counter.
                 if (!signal.aborted) {
+                    signal.removeEventListener('abort', cancelServerRun);
+                    if (nonlinear) cancelCollapseBtn.hidden = true;
                     runCollapseBtn.disabled = false;
                     stopElapsed();
                 }
