@@ -1074,7 +1074,15 @@ nonlinear restoring-force correction feeds the existing linear FFT kernel.
 The on-demand superposition experiment measures the difference between the
 computed `u_2a` and `2u_a` traces; its elastic control is linear while yielded
 responses can differ substantially. A cancellable 20-level intensity sweep
-plots the elastic control and measured nonlinear response as requests finish.
+plots the elastic control and measured nonlinear response as requests finish. One
+experiment runs at a time: starting the superposition test pauses a running
+sweep (Run sweep resumes from the retained levels) and vice versa, and a
+cancelled or interrupted level also stops its solve on the server. The
+superposition test has its own Cancel, and a re-run with unchanged parameters
+reuses the two cached responses and says "cached result". The sweep's
+nonlinear half is compute-bound: for the collapse demo the 14 levels up to
+3× take under a second each, while the yielding and collapsing levels take
+10–60 s each (about 3.5 minutes in all).
 
 The corrected identity is compared after aligning physical-time histories on
 a common display grid: the elastic base and nonlinear correction use separate
@@ -1193,10 +1201,14 @@ floor shatters. About six seconds (record time) after the failure the camera
 returns to the view you had before the first close-up; the zoom-out between
 the two close-ups returns there too. Scrubbing back to an earlier moment shows
 what the sequence shows at that moment (your view, or the onset close-up)
-rather than leaving the camera on the rubble. Slow motion and Replay still
-centre on the failure. Orbiting,
-choosing a camera focus or pressing Back to full view hands the camera back to
-you for that playthrough.
+rather than leaving the camera on the rubble; scrubbing into the fall picks
+the failure close-up and follow back up. Slow motion and Replay still centre on
+the failure; the slow-motion rate is a choice of Real time, Slow (0.5×, the
+default), Slower (0.3×) or Very slow (0.15×). Orbiting, choosing a camera
+focus or pressing Back to full view hands the camera back to you for that
+playthrough, and the Cinematic camera switch shows it off until the next
+playthrough (loop, Replay or new data) or until you turn it back on. Turning
+it on mid-run, including during the fall, takes the shot in progress at once.
 
 ## Spec 20: structural visual polish
 
