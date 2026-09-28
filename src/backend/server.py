@@ -54,8 +54,9 @@ DEFAULT_COLUMN_DEPTH_X = 1.10  # m
 DEFAULT_COLUMN_DEPTH_Y = 1.10  # m
 DEFAULT_BEAM_DEPTH = 1.50      # m
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(PROJECT_ROOT, "out")
+FRONTEND_DIR = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, "frontend"))
+OUT_DIR = os.path.join(FRONTEND_DIR, "out")
 
 app = Flask(__name__, static_folder=None)
 
@@ -871,12 +872,12 @@ def _compute(body):
 
 @app.route("/")
 def index():
-    return send_from_directory(PROJECT_ROOT, "index.html")
+    return send_from_directory(FRONTEND_DIR, "index.html")
 
 
 @app.route("/<path:path>")
 def static_files(path):
-    return send_from_directory(PROJECT_ROOT, path)
+    return send_from_directory(FRONTEND_DIR, path)
 
 
 if __name__ == "__main__":

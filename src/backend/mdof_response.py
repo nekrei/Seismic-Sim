@@ -4171,8 +4171,10 @@ def save_building_data(filename, building_x, building_y, furniture_meta=None,
 
 
 if __name__ == "__main__":
-    data_dir = "data"
-    out_dir = "out"
+    _root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         os.pardir, os.pardir)
+    data_dir = os.path.normpath(os.path.join(_root, "data"))
+    out_dir = os.path.normpath(os.path.join(_root, "src", "frontend", "out"))
 
     if not os.path.exists(data_dir):
         print(f"Error: data directory '{data_dir}' not found.")

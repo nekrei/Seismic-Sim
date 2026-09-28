@@ -18,7 +18,8 @@ from matplotlib.ticker import AutoMinorLocator
 # ------------------------------------------------------------
 #  Configuration
 # ------------------------------------------------------------
-OUT_DIR = "out"               # directory containing earthquake folders
+OUT_DIR = os.path.normpath(os.path.join(   # directory containing earthquake folders
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, "frontend", "out"))
 PLOT_Y_AXIS = False           # set True to also plot Y-component (if available)
 
 # ------------------------------------------------------------
