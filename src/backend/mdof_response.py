@@ -2260,7 +2260,7 @@ def ground_velocity(disp, dt):
 
     The trace is extended evenly (d, reversed d) first, so the periodic
     signal the DFT sees has no jump at the wrap. Never a time-domain
-    difference of the displacement (spec 13 C-2, AGENTS.md).
+    difference of the displacement (spec 13 C-2, the project notes).
     """
     d = np.asarray(disp, dtype=float)
     ext = np.concatenate([d, d[::-1]])
@@ -3368,7 +3368,7 @@ class MDOF_ShearBuilding:
         Shared by both the offline __main__ pipeline and server.py's
         /compute so the two callers never duplicate this logic --  mirrors
         compute_response()'s own "one implementation, two callers" rule
-        (see AGENTS.md).
+        (see the project notes).
         """
         responses = self.compute_furniture_response()
         q = furniture_decimation(self.dt, target_rate)
@@ -4185,7 +4185,7 @@ if __name__ == "__main__":
     # index.html's buildingParamsAtDefault() uses equality against these to
     # decide whether out/'s precomputed static files are still valid for
     # the current slider positions -- a silent mismatch here reproduces
-    # the exact desync bug spec 3 already had to fix once (see AGENTS.md).
+    # the exact desync bug spec 3 already had to fix once (see the project notes).
     # Calibrated (dev_scripts/calibrate_frame.py) so N=7's T1 lands at
     # ~1.06s (within the plan's 0.6-1.2s target band) and rho ~= 0.48 (within
     # the 0.3-0.8 band needed for the Beam depth slider to visibly matter).

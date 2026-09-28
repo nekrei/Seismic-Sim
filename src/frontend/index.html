@@ -1240,7 +1240,7 @@
 
         // --- Frequency-domain spectrum helpers (spec 6, frequency-domain
         // panel) -- hand-rolled radix-2 FFT rather than pulling in a
-        // library. This project's course context (AGENTS.md) is why: the
+        // library. This project's course context (project notes) is why: the
         // whole point of the drawer these feed is to make the DFT/FFT
         // machinery this project already runs *visible*, not just call a
         // black box that happens to compute it. The Python side gets
@@ -3345,7 +3345,7 @@
         // proportional (~8% of plate depth at default, ~11% at 2000 sq ft)
         // rather than fixing it; it only shows at near-M9 peaks. Tightening
         // it means loosening FURNITURE_MARGIN/GRID placement, never shrinking
-        // FURNITURE_SCALE (see AGENTS.md).
+        // FURNITURE_SCALE (see the project notes).
         const FURNITURE_RENDER_CLAMP_FRAC = 0.25;
         function furnitureRenderClamp() {
             return FURNITURE_RENDER_CLAMP_FRAC * currentFootprintD;
@@ -3486,7 +3486,7 @@
         // Frame-geometry fields are defensively gated (fall back to the
         // JS-side defaults) since the separately-deployed backend
         // (seismic-sim-backend) may not have been mirrored yet with spec
-        // 5's changes -- see AGENTS.md's standing mirror-sync rule. An
+        // 5's changes -- see the project notes' standing mirror-sync rule. An
         // un-mirrored backend's /compute response simply won't have these
         // fields, and this project should degrade gracefully rather than
         // throw.
@@ -3554,7 +3554,7 @@
         // change the building, never the record), so it's fetched once per
         // record and reused across every live-slider recompute for that same
         // record. Frontend-only artifact -- NOT mirrored to seismic-sim-backend
-        // (see AGENTS.md) -- so a 404 here just disables the drawer, never a
+        // (see the project notes) -- so a 404 here just disables the drawer, never a
         // hard failure.
         async function loadGroundSpectrum(folder) {
             if (groundSpectrumRecord === folder && groundSpectrum) return; // already cached for this record
@@ -3709,7 +3709,7 @@
 
         // Live Input trace under non-default Earthquake Parameters (spec 7,
         // Part B4). groundXData/groundYData hold ground *displacement*
-        // (AGENTS.md), but the transfer function's convention is ground
+        // (project notes), but the transfer function's convention is ground
         // *acceleration* A_g(jw) -- so this recovers the acceleration
         // spectrum from the displacement signal via frequency-domain double
         // differentiation (|FFT(accel)| = omega^2 * |FFT(disp)|), the same
@@ -5320,7 +5320,7 @@
                 // advertising a `furniture` block. This matters once the
                 // separately-deployed backend exists: until
                 // seismic-sim-backend is manually mirrored with spec 5's
-                // changes (AGENTS.md's standing rule), its /compute
+                // changes (the project notes' standing rule), its /compute
                 // response won't have this field, and this degrades to "no
                 // furniture sway" instead of throwing.
                 let furniture = null;
