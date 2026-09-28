@@ -2,7 +2,7 @@
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:16162e,55:b5532f,100:f2c14e&height=220&section=header&text=Lucky%20Seismic%20Strike&fontSize=58&fontColor=ffffff&fontAlignY=38&desc=Real%20earthquakes%20%C2%B7%20real%20structural%20physics%20%C2%B7%20in%20your%20browser&descAlignY=60&descSize=17&animation=fadeIn" width="100%" alt="Lucky Seismic Strike" />
 
-<img src="docs/media/ascii-banner.gif" width="62%" alt="LUCKY SEISMIC STRIKE in ASCII art, shaking with the real Kocaeli 1999 ground motion" />
+<img src=".github/assets/ascii-banner.gif" width="62%" alt="LUCKY SEISMIC STRIKE in ASCII art, shaking with the real Kocaeli 1999 ground motion" />
 
 <a href="https://nekrei.github.io/Seismic-Sim/">
   <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=500&size=20&duration=3200&pause=900&color=F2C14E&center=true&vCenter=true&width=640&lines=Pick+a+building.+Pick+a+real+earthquake.;Watch+every+floor+move+the+way+the+math+says.;Solved+in+the+frequency+domain+with+the+FFT.;Push+it+too+far+and+watch+it+collapse." alt="Typing intro" />
@@ -21,7 +21,7 @@
   <img src="https://img.shields.io/badge/build%20step-none-2ea44f" alt="No build step" />
 </p>
 
-<img src="docs/media/ascii-building.gif" width="80%" alt="ASCII 7-story building swaying with its real computed floor displacements" />
+<img src=".github/assets/ascii-building.gif" width="80%" alt="ASCII 7-story building swaying with its real computed floor displacements" />
 <br /><sub>Every frame is the solver's real output: the default 7-story frame under Kocaeli 1999 (Aydin station).</sub>
 
 </div>
@@ -44,12 +44,12 @@ the physics is real and the interface is approachable.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/media/signals.gif" alt="Signals drawer" /><br/><b>Signals.</b> Ground acceleration, relative floor displacement, spectra and the transfer function, all measured from the solver.</td>
-    <td width="50%"><img src="docs/media/hysteresis.gif" alt="Hysteresis loop" /><br/><b>Hysteresis.</b> Each story's force–drift loop traced live as the columns yield and degrade.</td>
+    <td width="50%"><img src=".github/assets/signals.gif" alt="Signals drawer" /><br/><b>Signals.</b> Ground acceleration, relative floor displacement, spectra and the transfer function, all measured from the solver.</td>
+    <td width="50%"><img src=".github/assets/hysteresis.gif" alt="Hysteresis loop" /><br/><b>Hysteresis.</b> Each story's force–drift loop traced live as the columns yield and degrade.</td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/media/view.gif" alt="Camera views" /><br/><b>Cinematic camera.</b> Close-ups at collapse onset and failure, slow motion, and free orbit.</td>
-    <td width="50%"><img src="docs/media/analysis.gif" alt="Collapse analysis" /><br/><b>Collapse analysis.</b> Nonlinear solve, story detachment, then a rigid-body fall.</td>
+    <td width="50%"><img src=".github/assets/view.gif" alt="Camera views" /><br/><b>Cinematic camera.</b> Close-ups at collapse onset and failure, slow motion, and free orbit.</td>
+    <td width="50%"><img src=".github/assets/analysis.gif" alt="Collapse analysis" /><br/><b>Collapse analysis.</b> Nonlinear solve, story detachment, then a rigid-body fall.</td>
   </tr>
 </table>
 
@@ -68,14 +68,14 @@ the physics is real and the interface is approachable.
 | 📱 **Responsive workspace** | Setup and Signals panels, a playback bar with event markers, in-app help clips and a phone layout. |
 
 <div align="center">
-<img src="docs/media/ascii-collapse.gif" width="70%" alt="ASCII collapse: story 3 yields, detaches, and the block above falls into rubble and dust" />
+<img src=".github/assets/ascii-collapse.gif" width="70%" alt="ASCII collapse: story 3 yields, detaches, and the block above falls into rubble and dust" />
 <br /><sub>Collapse onset → detachment → rigid-body fall. The event times are from the bundled collapse demo.</sub>
 </div>
 
 ## ⚙️ How it works
 
 <div align="center">
-<img src="docs/media/ascii-fft.gif" width="80%" alt="ASCII spectrum: the input spectrum times the building's transfer function gives the output spectrum" />
+<img src=".github/assets/ascii-fft.gif" width="80%" alt="ASCII spectrum: the input spectrum times the building's transfer function gives the output spectrum" />
 <br /><sub>A sliding window of the real record: |X(ω)| × the building's modal transfer function |H(ω)| = |Y(ω)|.</sub>
 </div>
 
@@ -143,7 +143,7 @@ Seismic-Sim/
 ├── index.html              # redirects GitHub Pages to the app
 ├── requirements.txt
 ├── presentation/           # slides (Canva link + PDF)
-├── docs/media/             # README animations
+├── .github/assets/         # README animations
 └── src/
     ├── backend/
     │   ├── mdof_response.py   # the physics: frame model, FFT solver, nonlinear collapse
